@@ -121,6 +121,7 @@ xcodebuild \
   -project "$PROJECT_ROOT/ScreenshotApp.xcodeproj" \
   -scheme ScreenshotApp \
   -configuration "$CONFIGURATION" \
+  -onlyUsePackageVersionsFromResolvedFile \
   -destination 'generic/platform=macOS' \
   -derivedDataPath "$DERIVED_DATA" \
   ARCHS="$USHOT_ARCHITECTURE" \

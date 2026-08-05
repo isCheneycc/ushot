@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-05
+
+### Changed
+
+- Prepared a one-time direct-install transition to the versioned production update feed used by future releases.
+- Replaced the stock Sparkle runtime with a source-auditable hardened build while keeping the official Sparkle 2.9.5 publishing tools.
+
+### Security
+
+- Require the extracted application's semantic version and build number to match the authenticated appcast item before installation.
+- Require every update archive to pass EdDSA verification independently; a matching Developer ID signature cannot replace a failed archive signature.
+- Keep the legacy 0.1.1 feed URL permanently inactive so the previously published updater cannot install future releases.
+
 ## [0.1.1] - 2026-08-05
 
 ### Added
@@ -24,5 +37,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Limited the manual Gatekeeper workaround to removing `com.apple.quarantine` from an official Ushot release instead of clearing every extended attribute.
 - Defined the Sparkle EdDSA private key as release-critical secret material requiring protected storage, an independent encrypted backup and an exercised recovery process.
 
-[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.2
 [0.1.1]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.1

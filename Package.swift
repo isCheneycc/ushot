@@ -12,8 +12,8 @@ let package = Package(
     ],
     dependencies: [
         .package(
-            url: "https://github.com/sparkle-project/Sparkle",
-            exact: "2.9.5"
+            url: "https://github.com/isCheneycc/Sparkle",
+            exact: "2.9.5-ushot.2"
         )
     ],
     targets: [

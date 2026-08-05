@@ -30,6 +30,7 @@ done
 release_validate_version "$VERSION"
 release_validate_build_number "$BUILD_NUMBER"
 release_validate_tag "$TAG" "$VERSION"
+release_validate_feed_release_identity "$VERSION" "$BUILD_NUMBER"
 release_validate_release_notes_source "$RELEASE_NOTES_PATH"
 release_require_command xmllint
 xmllint --noout "$APPCAST_PATH"
@@ -41,6 +42,7 @@ CHANNEL_XPATH="/*[local-name()='rss' and namespace-uri()='']/*[local-name()='cha
 [[ "$(xmllint --xpath "count($CHANNEL_XPATH)" "$APPCAST_PATH")" == "1" \
     && "$(xmllint --xpath "count(//*[local-name()='channel'])" "$APPCAST_PATH")" == "1" ]] \
   || release_die "Appcast must contain exactly one canonical RSS channel."
+release_validate_canonical_appcast_channel "$APPCAST_PATH"
 
 [[ "$(xmllint --xpath "count(//*[local-name()='item']/*[local-name()='link'])" "$APPCAST_PATH")" == "0" ]] \
   || release_die "Appcast items must not contain informational links."
@@ -68,6 +70,8 @@ for ((index = 1; index <= ITEM_COUNT; index++)); do
   [[ "$(xmllint --xpath "count($ITEM_XPATH/*[local-name()='enclosure' and namespace-uri()=''])" "$APPCAST_PATH")" == "1" \
       && "$(xmllint --xpath "count($ITEM_XPATH/*[local-name()='enclosure'])" "$APPCAST_PATH")" == "1" ]] \
     || release_die "Appcast item $index must contain exactly one enclosure."
+  [[ "$(xmllint --xpath "count($ITEM_XPATH/*[local-name()='enclosure']/@*[local-name()='version' or local-name()='shortVersionString'])" "$APPCAST_PATH")" == "0" ]] \
+    || release_die "Appcast item $index must express version identity only in canonical Sparkle child elements."
   [[ "$(xmllint --xpath "count($ITEM_XPATH/*[local-name()='informationalUpdate'])" "$APPCAST_PATH")" == "0" ]] \
     || release_die "Appcast item $index must not be an informational-only update."
   [[ "$(xmllint --xpath "count($ITEM_XPATH/*[local-name()='minimumAutoupdateVersion'])" "$APPCAST_PATH")" == "0" ]] \

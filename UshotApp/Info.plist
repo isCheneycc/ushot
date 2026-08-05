@@ -31,7 +31,7 @@
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>SUFeedURL</key>
-    <string>https://ischeneycc.github.io/ushot/updates/appcast.xml</string>
+    <string>https://ischeneycc.github.io/ushot/updates/v1/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>$(SPARKLE_PUBLIC_ED_KEY)</string>
     <key>SUEnableAutomaticChecks</key>
@@ -45,6 +45,10 @@
     <key>SUVerifyUpdateBeforeExtraction</key>
     <true/>
     <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SURequireExactUpdateVersionIdentity</key>
+    <true/>
+    <key>SURequireEdDSAUpdateArchiveSignature</key>
     <true/>
     <key>SUSignedFeedFailureExpirationInterval</key>
     <integer>0</integer>

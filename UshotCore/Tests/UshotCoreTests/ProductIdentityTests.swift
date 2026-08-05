@@ -15,7 +15,7 @@ final class ProductIdentityTests: XCTestCase {
         )
         XCTAssertEqual(
             ProductIdentity.updateFeedURLString,
-            "https://ischeneycc.github.io/ushot/updates/appcast.xml"
+            "https://ischeneycc.github.io/ushot/updates/v1/appcast.xml"
         )
         XCTAssertEqual(
             Data(base64Encoded: ProductIdentity.sparklePublicEDKey)?.count,

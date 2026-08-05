@@ -69,6 +69,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_BUILD_NUMBER: ${{ inputs.build_number }}
+          PUBLISH_UPDATE_FEED: ${{ inputs.publish_update_feed }}
           EXPECTED_RUN_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -76,6 +77,13 @@ jobs:
             --tag "$RELEASE_TAG" \
             --build-number "$RELEASE_BUILD_NUMBER" \
             --repository "$GITHUB_REPOSITORY"
+          if [[ "$PUBLISH_UPDATE_FEED" == "true" ]]; then
+            source scripts/release-common.sh
+            release_validate_feed_release_identity \
+              "${RELEASE_TAG#v}" \
+              "$RELEASE_BUILD_NUMBER"
+            echo 'release: admitted release identity for versioned feed publication.'
+          fi
 
           HEAD_COMMIT="$(git rev-parse HEAD)"
           [[ "$HEAD_COMMIT" == "$EXPECTED_RUN_SHA" ]] || {
@@ -221,14 +229,11 @@ jobs:
         run: |
           set -euo pipefail
           scripts/download-sparkle-tools.sh >/dev/null
-          ALLOW_FIRST_RELEASE_SEED=NO
-          if [[ "$VERSION" == "0.1.0" && "$BUILD_NUMBER" == "1" ]]; then
-            ALLOW_FIRST_RELEASE_SEED=YES
-          fi
           scripts/fetch-current-appcast.sh \
             --output "$CURRENT_APPCAST" \
             --kind-output "$CURRENT_APPCAST_KIND" \
-            --allow-first-release-seed "$ALLOW_FIRST_RELEASE_SEED"
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER"
 
       - name: Sign and validate the update feed without a repository write token
         if: ${{ inputs.publish_update_feed }}
@@ -237,6 +242,17 @@ jobs:
           SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          source scripts/release-common.sh
+          DERIVED_SPARKLE_PUBLIC_KEY="$(
+            printf '%s' "$SPARKLE_ED25519_PRIVATE_KEY" | \
+              env -u SPARKLE_ED25519_PRIVATE_KEY scripts/derive-sparkle-public-key.swift
+          )"
+          [[ "$DERIVED_SPARKLE_PUBLIC_KEY" == "$USHOT_SPARKLE_PUBLIC_ED_KEY" ]] || {
+            echo 'error: protected release Sparkle private key does not match the public key embedded in Ushot.' >&2
+            exit 1
+          }
+          unset DERIVED_SPARKLE_PUBLIC_KEY
+          echo 'release: verified protected Sparkle private-key identity.'
           SPARKLE_BIN="$(scripts/download-sparkle-tools.sh | tail -n 1)"
           printf '%s' "$SPARKLE_ED25519_PRIVATE_KEY" | \
             env -u SPARKLE_ED25519_PRIVATE_KEY scripts/generate-appcast.sh \
@@ -268,8 +284,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ -s "$PAGES_DIRECTORY/updates/appcast.xml" ]] || {
+          source scripts/release-common.sh
+          [[ -s "$PAGES_DIRECTORY/$USHOT_APPCAST_RELATIVE_PATH" ]] || {
             echo 'error: signed Pages appcast is missing.' >&2
+            exit 1
+          }
+          [[ ! -e "$PAGES_DIRECTORY/$USHOT_LEGACY_APPCAST_RELATIVE_PATH" ]] || {
+            echo 'error: legacy appcast path must remain absent from the Pages payload.' >&2
+            exit 1
+          }
+          [[ "$(find "$PAGES_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == "0" ]] || {
+            echo 'error: Pages payload must not contain symbolic links.' >&2
+            exit 1
+          }
+          [[ "$(find "$PAGES_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == "1" ]] || {
+            echo 'error: Pages payload must contain only the signed versioned appcast.' >&2
             exit 1
           }
 

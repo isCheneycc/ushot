@@ -49,10 +49,14 @@ private enum SparkleUpdateConfigurationError: Error, LocalizedError {
 private struct SparkleUpdateConfiguration {
     static let feedURLString = ProductIdentity.updateFeedURLString
     static let publicEDKey = ProductIdentity.sparklePublicEDKey
+    static let requiredHardeningVersion = 1
 
     let feedURL: URL
 
-    init(bundle: Bundle) throws {
+    init(
+        bundle: Bundle,
+        sparkleBundle: Bundle = Bundle(for: SPUUpdater.self)
+    ) throws {
         guard
             let configuredFeed = bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String,
             configuredFeed == Self.feedURLString,
@@ -77,10 +81,25 @@ private struct SparkleUpdateConfiguration {
         try Self.requireBoolean("SUEnableSystemProfiling", expected: false, in: bundle)
         try Self.requireBoolean("SUVerifyUpdateBeforeExtraction", expected: true, in: bundle)
         try Self.requireBoolean("SURequireSignedFeed", expected: true, in: bundle)
+        try Self.requireBoolean(
+            "SURequireExactUpdateVersionIdentity",
+            expected: true,
+            in: bundle
+        )
+        try Self.requireBoolean(
+            "SURequireEdDSAUpdateArchiveSignature",
+            expected: true,
+            in: bundle
+        )
         try Self.requireInteger(
             "SUSignedFeedFailureExpirationInterval",
             expected: 0,
             in: bundle
+        )
+        try Self.requireInteger(
+            "SUUpdateVersionIdentityHardeningVersion",
+            expected: Self.requiredHardeningVersion,
+            in: sparkleBundle
         )
 
         self.feedURL = feedURL
@@ -317,7 +336,7 @@ final class SparkleUpdateChecker:
         }
 
         AppLog.updates.notice(
-            "Update controller started: feedHost=\(self.configuration.feedURL.host ?? "unknown", privacy: .public), manualOnly=true, automaticDownloads=false, systemProfile=false, verifyBeforeExtraction=true, signedFeed=true, signedFeedFailureExpirationSeconds=0"
+            "Update controller started: feedHost=\(self.configuration.feedURL.host ?? "unknown", privacy: .public), manualOnly=true, automaticDownloads=false, systemProfile=false, verifyBeforeExtraction=true, signedFeed=true, exactVersionIdentity=true, independentArchiveEdDSA=true, hardeningVersion=\(SparkleUpdateConfiguration.requiredHardeningVersion, privacy: .public), signedFeedFailureExpirationSeconds=0"
         )
     }
 
