@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="420" viewBox="0 0 1200 420"
+     role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">Ushot — Capture. Annotate. Pin.</title>
+  <desc id="hero-desc">A native, local-first screenshot utility for Apple silicon Macs, illustrated with a precise region selection, annotation stroke, and capture toolbar.</desc>
+
+  <rect width="1200" height="420" rx="28" fill="#0E0F11"/>
+
+  <g id="title-block"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif">
+    <text x="64" y="92" fill="#F5F5F7" font-size="68" font-weight="730" letter-spacing="-2">Ushot</text>
+    <text x="64" y="148" fill="#F5F5F7" font-size="34" font-weight="650" letter-spacing="-0.6">Capture. Annotate. Pin.</text>
+    <text x="64" y="204" fill="#8E8E93" font-size="22" font-weight="450">A native, local-first screenshot utility</text>
+    <text x="64" y="234" fill="#8E8E93" font-size="22" font-weight="450">for Apple silicon Macs.</text>
+
+    <g id="metadata" font-size="20" font-weight="560" fill="#F5F5F7">
+      <rect x="64" y="268" width="119" height="42" rx="21" fill="#2C2C2E"/>
+      <text x="123.5" y="295" text-anchor="middle">macOS 14+</text>
+
+      <rect x="193" y="268" width="156" height="42" rx="21" fill="#2C2C2E"/>
+      <text x="271" y="295" text-anchor="middle">Apple Silicon</text>
+
+      <rect x="359" y="268" width="145" height="42" rx="21" fill="#2C2C2E"/>
+      <text x="431.5" y="295" text-anchor="middle">Apache-2.0</text>
+
+      <rect x="514" y="268" width="150" height="42" rx="21" fill="#2C2C2E"/>
+      <text x="589" y="295" text-anchor="middle">Direct Preview</text>
+    </g>
+
+    <g id="privacy-note" transform="translate(64 346)">
+      <rect x="2" y="9" width="22" height="18" rx="5" fill="none" stroke="#0A84FF" stroke-width="2.5"/>
+      <path d="M7 10V7a6 6 0 0 1 12 0v3" fill="none" stroke="#0A84FF" stroke-width="2.5" stroke-linecap="round"/>
+      <circle cx="13" cy="18" r="2" fill="#0A84FF"/>
+      <text x="38" y="27" fill="#F5F5F7" font-size="22" font-weight="560">Pixels stay on this Mac.</text>
+    </g>
+  </g>
+
+  <g id="capture-proof">
+    <rect x="704" y="38" width="448" height="344" rx="26" fill="#2C2C2E" fill-opacity="0.38" stroke="#2C2C2E" stroke-width="2"/>
+
+    <g id="window-chrome">
+      <circle cx="734" cy="64" r="5" fill="#8E8E93" fill-opacity="0.85"/>
+      <circle cx="752" cy="64" r="5" fill="#8E8E93" fill-opacity="0.55"/>
+      <circle cx="770" cy="64" r="5" fill="#8E8E93" fill-opacity="0.35"/>
+      <path d="M704 82H1152" stroke="#2C2C2E" stroke-width="2"/>
+    </g>
+
+    <g id="frozen-desktop">
+      <rect x="730" y="96" width="396" height="184" rx="16" fill="#2C2C2E" fill-opacity="0.58"/>
+      <rect x="748" y="112" width="172" height="148" rx="12" fill="#8E8E93" fill-opacity="0.12"/>
+      <rect x="940" y="112" width="168" height="66" rx="12" fill="#8E8E93" fill-opacity="0.16"/>
+      <rect x="940" y="190" width="168" height="70" rx="12" fill="#8E8E93" fill-opacity="0.10"/>
+      <path d="M766 136H892M766 154H860M958 136H1088M958 214H1088" stroke="#8E8E93" stroke-width="5" stroke-linecap="round" stroke-opacity="0.28"/>
+    </g>
+
+    <g id="selection">
+      <rect x="780" y="112" width="286" height="148" fill="none" stroke="#0A84FF" stroke-width="3"/>
+      <rect x="775" y="107" width="10" height="10" rx="2" fill="#0E0F11" stroke="#0A84FF" stroke-width="2.5"/>
+      <rect x="918" y="107" width="10" height="10" rx="2" fill="#0E0F11" stroke="#0A84FF" stroke-width="2.5"/>
+      <rect x="1061" y="107" width="10" height="10" rx="2" fill="#0E0F11" stroke="#0A84FF" stroke-width="2.5"/>
+      <rect x="775" y="181" width="10" height="10" rx="2" fill="#0E0F11" stroke="#0A84FF" stroke-width="2.5"/>
+      <rect x="1061" y="181" width="10" height="10" rx="2" fill="#0E0F11" stroke="#0A84FF" stroke-width="2.5"/>
+      <rect x="775" y="255" width="10" height="10" rx="2" fill="#0E0F11" stroke="#0A84FF" stroke-width="2.5"/>
+      <rect x="918" y="255" width="10" height="10" rx="2" fill="#0E0F11" stroke="#0A84FF" stroke-width="2.5"/>
+      <rect x="1061" y="255" width="10" height="10" rx="2" fill="#0E0F11" stroke="#0A84FF" stroke-width="2.5"/>
+    </g>
+
+    <g id="annotations" fill="none" stroke="#0A84FF" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M814 228C834 178 866 232 894 190C906 172 918 180 926 193"/>
+      <path d="M916 224L1018 142"/>
+      <path d="M994 145L1018 142L1011 165"/>
+    </g>
+
+    <g id="annotation-toolbar">
+      <rect x="754" y="302" width="348" height="60" rx="18" fill="#2C2C2E" stroke="#8E8E93" stroke-opacity="0.24"/>
+
+      <g transform="translate(770 312)" fill="none" stroke="#F5F5F7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 5L27 22L17 24L12 33Z"/>
+      </g>
+
+      <rect x="812" y="310" width="44" height="44" rx="12" fill="#0A84FF"/>
+      <g transform="translate(822 320)" fill="none" stroke="#F5F5F7" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 25L8 16L21 3L27 9L14 22Z"/>
+        <path d="M8 16L14 22"/>
+      </g>
+
+      <g transform="translate(866 316)" fill="none" stroke="#F5F5F7" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 29L29 7"/>
+        <path d="M18 7H29V18"/>
+      </g>
+
+      <rect x="914" y="321" width="24" height="22" rx="3" fill="none" stroke="#F5F5F7" stroke-width="2.4"/>
+      <circle cx="970" cy="332" r="12" fill="none" stroke="#F5F5F7" stroke-width="2.4"/>
+
+      <text x="1012" y="341" fill="#F5F5F7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="24" font-weight="650">A</text>
+      <path d="M1048 316V348" stroke="#8E8E93" stroke-width="1.5" stroke-opacity="0.65"/>
+
+      <g transform="translate(1062 317)" fill="none" stroke="#F5F5F7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 4H25L22 15L29 21H4L11 15Z"/>
+        <path d="M16.5 21V34"/>
+      </g>
+    </g>
+  </g>
+</svg>

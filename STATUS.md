@@ -75,6 +75,7 @@ Last updated: 2026-08-05
 - Phase 8 open-source/update integration is in progress. The permanent product identity is now `Ushot`, bundle identifier `io.github.ischeneycc.ushot`, repository `https://github.com/isCheneycc/ushot` and license Apache-2.0.
 - The release direction is confirmed as a manual-only Sparkle updater using `https://ischeneycc.github.io/ushot/updates/appcast.xml`, signed embedded restricted-Markdown descriptions and official GitHub Release enclosures. The complete appcast and every archive require EdDSA validation; note links/external destinations, detached release-note requests, item links and deltas are rejected. Exact RSS/Sparkle namespaces are enforced, and both version and build must strictly increase across every retained signed item. Automatic checking/downloading and system-profile submission are disabled by contract.
 - The initial public distribution intentionally has no Developer ID or notarization and uses an ad-hoc arm64 build. The public build/sign/package pipeline and embedded public key are implemented and locally validated. The independent encrypted EdDSA key backup/recovery drill and complete clean-account old-version → new-version matrix remain release work; no public self-update success is claimed yet.
+- Release publication now has two explicit gates. The default protected-workflow input publishes, validates and anonymously download-verifies all five GitHub Release assets while skipping all production-feed, Sparkle-private-key and Pages work. Ushot 0.1.0 can use this direct-download path; `publish_update_feed=true` remains blocked by the key-recovery drill, the clean-account updater matrix and Sparkle's client-side enclosed-version gap.
 - The original real-display/manual capture matrix also remains validation work.
 
 ## Environment
@@ -145,6 +146,7 @@ Last updated: 2026-08-05
 
 ## Known Issues
 
+- The direct-download 0.1.0 preview intentionally has no production appcast. Its **Check for Updates…** command therefore reports a visible feed error until a later, independently approved feed deployment; the existence of the GitHub Release does not imply updater readiness.
 - The non-Developer-ID update path has not passed the mandatory old-version → new-version matrix. Sparkle helper loading under the actual public ad-hoc build, tamper rejection, atomic replacement/relaunch, quarantine behavior and Screen Recording/Accessibility authorization continuity are unverified and release-blocking.
 - The restricted embedded-notes appcast contract has local script evidence for exact structure, signature verification, no link/external destination, strict version/build monotonicity and fail-closed rejection. It still needs protected-workflow and clean-client runtime evidence for signed-feed status before presentation and no detached-notes request.
 - Sparkle 2.9.5 does not publicly expose the extracted app before installation or enforce both enclosed bundle versions against the appcast. The protected release pipeline rejects a mismatched final ZIP, but production self-update remains blocked until the equivalent client-side contract is enforced by an upstream upgrade, reviewed hardening or replacement mechanism.
@@ -161,4 +163,4 @@ Last updated: 2026-08-05
 
 ## Next Concrete Step
 
-- Create and verify an independent encrypted recovery copy of the existing EdDSA key, build a second public-mode version and run the release-blocking installation/update matrix in `docs/MANUAL_TESTING.md` on a clean standard account. Record failure evidence honestly; do not publish the generated appcast or claim public self-update readiness until it passes and Sparkle's client-side enclosed-version gap is closed.
+- Publish and verify the 0.1.0 direct-download Release with `publish_update_feed=false`, including a clean-account DMG install check. Separately create and verify an independent encrypted recovery copy of the existing EdDSA key, build a second public-mode version and run the release-blocking installation/update matrix in `docs/MANUAL_TESTING.md`; do not use `publish_update_feed=true` or claim public self-update readiness until that matrix passes and Sparkle's client-side enclosed-version gap is closed.

@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="420" viewBox="0 0 1200 420"
+     role="img" aria-labelledby="workflow-title workflow-desc">
+  <title id="workflow-title">Ushot capture workflow</title>
+  <desc id="workflow-desc">Three stages show how Ushot freezes and selects a region, annotates it in place, then copies, saves, or pins the result.</desc>
+
+  <rect width="1200" height="420" rx="28" fill="#0E0F11"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif">
+    <text x="64" y="78" fill="#F5F5F7" font-size="40" font-weight="680" letter-spacing="-0.8">Capture workflow</text>
+    <path d="M382 64H1136" stroke="#2C2C2E" stroke-width="2"/>
+
+    <g id="stage-freeze-select">
+      <rect x="64" y="112" width="326" height="252" rx="22" fill="#2C2C2E" fill-opacity="0.38" stroke="#2C2C2E" stroke-width="2"/>
+      <text x="88" y="158" fill="#0A84FF" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" font-weight="650">01</text>
+      <text x="132" y="158" fill="#F5F5F7" font-size="26" font-weight="650">Freeze &amp; select</text>
+
+      <rect x="88" y="184" width="278" height="148" rx="15" fill="#2C2C2E" fill-opacity="0.62"/>
+      <rect x="104" y="200" width="112" height="116" rx="10" fill="#8E8E93" fill-opacity="0.12"/>
+      <rect x="228" y="200" width="122" height="50" rx="10" fill="#8E8E93" fill-opacity="0.16"/>
+      <rect x="228" y="262" width="122" height="54" rx="10" fill="#8E8E93" fill-opacity="0.09"/>
+      <path d="M119 221H198M119 239H178M243 220H333M243 282H333" stroke="#8E8E93" stroke-opacity="0.27" stroke-width="4" stroke-linecap="round"/>
+
+      <rect x="126" y="210" width="196" height="90" fill="none" stroke="#0A84FF" stroke-width="3"/>
+      <rect x="122" y="206" width="8" height="8" rx="1.5" fill="#0E0F11" stroke="#0A84FF" stroke-width="2"/>
+      <rect x="220" y="206" width="8" height="8" rx="1.5" fill="#0E0F11" stroke="#0A84FF" stroke-width="2"/>
+      <rect x="318" y="206" width="8" height="8" rx="1.5" fill="#0E0F11" stroke="#0A84FF" stroke-width="2"/>
+      <rect x="122" y="251" width="8" height="8" rx="1.5" fill="#0E0F11" stroke="#0A84FF" stroke-width="2"/>
+      <rect x="318" y="251" width="8" height="8" rx="1.5" fill="#0E0F11" stroke="#0A84FF" stroke-width="2"/>
+      <rect x="122" y="296" width="8" height="8" rx="1.5" fill="#0E0F11" stroke="#0A84FF" stroke-width="2"/>
+      <rect x="220" y="296" width="8" height="8" rx="1.5" fill="#0E0F11" stroke="#0A84FF" stroke-width="2"/>
+      <rect x="318" y="296" width="8" height="8" rx="1.5" fill="#0E0F11" stroke="#0A84FF" stroke-width="2"/>
+    </g>
+
+    <g id="first-connector" fill="none" stroke="#0A84FF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M400 238H425"/>
+      <path d="M417 230L425 238L417 246"/>
+    </g>
+
+    <g id="stage-annotate">
+      <rect x="437" y="112" width="326" height="252" rx="22" fill="#2C2C2E" fill-opacity="0.38" stroke="#2C2C2E" stroke-width="2"/>
+      <text x="461" y="158" fill="#0A84FF" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" font-weight="650">02</text>
+      <text x="505" y="158" fill="#F5F5F7" font-size="26" font-weight="650">Annotate in place</text>
+
+      <rect x="461" y="184" width="278" height="108" rx="15" fill="#2C2C2E" fill-opacity="0.62"/>
+      <rect x="478" y="200" width="98" height="76" rx="9" fill="#8E8E93" fill-opacity="0.11"/>
+      <rect x="588" y="200" width="134" height="32" rx="9" fill="#8E8E93" fill-opacity="0.15"/>
+      <rect x="588" y="244" width="134" height="32" rx="9" fill="#8E8E93" fill-opacity="0.09"/>
+      <rect x="492" y="202" width="216" height="72" fill="none" stroke="#0A84FF" stroke-width="2.5"/>
+
+      <g fill="none" stroke="#0A84FF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M510 260C526 224 548 267 570 237C580 224 591 230 598 241"/>
+        <path d="M591 260L684 210"/>
+        <path d="M665 208L684 210L675 227"/>
+      </g>
+
+      <g id="compact-toolbar">
+        <rect x="488" y="304" width="224" height="42" rx="13" fill="#2C2C2E" stroke="#8E8E93" stroke-opacity="0.22"/>
+        <path d="M505 313L521 327L513 328L509 338Z" fill="none" stroke="#F5F5F7" stroke-width="2" stroke-linejoin="round"/>
+        <rect x="534" y="309" width="32" height="32" rx="9" fill="#0A84FF"/>
+        <path d="M542 333L545 326L556 315L560 319L549 330Z" fill="none" stroke="#F5F5F7" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M579 334L599 316M591 316H599V324" fill="none" stroke="#F5F5F7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <rect x="614" y="317" width="20" height="17" rx="3" fill="none" stroke="#F5F5F7" stroke-width="2"/>
+        <circle cx="655" cy="325.5" r="9" fill="none" stroke="#F5F5F7" stroke-width="2"/>
+        <text x="680" y="334" fill="#F5F5F7" font-size="22" font-weight="650">A</text>
+      </g>
+    </g>
+
+    <g id="second-connector" fill="none" stroke="#0A84FF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M773 238H798"/>
+      <path d="M790 230L798 238L790 246"/>
+    </g>
+
+    <g id="stage-output">
+      <rect x="810" y="112" width="326" height="252" rx="22" fill="#2C2C2E" fill-opacity="0.38" stroke="#2C2C2E" stroke-width="2"/>
+      <text x="834" y="158" fill="#0A84FF" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" font-weight="650">03</text>
+      <text x="878" y="158" fill="#F5F5F7" font-size="25" font-weight="650">Copy · Save · Pin</text>
+
+      <rect x="843" y="208" width="64" height="64" rx="18" fill="#2C2C2E"/>
+      <rect x="941" y="208" width="64" height="64" rx="18" fill="#2C2C2E"/>
+      <rect x="1039" y="208" width="64" height="64" rx="18" fill="#0A84FF"/>
+
+      <g fill="none" stroke="#F5F5F7" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="858" y="224" width="22" height="25" rx="4"/>
+        <rect x="868" y="233" width="23" height="24" rx="4"/>
+
+        <path d="M973 220V248"/>
+        <path d="M962 238L973 249L984 238"/>
+        <path d="M959 258H987"/>
+
+        <path d="M1057 222H1085L1080 239L1091 248H1051L1062 239Z"/>
+        <path d="M1071 248V260"/>
+      </g>
+
+      <text x="875" y="316" text-anchor="middle" fill="#8E8E93" font-size="20" font-weight="560">Copy</text>
+      <text x="973" y="316" text-anchor="middle" fill="#8E8E93" font-size="20" font-weight="560">Save</text>
+      <text x="1071" y="316" text-anchor="middle" fill="#F5F5F7" font-size="20" font-weight="650">Pin</text>
+    </g>
+  </g>
+</svg>

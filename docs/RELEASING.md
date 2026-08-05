@@ -8,11 +8,11 @@ The stable update feed is:
 https://ischeneycc.github.io/ushot/updates/appcast.xml
 ```
 
-The first public installation requires the user to remove quarantine explicitly. Subsequent updates are delivered by Sparkle 2.9.5; the complete appcast and each update archive are authenticated with Ushot's EdDSA key.
+The first public installation requires the user to remove quarantine explicitly. Direct-download GitHub Releases and production Sparkle updates have separate readiness gates. Ushot 0.1.0 may be published first as a direct-download preview while its production appcast remains absent; in that state **Check for Updates…** stays visible and reports a feed failure. Once the updater gate is separately approved, subsequent updates are delivered by Sparkle 2.9.5 and the complete appcast plus each update archive are authenticated with Ushot's EdDSA key.
 
 ## Security invariants
 
-Every release command fails unless all of these are true:
+Every release command enforces the applicable invariants below. The appcast, production-version monotonicity and EdDSA-signing bullets apply only to an explicit `publish_update_feed=true` run; `publish_update_feed=false` deliberately creates no appcast.
 
 - Product: `Ushot.app`
 - Bundle identifier: `io.github.ischeneycc.ushot`
@@ -33,6 +33,8 @@ Every release command fails unless all of these are true:
 - An existing production feed passes Sparkle's cryptographic verification and the embedded-notes structural policy before it is extended or redeployed; a detached-notes feed is rejected rather than migrated automatically
 - The signing job has only read access to repository contents; the publishing job has repository write access but never receives the Sparkle private key
 - Every release-workflow checkout disables persisted GitHub credentials, and every action used by that workflow is pinned to a full commit SHA
+- The default `publish_update_feed=false` path still builds, validates, publishes and anonymously download-verifies exactly the five Release assets, but does not fetch Sparkle tools or the current feed, read the EdDSA private key, create a Pages artifact or run `deploy-appcast`
+- Only `publish_update_feed=true` may sign and deploy the production feed, and that opt-in does not waive the key-recovery drill, client-side enclosed-version fix or clean-account update matrix
 
 Disabling Hardened Runtime is deliberate **only** for `public-adhoc`: Sparkle documents that an ad-hoc host can fail to load Sparkle when Library Validation is enabled. `local-signed` and the future `developer-id` mode keep Hardened Runtime enabled. The scripts never recursively re-sign Sparkle with `codesign --deep`.
 
@@ -41,11 +43,14 @@ The archive-version check above is a protected publication gate, not a client-si
 ## One-time GitHub setup
 
 1. Create the public repository `isCheneycc/ushot`.
-2. In Settings → Pages, select **GitHub Actions** as the source. Configure the generated `github-pages` environment's deployment-tag rule to allow only protected `v*` tags.
-3. Protect `main`, require the `CI` workflow, require pull requests, and do not permit release operators to bypass those rules.
-4. Create a tag ruleset for `v*` that blocks updates and deletion. Tag protection is mandatory: a published tag is immutable.
-5. Create a protected GitHub Environment named `release`, add required reviewers, and restrict deployment branches/tags to the protected `v*` tags.
-6. Add `SPARKLE_ED25519_PRIVATE_KEY` to that environment's secrets. Its value is the private key exported from the Sparkle keychain account below—not the public key from `Base.xcconfig`.
+2. Protect `main`, require the `CI` workflow, require pull requests, and do not permit release operators to bypass those rules.
+3. Create a tag ruleset for `v*` that blocks updates and deletion. Tag protection is mandatory: a published tag is immutable.
+4. Create a protected GitHub Environment named `release`, add required reviewers, and restrict deployment branches/tags to the protected `v*` tags.
+
+Those four steps are sufficient for `publish_update_feed=false`. Before any `publish_update_feed=true` run:
+
+5. In Settings → Pages, select **GitHub Actions** as the source. Configure the generated `github-pages` environment's deployment-tag rule to allow only protected `v*` tags.
+6. Add `SPARKLE_ED25519_PRIVATE_KEY` to the `release` environment's secrets. Its value is the private key exported from the Sparkle keychain account below—not the public key from `Base.xcconfig`.
 
 The Ushot-specific Sparkle account already used locally is:
 
@@ -84,9 +89,9 @@ Never install a `public-adhoc` build over the local signed `/Applications/Ushot.
 
 ## Preparing a public release
 
-1. Update `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in `Config/Base.xcconfig`. Both the stable semantic version and positive decimal build must be strictly greater than every retained item in the signed production appcast.
+1. Update `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in `Config/Base.xcconfig`. Both values must match the release tag and final bundle. A feed-enabled release additionally requires both the stable semantic version and positive decimal build to be strictly greater than every retained item in the signed production appcast.
 2. Add nonempty restricted-Markdown source notes at `updates/release-notes/<version>.md`. Links, images, raw HTML, autolinks, entities and URL/domain/network-address-like destinations are forbidden. Do not add Sparkle signing comments or appcast elements yourself.
-3. Run the relevant tests and the complete manual test matrix.
+3. Run the relevant tests and the direct-install manual checks. The complete old-version → new-version updater matrix is additionally mandatory before `publish_update_feed=true`.
 4. Commit the exact release source.
 5. Merge the release commit into protected `main`, wait for the `CI` push run on that exact commit to succeed, then create and push an immutable tag matching the version exactly, for example `v0.1.0`.
 6. Dispatch **Protected release** at the tag ref, not at `main`. The ref and the `tag` input must be identical:
@@ -97,12 +102,27 @@ Never install a `public-adhoc` build over the local signed `/Applications/Ushot.
    gh workflow run release.yml \
      --ref "$TAG" \
      -f tag="$TAG" \
-     -f build_number="$BUILD_NUMBER"
+     -f build_number="$BUILD_NUMBER" \
+     -f publish_update_feed=false
    ```
 
 7. Approve the protected `release` environment only after comparing the run ref, requested tag, bound commit SHA and successful CI run.
 
-The workflow has four capability boundaries. Read-only preflight binds the run ref, input, tag, commit, protected-main ancestry and successful CI run. The protected `release` job then builds `public-adhoc`, packages the exact assets, and runs Sparkle `generate_appcast --embed-release-notes` to create the enclosure EdDSA signature and sign the complete appcast, all while holding only read access to repository contents. Its release gate extracts the final ZIP and dSYM, mounts the final DMG read-only, and revalidates the contained app identity/signature, dSYM UUIDs, exact DMG root and `/Applications` link; every app executable must resolve the embedded Sparkle framework through `@executable_path/../Frameworks`. Validating the pre-archive build directory alone is insufficient. It uploads those immutable results to a workflow artifact; no repository write token exists in that signing job. A separate job, which has no signing secret, recovers the artifact, rechecks the remote tag and CI admission, resumes or creates a draft GitHub Release, and verifies every remote byte before publishing. The final `github-pages` job exposes the already-signed appcast only after the stable Release and its public ZIP are verified.
+For 0.1.0, keep `publish_update_feed=false`. This publishes the five immutable direct-download assets, verifies every remote byte, and downloads all five again through the anonymous public boundary. It skips Sparkle tool download, current-feed access, private-key signing, Pages artifact creation and `deploy-appcast`. **Check for Updates…** remains visible in the app and reports a feed failure until the production feed is activated.
+
+Only after the independent encrypted key recovery drill, client-side enclosed-version gap and complete clean-account updater matrix are closed may an operator dispatch the feed path:
+
+```bash
+TAG=v0.1.0
+BUILD_NUMBER=1
+gh workflow run release.yml \
+  --ref "$TAG" \
+  -f tag="$TAG" \
+  -f build_number="$BUILD_NUMBER" \
+  -f publish_update_feed=true
+```
+
+The workflow has four capability boundaries. Read-only preflight binds the run ref, input, tag, commit, protected-main ancestry and successful CI run. The protected `release` job always builds `public-adhoc`, packages the exact assets, extracts the final ZIP and dSYM, mounts the final DMG read-only, and revalidates the contained app identity/signature, dSYM UUIDs, exact DMG root and `/Applications` link; every app executable must resolve the embedded Sparkle framework through `@executable_path/../Frameworks`. Validating the pre-archive build directory alone is insufficient. With `publish_update_feed=true`, the same read-only job also runs Sparkle `generate_appcast --embed-release-notes` to create the enclosure EdDSA signature and sign the complete appcast. It uploads immutable release results to a workflow artifact; no repository write token exists in that job. A separate job, which has no signing secret, recovers the artifact, rechecks remote tag and CI admission, resumes or creates a draft GitHub Release, verifies every remote byte, publishes, and anonymously verifies all five assets. The final `github-pages` job exists only for the true path and exposes the already-signed appcast after the stable Release is verified.
 
 Before extending update history, Sparkle's official `sign_update --verify` validates the complete current production feed. The unsigned repository seed is accepted only for `0.1.0` build `1`, after an explicit production HTTP 404, structural validation of exactly one fixed Ushot channel with zero update items, and a byte-for-byte comparison with the committed seed; this zero-item seed may be migrated into the embedded-notes format, while every later 404 is fatal. Any existing feed with a noncanonical RSS/Sparkle namespace or hierarchy, unrestricted description content, `releaseNotesLink`, item-level `link`, `fullReleaseNotesLink`, deltas, or anything other than exactly one nonempty restricted-Markdown `description` per item fails closed and is never rewritten or re-signed automatically. The new version and build must each compare strictly greater than every retained item using overflow-safe component/decimal comparison. GitHub's asset digest is checked when present. If GitHub omits that field, the verifier downloads the asset and recomputes SHA-256 instead of treating size or HTTPS as sufficient proof.
 
@@ -134,12 +154,12 @@ SHA256SUMS.txt
 ```
 
 - DMG: first installation only; it contains `Ushot.app` and an `/Applications` link.
-- ZIP: the only full Sparkle enclosure. It contains the app bundle and is signed in the appcast with EdDSA.
+- ZIP: contains the app bundle and becomes the only full Sparkle enclosure only when a feed-enabled run signs it into the appcast. In the direct-download preview it is simply a validated Release asset and is not evidence of updater readiness.
 - dSYM ZIP: archived symbols whose UUIDs must match the shipped executable.
 - Manifest: product, bundle, version, build, tag, architecture, signature mode and per-asset hashes.
 - Checksums: SHA-256 for the DMG, update ZIP, dSYM ZIP and manifest.
 
-The generated Pages payload contains only the signed `updates/appcast.xml`. Each item carries exactly one nonempty restricted-Markdown `description`; there are no separately deployed or preserved release-note files. Before propagation, every retained item must have exact RSS/Sparkle namespaces and hierarchy, exactly one full enclosure whose URL is byte-identical to the canonical versioned official GitHub Release URL, and no link-like description content, item-level `releaseNotesLink`, `link`, `fullReleaseNotesLink` or delta enclosure.
+When `publish_update_feed=true`, the generated Pages payload contains only the signed `updates/appcast.xml`. Each item carries exactly one nonempty restricted-Markdown `description`; there are no separately deployed or preserved release-note files. Before propagation, every retained item must have exact RSS/Sparkle namespaces and hierarchy, exactly one full enclosure whose URL is byte-identical to the canonical versioned official GitHub Release URL, and no link-like description content, item-level `releaseNotesLink`, `link`, `fullReleaseNotesLink` or delta enclosure. The false path creates no Pages payload.
 
 ## First-install instructions
 
@@ -154,23 +174,27 @@ Do not recommend `xattr -cr`: it removes all extended attributes, not just quara
 
 ## Mandatory release verification
 
-Automation proves artifact identity, signatures, versions, hashes and publication ordering. It does **not** prove the complete updater lifecycle. Before announcing a release, use a clean macOS 14+ account and verify:
+Automation proves artifact identity, versions, hashes and publication ordering. Before announcing a direct-download preview, use a clean macOS 14+ account and verify:
 
 - initial DMG install and the documented quarantine command;
-- Screen Recording grant, denial and reauthorization behavior;
+- Screen Recording grant and denial behavior;
+- relaunch, capture modes, annotation, copy/save/pin, history and login item behavior on the supported hardware selected for the preview.
+
+Those checks admit only the direct-download Release. Before `publish_update_feed=true`, the separate updater matrix must also verify:
+
 - a real previous-version → new-version Sparkle update;
 - Sparkle Helper launch and atomic replacement of `/Applications/Ushot.app`;
-- tampered ZIP rejection;
+- signed-feed and tampered-ZIP rejection;
 - offline, interrupted download, insufficient disk and GitHub outage behavior;
-- relaunch, capture modes, annotation, copy/save/pin, history, login item and multiple displays.
+- permission reauthorization and multiple-display behavior after replacement.
 
-Until a real two-version test succeeds, the ad-hoc Sparkle updater remains a release blocker. Screen Recording permission may need to be granted again after public updates because ad-hoc identity continuity is not guaranteed.
+Until that two-version matrix succeeds, the ad-hoc Sparkle updater remains blocked even when the GitHub Release is downloadable. Screen Recording permission may need to be granted again after public updates because ad-hoc identity continuity is not guaranteed.
 
 ## Failure recovery
 
 - Do not delete a partial draft and do not move or recreate its tag. From the same workflow run, choose **Re-run failed jobs**. The preserved artifacts are retained for 30 days; publication validates the draft metadata and every existing expected asset, rejects unexpected or mismatched bytes, uploads only missing assets, verifies the complete set, and then publishes.
 - If a retry finds a published Release with the exact expected assets, it performs no Release mutation and continues safely. A published Release that is incomplete or mismatched fails closed and requires investigation; the workflow never overwrites it.
-- If the GitHub Release published successfully but Pages deployment failed, rerun only the failed `deploy-appcast` job from the same workflow run. It reuses the preserved `github-pages` artifact, rechecks the immutable tag and published asset bytes, and does not rebuild, re-sign, overwrite published assets or recreate the tag.
+- In a `publish_update_feed=true` run, if the GitHub Release published successfully but Pages deployment failed, rerun only the failed `deploy-appcast` job from the same workflow run. It reuses the preserved `github-pages` artifact, rechecks the immutable tag and published asset bytes, and does not rebuild, re-sign, overwrite published assets or recreate the tag. A false run has no Pages job to recover.
 - If the workflow artifacts have expired, stop and investigate instead of attempting to reconstruct supposedly identical bytes in a new run. DMG and ZIP creation are not assumed to be reproducible.
 - Never hand-edit the generated signed appcast or extract and republish its embedded descriptions. Any byte change invalidates signed-feed authenticity; regenerate it through the protected workflow.
 - If the appcast is unavailable with anything other than an explicit first-release 404, publishing fails instead of silently resetting update history.

@@ -13,15 +13,16 @@
 
 ## Phase 8 — open-source release and manual updates
 
-Status: implementation and release-readiness validation in progress.
+Status: direct-download publication and production-updater readiness are tracked independently.
 
 - Adopt the permanent `Ushot` product name, `io.github.ischeneycc.ushot` bundle identifier, `isCheneycc/ushot` repository and Apache-2.0 license.
 - Integrate Sparkle behind the existing `UpdateChecking` boundary with manual checks only, an embedded EdDSA public key and the fixed GitHub Pages appcast. Generate it with `--embed-release-notes`, require one signed restricted-Markdown description per item, reject all note links/external destinations plus detached notes, item links and deltas, enforce exact RSS/Sparkle namespaces and strictly increasing versions/builds, and deploy no Pages payload other than the signed appcast.
-- Produce deterministic ad-hoc arm64 DMG/ZIP/dSYM/manifest/checksum assets without Developer ID or notarization; publish immutable GitHub assets before the appcast.
+- Produce deterministic ad-hoc arm64 DMG/ZIP/dSYM/manifest/checksum assets without Developer ID or notarization. The protected workflow's default direct-download path publishes and anonymously verifies all five GitHub assets without reading an update key or creating a Pages payload.
+- Publish 0.1.0 first as a clearly labeled direct-download preview. The app's manual update command remains visible and reports an error while the intentionally absent production feed is not yet activated.
 - Protect and back up the EdDSA private key, add supply-chain checks and document the privacy/network boundary.
 - Complete the release-blocking clean-account old-version → new-version matrix, including helper loading, tamper rejection, atomic replacement, active-work admission, quarantine and Screen Recording authorization behavior.
 - Close Sparkle's client-side enclosed-app version validation gap; protected CI already rejects mismatched final ZIPs, but that is not a runtime substitute and production self-update remains blocked meanwhile.
-- Publish the first public release only after every mandatory item above has recorded evidence. Build/CI success alone does not complete this phase.
+- Activate `publish_update_feed=true` only after key recovery, the clean-account transition/tamper matrix and the client-side version gap all have recorded evidence. A successful direct-download Release or CI run does not complete the updater track.
 
 ## Later
 

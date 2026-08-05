@@ -11,6 +11,11 @@ on:
         description: Positive CFBundleVersion committed in Config/Base.xcconfig
         required: true
         type: string
+      publish_update_feed:
+        description: Publish the signed production Sparkle feed after the GitHub Release
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: protected-release
@@ -211,6 +216,7 @@ jobs:
             --tag "$RELEASE_TAG"
 
       - name: Fetch checksum-pinned Sparkle tools and the current production feed
+        if: ${{ inputs.publish_update_feed }}
         shell: bash
         run: |
           set -euo pipefail
@@ -225,6 +231,7 @@ jobs:
             --allow-first-release-seed "$ALLOW_FIRST_RELEASE_SEED"
 
       - name: Sign and validate the update feed without a repository write token
+        if: ${{ inputs.publish_update_feed }}
         shell: bash
         env:
           SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
@@ -255,6 +262,12 @@ jobs:
             --version "$VERSION" \
             --build-number "$BUILD_NUMBER" \
             --tag "$RELEASE_TAG"
+
+      - name: Revalidate the signed Pages payload
+        if: ${{ inputs.publish_update_feed }}
+        shell: bash
+        run: |
+          set -euo pipefail
           [[ -s "$PAGES_DIRECTORY/updates/appcast.xml" ]] || {
             echo 'error: signed Pages appcast is missing.' >&2
             exit 1
@@ -276,6 +289,7 @@ jobs:
           retention-days: 30
 
       - name: Preserve the signed Pages payload for last-step deployment
+        if: ${{ inputs.publish_update_feed }}
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ${{ env.PAGES_DIRECTORY }}
@@ -606,29 +620,38 @@ jobs:
             --directory "$ARTIFACTS_DIRECTORY" \
             --expected-state published
 
-      - name: Verify the published Sparkle ZIP through the anonymous public boundary
+      - name: Verify all five published assets through the anonymous public boundary
         shell: bash
         run: |
           set -euo pipefail
-          ZIP_NAME="Ushot-$VERSION-arm64.zip"
-          PUBLIC_ZIP="$(mktemp "$RUNNER_TEMP/ushot-public-zip.XXXXXX")"
-          trap 'rm -f "$PUBLIC_ZIP"' EXIT
-          curl --fail --silent --show-error --location \
-            --proto '=https' \
-            --tlsv1.2 \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$ZIP_NAME" \
-            --output "$PUBLIC_ZIP"
-          [[ "$(stat -f '%z' "$PUBLIC_ZIP")" == "$(stat -f '%z' "$ARTIFACTS_DIRECTORY/$ZIP_NAME")" ]] || {
-            echo 'error: anonymously downloaded ZIP has the wrong size.' >&2
-            exit 1
-          }
-          [[ "$(shasum -a 256 "$PUBLIC_ZIP" | awk '{print $1}')" == "$(shasum -a 256 "$ARTIFACTS_DIRECTORY/$ZIP_NAME" | awk '{print $1}')" ]] || {
-            echo 'error: anonymously downloaded ZIP has the wrong SHA-256 digest.' >&2
-            exit 1
-          }
+          PUBLIC_DOWNLOADS="$(mktemp -d "$RUNNER_TEMP/ushot-public-assets.XXXXXX")"
+          trap 'rm -rf "$PUBLIC_DOWNLOADS"' EXIT
+          EXPECTED_NAMES=(
+            "Ushot-$VERSION-arm64.dmg"
+            "Ushot-$VERSION-arm64.zip"
+            "Ushot-$VERSION-arm64.dSYM.zip"
+            "Ushot-$VERSION-arm64.release-manifest.json"
+            "SHA256SUMS.txt"
+          )
+          for name in "${EXPECTED_NAMES[@]}"; do
+            curl --fail --silent --show-error --location \
+              --proto '=https' \
+              --tlsv1.2 \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$name" \
+              --output "$PUBLIC_DOWNLOADS/$name"
+            [[ "$(stat -f '%z' "$PUBLIC_DOWNLOADS/$name")" == "$(stat -f '%z' "$ARTIFACTS_DIRECTORY/$name")" ]] || {
+              echo "error: anonymously downloaded asset has the wrong size: $name" >&2
+              exit 1
+            }
+            [[ "$(shasum -a 256 "$PUBLIC_DOWNLOADS/$name" | awk '{print $1}')" == "$(shasum -a 256 "$ARTIFACTS_DIRECTORY/$name" | awk '{print $1}')" ]] || {
+              echo "error: anonymously downloaded asset has the wrong SHA-256 digest: $name" >&2
+              exit 1
+            }
+          done
 
   deploy-appcast:
     name: Deploy the signed appcast after immutable assets exist
+    if: ${{ inputs.publish_update_feed }}
     needs:
       - preflight
       - build-and-sign
