@@ -13,14 +13,17 @@
 - Update behavior: manual checks only; no automatic checks/downloads, telemetry, analytics or system-profile submission.
 - Commercial direction: the open-source core remains Apache-2.0. Future paid capabilities may be separately distributed closed-source modules or services, without changing rights already granted for published code.
 
-## Still needed for the first direct-download release
+## Confirmed for the first direct-download release
 
-- Final app icon and brand assets, including confirmation that every bundled asset may be distributed under compatible terms.
-- A reviewed third-party dependency/resource notice inventory for every source and binary artifact included in the release.
-- The first public semantic version, release date and supported macOS patch-level install test matrix.
-- Enable and verify GitHub Private Vulnerability Reporting for the repository.
+- The repository owner accepts the current project-native app icon, menu icon and README graphics for distribution with 0.1.1 under the repository's Apache-2.0 terms.
+- The runtime dependency inventory contains Sparkle 2.9.5 only. Its license and bundled external-license notices are reproduced in `ThirdPartyNotices.txt`, and the Release build embeds that file unchanged.
+- GitHub Private Vulnerability Reporting is enabled.
 
-The 0.1.0 preview may use the direct-download path once these artifact and first-install checks are accepted. **Check for Updates…** will remain visible and fail visibly while the production feed is absent; that state must be called out in the Release notes and must not be described as updater readiness.
+The 0.1.1 preview uses the direct-download path. **Check for Updates…** remains visible and fails visibly while the production feed is absent; that state is called out in the Release notes and must not be described as updater readiness.
+
+## Still needed before a broader compatibility claim
+
+- Complete the supported macOS patch-level clean-standard-account installation matrix and record Gatekeeper plus Screen Recording behavior. Publication as a clearly labeled initial preview does not count as completion of that matrix.
 
 ## Still needed before the first production update feed
 

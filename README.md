@@ -19,7 +19,7 @@ Ushot is a native screenshot and annotation utility for Apple silicon Macs runni
 Screenshot pixels, annotations, clipboard exports, color samples, history, and encoded files are processed locally. Ushot has no account, telemetry, analytics, advertising SDK, crash-report upload, or system-profile submission.
 
 > [!IMPORTANT]
-> Ushot 0.1.0 is being prepared as a direct-download preview. Once published, install it only from the official GitHub Release; the signed production appcast remains intentionally absent.
+> Ushot 0.1.1 is the first direct-download preview. Install it only from the official GitHub Release; the signed production appcast remains intentionally absent.
 
 ## One capture, one continuous workflow
 
@@ -79,9 +79,9 @@ Read [PRIVACY.md](PRIVACY.md) for the complete data, permission, persistence, an
 
 ## Release status and installation
 
-Ushot 0.1.0 is being prepared as a direct-download preview. The protected workflow is configured to build, validate, publish, then anonymously re-download and verify its DMG, ZIP, dSYM ZIP, release manifest, and checksums without activating the production updater. Builds taken directly from `main` remain development artifacts rather than a supported distribution channel.
+Ushot 0.1.1 is the first direct-download preview. The protected workflow builds, validates, publishes, then anonymously re-downloads and verifies its DMG, ZIP, dSYM ZIP, release manifest, and checksums without activating the production updater. Builds taken directly from `main` remain development artifacts rather than a supported distribution channel.
 
-When an official release is published, download `Ushot-<version>-arm64.dmg` only from the official [Ushot Releases](https://github.com/isCheneycc/ushot/releases) page. The initial public artifact is intentionally ad-hoc signed, has no Developer ID signature or Apple notarization, and is not sandboxed.
+Download [Ushot-0.1.1-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.1/Ushot-0.1.1-arm64.dmg) only from the official [Ushot Releases](https://github.com/isCheneycc/ushot/releases) page. The initial public artifact is intentionally ad-hoc signed, has no Developer ID signature or Apple notarization, and is not sandboxed.
 
 1. Open the DMG and drag `Ushot.app` into **Applications**.
 2. Remove only the downloaded-file quarantine attribute, then open Ushot:
@@ -91,7 +91,7 @@ When an official release is published, download `Ushot-<version>-arm64.dmg` only
    open "/Applications/Ushot.app"
    ```
 
-Use this procedure only for `Ushot-<version>-arm64.dmg` downloaded from the official [Ushot Releases](https://github.com/isCheneycc/ushot/releases) page. Do not replace it with `xattr -cr`, do not run it against a broader directory, and do not apply it to third-party downloads. A later install or update may require Screen Recording or Accessibility permission to be granted again.
+Use this procedure only for `Ushot-0.1.1-arm64.dmg` downloaded from the official [Ushot Releases](https://github.com/isCheneycc/ushot/releases) page. Do not replace it with `xattr -cr`, do not run it against a broader directory, and do not apply it to third-party downloads. A later install or update may require Screen Recording or Accessibility permission to be granted again.
 
 The app bundle includes the applicable [third-party license notices](UshotApp/Resources/ThirdPartyNotices.txt), including Sparkle and its bundled components.
 
@@ -99,7 +99,7 @@ The app bundle includes the applicable [third-party license notices](UshotApp/Re
 
 Update checks are manual only. Ushot does not check at launch or on a schedule, download automatically, or submit a system profile.
 
-When the 0.1.0 direct-download preview is published, **Check for Updates…** will remain visible, but the production feed will be intentionally unavailable, so choosing it will report a visible failure. Until production updater readiness is announced separately, install newer previews from the official Releases page.
+In the 0.1.1 direct-download preview, **Check for Updates…** remains visible, but the production feed is intentionally unavailable, so choosing it reports a visible failure. Until production updater readiness is announced separately, install newer previews from the official Releases page.
 
 - The app is pinned to `https://ischeneycc.github.io/ushot/updates/appcast.xml`; when activated, that endpoint must serve the signed production appcast.
 - Restricted-Markdown release notes are embedded in that signed feed, so showing them does not make a detached notes request.
