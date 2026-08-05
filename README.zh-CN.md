@@ -19,7 +19,7 @@ Ushot 是一款面向 macOS 14 及以上版本 Apple 芯片 Mac 的原生截图�
 截图像素、标注、剪贴板输出、颜色采样、历史记录与图像编码均在本机处理。Ushot 不包含账户、遥测、分析、广告 SDK、崩溃报告上传或系统信息提交。
 
 > [!IMPORTANT]
-> Ushot 0.1.0 正在按直装预览版准备。发布后，请仅从官方 GitHub Release 安装；生产 appcast 当前按设计保持未发布。
+> Ushot 0.1.1 是首个直装预览版。请仅从官方 GitHub Release 安装；生产 appcast 当前按设计保持未发布。
 
 ## 一次截图，一条连续工作流
 
@@ -79,9 +79,9 @@ open ScreenshotApp.xcodeproj
 
 ## 发布状态与安装
 
-Ushot 0.1.0 正在按直装预览版准备。受保护的工作流已配置为构建、验证、发布，再通过匿名重新下载验证它的 DMG、ZIP、dSYM ZIP、发行清单与校验和，同时不启用生产环境更新器。直接从 `main` 构建的版本仍属于开发产物，而不是受支持的分发渠道。
+Ushot 0.1.1 是首个直装预览版。受保护的工作流会构建、验证、发布，再通过匿名重新下载验证它的 DMG、ZIP、dSYM ZIP、发行清单与校验和，同时不启用生产环境更新器。直接从 `main` 构建的版本仍属于开发产物，而不是受支持的分发渠道。
 
-官方版本发布后，请仅从官方 [Ushot Releases](https://github.com/isCheneycc/ushot/releases) 页面下载 `Ushot-<version>-arm64.dmg`。首个公开产物会刻意采用 ad-hoc 签名，不包含 Developer ID 签名或 Apple 公证，并且不会启用 App Sandbox。
+请仅从官方 [Ushot Releases](https://github.com/isCheneycc/ushot/releases) 页面下载 [Ushot-0.1.1-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.1/Ushot-0.1.1-arm64.dmg)。首个公开产物会刻意采用 ad-hoc 签名，不包含 Developer ID 签名或 Apple 公证，并且不会启用 App Sandbox。
 
 1. 打开 DMG，将 `Ushot.app` 拖入**应用程序**。
 2. 只移除下载文件的隔离属性，然后打开 Ushot：
@@ -91,7 +91,7 @@ Ushot 0.1.0 正在按直装预览版准备。受保护的工作流已配置为�
    open "/Applications/Ushot.app"
    ```
 
-此流程仅适用于从官方 [Ushot Releases](https://github.com/isCheneycc/ushot/releases) 页面下载的 `Ushot-<version>-arm64.dmg`。不要将命令替换为 `xattr -cr`，不要对更宽泛的目录执行，也不要用于第三方下载。后续安装或更新可能需要重新授予屏幕录制或辅助功能权限。
+此流程仅适用于从官方 [Ushot Releases](https://github.com/isCheneycc/ushot/releases) 页面下载的 `Ushot-0.1.1-arm64.dmg`。不要将命令替换为 `xattr -cr`，不要对更宽泛的目录执行，也不要用于第三方下载。后续安装或更新可能需要重新授予屏幕录制或辅助功能权限。
 
 应用包内包含适用的[第三方许可证声明](UshotApp/Resources/ThirdPartyNotices.txt)，其中包括 Sparkle 及其捆绑组件。
 
@@ -99,7 +99,7 @@ Ushot 0.1.0 正在按直装预览版准备。受保护的工作流已配置为�
 
 更新检查只能由用户手动触发。Ushot 不会在启动时或定时检查，不会自动下载，也不会提交系统信息。
 
-0.1.0 直装预览版发布后，**检查更新…** 仍然可见，但生产更新源会刻意保持不可用，因此选择它会显示明确的失败信息。在生产更新器另行宣布就绪之前，请从官方 Releases 页面安装较新的预览版。
+在 0.1.1 直装预览版中，**检查更新…** 仍然可见，但生产更新源会刻意保持不可用，因此选择它会显示明确的失败信息。在生产更新器另行宣布就绪之前，请从官方 Releases 页面安装较新的预览版。
 
 - 应用固定使用 `https://ischeneycc.github.io/ushot/updates/appcast.xml`；启用后，该端点必须提供已签名的生产 appcast。
 - 受限 Markdown 格式的发行说明直接嵌入签名更新源，因此显示说明不会发起独立请求。

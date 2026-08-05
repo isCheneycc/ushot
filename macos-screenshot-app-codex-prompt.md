@@ -41,8 +41,8 @@
 
 - Product Name：`Ushot`
 - Bundle Identifier：`io.github.ischeneycc.ushot`
-- Marketing Version：`0.1.0`
-- Build Version：`1`
+- Marketing Version：`0.1.1`
+- Build Version：`2`
 - Deployment Target：`macOS 14.0`
 - Architecture：`arm64`
 - 默认语言：跟随系统
