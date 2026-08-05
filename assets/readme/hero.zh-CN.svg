@@ -27,10 +27,12 @@
     </g>
 
     <g id="privacy-note" transform="translate(64 346)">
-      <rect x="2" y="9" width="22" height="18" rx="5" fill="none" stroke="#0A84FF" stroke-width="2.5"/>
-      <path d="M7 10V7a6 6 0 0 1 12 0v3" fill="none" stroke="#0A84FF" stroke-width="2.5" stroke-linecap="round"/>
-      <circle cx="13" cy="18" r="2" fill="#0A84FF"/>
-      <text x="38" y="27" fill="#F5F5F7" font-size="22" font-weight="560">截图与编辑内容留在本机。</text>
+      <g id="local-device-icon" fill="none" stroke="#0A84FF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="1.5" y="5" width="25" height="18" rx="4"/>
+        <path d="M9 29H19M14 23V29"/>
+        <path d="M7.5 14L11.5 18L20.5 9"/>
+      </g>
+      <text x="38" y="27" fill="#F5F5F7" font-size="22" font-weight="560">截图 编辑 发送</text>
     </g>
   </g>
 
@@ -73,28 +75,30 @@
     <g id="annotation-toolbar">
       <rect x="754" y="302" width="348" height="60" rx="18" fill="#2C2C2E" stroke="#8E8E93" stroke-opacity="0.24"/>
 
-      <g transform="translate(770 312)" fill="none" stroke="#F5F5F7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M8 5L27 22L17 24L12 33Z"/>
+      <g id="cursor-tool" transform="translate(774 318)" fill="none" stroke="#F5F5F7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 0L24 17L15 19L11 28Z"/>
       </g>
 
       <rect x="812" y="310" width="44" height="44" rx="12" fill="#0A84FF"/>
-      <g transform="translate(822 320)" fill="none" stroke="#F5F5F7" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M4 25L8 16L21 3L27 9L14 22Z"/>
-        <path d="M8 16L14 22"/>
+      <g id="pen-tool" transform="translate(819 318)" fill="none" stroke="#F5F5F7" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 24L7 16L20 3L26 9L13 22Z"/>
+        <path d="M7 16L13 22"/>
       </g>
 
-      <g transform="translate(866 316)" fill="none" stroke="#F5F5F7" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M4 29L29 7"/>
-        <path d="M18 7H29V18"/>
+      <g id="arrow-tool" transform="translate(866 318)" fill="none" stroke="#F5F5F7" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 25L25 3"/>
+        <path d="M14 3H25V14"/>
       </g>
 
       <rect x="914" y="321" width="24" height="22" rx="3" fill="none" stroke="#F5F5F7" stroke-width="2.4"/>
-      <circle cx="970" cy="332" r="12" fill="none" stroke="#F5F5F7" stroke-width="2.4"/>
+      <circle cx="972" cy="332" r="12" fill="none" stroke="#F5F5F7" stroke-width="2.4"/>
 
-      <text x="1012" y="341" fill="#F5F5F7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="24" font-weight="650">A</text>
+      <g id="text-tool" transform="translate(1006 318)" fill="none" stroke="#F5F5F7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 26L12 2L23 26M5.5 17H18.5"/>
+      </g>
       <path d="M1048 316V348" stroke="#8E8E93" stroke-width="1.5" stroke-opacity="0.65"/>
 
-      <g transform="translate(1062 317)" fill="none" stroke="#F5F5F7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <g id="pin-tool" transform="translate(1062 313)" fill="none" stroke="#F5F5F7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
         <path d="M8 4H25L22 15L29 21H4L11 15Z"/>
         <path d="M16.5 21V34"/>
       </g>
