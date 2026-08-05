@@ -30,7 +30,12 @@ jobs:
           done
           source scripts/release-common.sh
           release_validate_source_settings "$PWD"
-          xmllint --noout updates/appcast.xml
+          [[ -s "$USHOT_APPCAST_RELATIVE_PATH" ]]
+          [[ ! -e "$USHOT_LEGACY_APPCAST_RELATIVE_PATH" \
+              && ! -L "$USHOT_LEGACY_APPCAST_RELATIVE_PATH" ]]
+          xmllint --noout "$USHOT_APPCAST_RELATIVE_PATH"
+          swiftc -typecheck scripts/derive-sparkle-public-key.swift
+          scripts/test-release-feed-gates.sh
           plutil -lint UshotApp/Info.plist
 
   unit-tests:
@@ -40,7 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run package tests
-        run: swift test --package-path . --configuration debug
+        run: >-
+          swift test
+          --package-path .
+          --configuration debug
+          --disable-automatic-resolution
 
   public-build-gate:
     name: Public ad-hoc build gate

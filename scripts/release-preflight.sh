@@ -52,6 +52,16 @@ fi
 for script in "$PROJECT_ROOT"/scripts/*.sh; do
   bash -n "$script"
 done
-xmllint --noout "$PROJECT_ROOT/updates/appcast.xml"
+[[ -x "$PROJECT_ROOT/scripts/derive-sparkle-public-key.swift" ]] \
+  || release_die "Sparkle public-key derivation tool is missing or not executable."
+release_require_command swiftc
+swiftc -typecheck "$PROJECT_ROOT/scripts/derive-sparkle-public-key.swift"
+[[ -s "$PROJECT_ROOT/$USHOT_APPCAST_RELATIVE_PATH" ]] \
+  || release_die "Committed versioned appcast seed is missing: $USHOT_APPCAST_RELATIVE_PATH"
+[[ ! -e "$PROJECT_ROOT/$USHOT_LEGACY_APPCAST_RELATIVE_PATH" \
+    && ! -L "$PROJECT_ROOT/$USHOT_LEGACY_APPCAST_RELATIVE_PATH" ]] \
+  || release_die "Legacy appcast path must remain permanently absent: $USHOT_LEGACY_APPCAST_RELATIVE_PATH"
+release_require_command xmllint
+xmllint --noout "$PROJECT_ROOT/$USHOT_APPCAST_RELATIVE_PATH"
 release_log "Release preflight passed: repository=$REPOSITORY tag=$TAG build=$BUILD_NUMBER commit=$HEAD_COMMIT"
 printf 'VERSION=%s\nBUILD_NUMBER=%s\nTAG=%s\n' "$VERSION" "$BUILD_NUMBER" "$TAG"

@@ -358,7 +358,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "if [ \"$CONFIGURATION\" != \"Release\" ]; then\n  exit 0\nfi\n\nushot_key=\"${SPARKLE_PUBLIC_ED_KEY:-}\"\ncase \"$ushot_key\" in\n  \"\"|*'$('*)\n    echo \"error: SPARKLE_PUBLIC_ED_KEY is missing or unresolved.\" >&2\n    exit 1\n    ;;\nesac\n\nushot_key_bytes=$(printf '%s' \"$ushot_key\" | /usr/bin/base64 -D 2>/dev/null | /usr/bin/wc -c | /usr/bin/tr -d ' ')\nif [ \"$ushot_key_bytes\" != \"32\" ]; then\n  echo \"error: SPARKLE_PUBLIC_ED_KEY must be a base64-encoded 32-byte EdDSA public key.\" >&2\n  exit 1\nfi\n\nushot_feed=$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' \"$SRCROOT/UshotApp/Info.plist\" 2>/dev/null)\nif [ \"$ushot_feed\" != \"https://ischeneycc.github.io/ushot/updates/appcast.xml\" ]; then\n  echo \"error: SUFeedURL must use the production HTTPS appcast path.\" >&2\n  exit 1\nfi\n";
+			shellScript = "if [ \"$CONFIGURATION\" != \"Release\" ]; then\n  exit 0\nfi\n\nushot_key=\"${SPARKLE_PUBLIC_ED_KEY:-}\"\ncase \"$ushot_key\" in\n  \"\"|*'$('*)\n    echo \"error: SPARKLE_PUBLIC_ED_KEY is missing or unresolved.\" >&2\n    exit 1\n    ;;\nesac\n\nushot_key_bytes=$(printf '%s' \"$ushot_key\" | /usr/bin/base64 -D 2>/dev/null | /usr/bin/wc -c | /usr/bin/tr -d ' ')\nif [ \"$ushot_key_bytes\" != \"32\" ]; then\n  echo \"error: SPARKLE_PUBLIC_ED_KEY must be a base64-encoded 32-byte EdDSA public key.\" >&2\n  exit 1\nfi\n\nushot_feed=$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' \"$SRCROOT/UshotApp/Info.plist\" 2>/dev/null)\nif [ \"$ushot_feed\" != \"https://ischeneycc.github.io/ushot/updates/v1/appcast.xml\" ]; then\n  echo \"error: SUFeedURL must use the production HTTPS appcast path.\" >&2\n  exit 1\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -587,10 +587,10 @@
 /* Begin XCRemoteSwiftPackageReference section */
 		0E0000000000000000000002 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			repositoryURL = "https://github.com/isCheneycc/Sparkle";
 			requirement = {
 				kind = exactVersion;
-				version = 2.9.5;
+				version = 2.9.5-ushot.2;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

@@ -19,7 +19,7 @@ Ushot 是一款面向 macOS 14 及以上版本 Apple 芯片 Mac 的原生截图�
 截图像素、标注、剪贴板输出、颜色采样、历史记录与图像编码均在本机处理。Ushot 不包含账户、遥测、分析、广告 SDK、崩溃报告上传或系统信息提交。
 
 > [!IMPORTANT]
-> Ushot 0.1.1 是首个直装预览版。请仅从官方 GitHub Release 安装；生产 appcast 当前按设计保持未发布。
+> Ushot 0.1.2（build 3）是计划中的加固更新器一次性手动过渡版。它仍待发布；只有当官方 GitHub Releases 页面实际出现 `v0.1.2` 及其产物时，它才是真正的发布版。生产更新源仍按设计保持未发布。
 
 ## 一次截图，一条连续工作流
 
@@ -79,9 +79,9 @@ open ScreenshotApp.xcodeproj
 
 ## 发布状态与安装
 
-Ushot 0.1.1 是首个直装预览版。受保护的工作流会构建、验证、发布，再通过匿名重新下载验证它的 DMG、ZIP、dSYM ZIP、发行清单与校验和，同时不启用生产环境更新器。直接从 `main` 构建的版本仍属于开发产物，而不是受支持的分发渠道。
+Ushot 0.1.1 是当前已发布的直装预览版。Ushot 0.1.2（build 3）是待发布的加固过渡版：它仍会在禁用更新源的情况下发布，并需要用户手动安装一次。受保护的工作流会构建、验证、发布，再通过匿名重新下载验证它的 DMG、ZIP、dSYM ZIP、发行清单与校验和。直接从 `main` 构建的版本仍属于开发产物，而不是受支持的分发渠道。
 
-请仅从官方 [Ushot Releases](https://github.com/isCheneycc/ushot/releases) 页面下载 [Ushot-0.1.1-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.1/Ushot-0.1.1-arm64.dmg)。首个公开产物会刻意采用 ad-hoc 签名，不包含 Developer ID 签名或 Apple 公证，并且不会启用 App Sandbox。
+当官方 Releases 页面实际列出 `v0.1.2` 后，请从该页面下载 [Ushot-0.1.2-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.2/Ushot-0.1.2-arm64.dmg) 并手动安装。在此之前，该链接刻意处于待发布状态，[Ushot 0.1.1](https://github.com/isCheneycc/ushot/releases/tag/v0.1.1) 仍是最新已发布预览版。公开产物会刻意采用 ad-hoc 签名，不包含 Developer ID 签名或 Apple 公证，并且不会启用 App Sandbox。
 
 1. 打开 DMG，将 `Ushot.app` 拖入**应用程序**。
 2. 只移除下载文件的隔离属性，然后打开 Ushot：
@@ -91,7 +91,7 @@ Ushot 0.1.1 是首个直装预览版。受保护的工作流会构建、验证�
    open "/Applications/Ushot.app"
    ```
 
-此流程仅适用于从官方 [Ushot Releases](https://github.com/isCheneycc/ushot/releases) 页面下载的 `Ushot-0.1.1-arm64.dmg`。不要将命令替换为 `xattr -cr`，不要对更宽泛的目录执行，也不要用于第三方下载。后续安装或更新可能需要重新授予屏幕录制或辅助功能权限。
+此流程仅适用于官方 [Ushot Releases](https://github.com/isCheneycc/ushot/releases) 页面实际已发布的 Ushot 版本化 DMG。不要把待发布的 0.1.2 链接当作发布证据，不要将命令替换为 `xattr -cr`，不要对更宽泛的目录执行，也不要用于第三方下载。后续安装或更新可能需要重新授予屏幕录制或辅助功能权限。
 
 应用包内包含适用的[第三方许可证声明](UshotApp/Resources/ThirdPartyNotices.txt)，其中包括 Sparkle 及其捆绑组件。
 
@@ -99,14 +99,14 @@ Ushot 0.1.1 是首个直装预览版。受保护的工作流会构建、验证�
 
 更新检查只能由用户手动触发。Ushot 不会在启动时或定时检查，不会自动下载，也不会提交系统信息。
 
-在 0.1.1 直装预览版中，**检查更新…** 仍然可见，但生产更新源会刻意保持不可用，因此选择它会显示明确的失败信息。在生产更新器另行宣布就绪之前，请从官方 Releases 页面安装较新的预览版。
+0.1.1 客户端仍固定使用旧 `/updates/appcast.xml` 端点。该端点将永久保持不可用，因此 0.1.1 永远不会自动升级；当 0.1.2 真正发布后，用户需要手动安装一次。0.1.2 客户端会切换到新的加固更新源，但在独立的 0.1.3 更新门禁通过之前，**检查更新…** 仍会显示明确的更新源错误。
 
-- 应用固定使用 `https://ischeneycc.github.io/ushot/updates/appcast.xml`；启用后，该端点必须提供已签名的生产 appcast。
+- Ushot 0.1.2 及以后版本固定使用 `https://ischeneycc.github.io/ushot/updates/v1/appcast.xml`；旧端点永久保持 HTTP 404。
 - 受限 Markdown 格式的发行说明直接嵌入签名更新源，因此显示说明不会发起独立请求。
 - 被接受的更新归档只能来自官方 GitHub Release 下载路径。
-- 完整 appcast 与每个更新归档都必须独立通过 EdDSA 验证；HTTPS 或匹配的校验和不能替代签名验证。
+- 加固运行时会严格比对 appcast 与解压应用的显示版本/构建版本，并要求每个归档通过 EdDSA，即使应用代码签名匹配也不能替代。完整 appcast 会另行签名；HTTPS 或匹配的校验和不能作为替代。
 
-在 EdDSA 密钥恢复演练与干净账户的旧版本 → 新版本矩阵通过、且 Sparkle 客户端归档版本验证缺口关闭之前，生产环境自更新仍保持阻塞。Developer ID 分发也会继续禁用，直到 Sparkle 不再允许用匹配的 Developer ID 代码签名替代失败的归档 EdDSA 验证。存在可下载的 GitHub Release，本身不能证明这些更新门禁已经通过。
+首个允许进入更新源的项目是 Ushot 0.1.3（build 4）。只有在 0.1.2 → 0.1.3 的干净账户替换、篡改拒绝、严格版本不匹配与 EdDSA 密钥恢复矩阵留下通过证据后，它才会部署。存在加固运行时源码、构建成功或可下载的 GitHub Release，本身都不能证明这些门禁已通过。当前的 ad-hoc GitHub 分发不需要加入 Apple Developer Program；Developer ID 与公证仍属于独立的未来路线。
 
 完整信任模型与发布流程请阅读 [SECURITY.md](SECURITY.md)、[PRIVACY.md](PRIVACY.md) 和[发布指南](docs/RELEASING.md)。
 

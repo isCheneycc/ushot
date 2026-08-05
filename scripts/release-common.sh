@@ -12,12 +12,26 @@ USHOT_LEGACY_BUNDLE_IDENTIFIER="com.example.UshotApp"
 USHOT_LEGACY_EXECUTABLE_NAME="UshotApp"
 USHOT_ARCHITECTURE="arm64"
 USHOT_GITHUB_REPOSITORY="isCheneycc/ushot"
-USHOT_APPCAST_URL="https://ischeneycc.github.io/ushot/updates/appcast.xml"
+USHOT_APPCAST_ORIGIN="https://ischeneycc.github.io/ushot"
+USHOT_APPCAST_RELATIVE_PATH="updates/v1/appcast.xml"
+USHOT_APPCAST_URL="$USHOT_APPCAST_ORIGIN/$USHOT_APPCAST_RELATIVE_PATH"
+USHOT_LEGACY_APPCAST_RELATIVE_PATH="updates/appcast.xml"
+USHOT_LEGACY_APPCAST_URL="$USHOT_APPCAST_ORIGIN/$USHOT_LEGACY_APPCAST_RELATIVE_PATH"
+USHOT_APPCAST_CHANNEL_TITLE="Ushot Updates"
+USHOT_APPCAST_CHANNEL_DESCRIPTION="Stable Ushot updates for macOS."
+USHOT_APPCAST_CHANNEL_LANGUAGE="en"
 USHOT_SPARKLE_VERSION="2.9.5"
 USHOT_SPARKLE_ARCHIVE_SHA256="015336b601493e05c237964954bff6191370003d94edefe663724c88840d73cc"
 USHOT_SPARKLE_KEY_ACCOUNT="io.github.ischeneycc.ushot"
 USHOT_SPARKLE_PUBLIC_ED_KEY="gdZAswkBeWYGYjpqCUmtrUEuyIc/RP5DO+c5I7h+h3Q="
 USHOT_SPARKLE_XML_NAMESPACE="http://www.andymatuschak.org/xml-namespaces/sparkle"
+USHOT_PUBLIC_UPDATE_BASELINE_VERSION="0.1.1"
+USHOT_PUBLIC_UPDATE_BASELINE_BUILD="2"
+USHOT_PUBLIC_UPDATE_BASELINE_SPARKLE_BUILD="2060"
+USHOT_UPDATE_TRANSITION_VERSION="0.1.2"
+USHOT_UPDATE_TRANSITION_BUILD="3"
+USHOT_FIRST_FEED_VERSION="0.1.3"
+USHOT_FIRST_FEED_BUILD="4"
 
 release_log() {
   printf 'release: %s\n' "$*"
@@ -95,6 +109,91 @@ release_version_is_strictly_greater() {
     fi
   done
   return 1
+}
+
+release_validate_update_rollout_constants() {
+  release_validate_version "$USHOT_PUBLIC_UPDATE_BASELINE_VERSION"
+  release_validate_build_number "$USHOT_PUBLIC_UPDATE_BASELINE_BUILD"
+  release_validate_version "$USHOT_UPDATE_TRANSITION_VERSION"
+  release_validate_build_number "$USHOT_UPDATE_TRANSITION_BUILD"
+  release_validate_version "$USHOT_FIRST_FEED_VERSION"
+  release_validate_build_number "$USHOT_FIRST_FEED_BUILD"
+
+  release_version_is_strictly_greater \
+    "$USHOT_UPDATE_TRANSITION_VERSION" \
+    "$USHOT_PUBLIC_UPDATE_BASELINE_VERSION" \
+    || release_die "Update transition version must be newer than the public baseline."
+  release_decimal_is_strictly_greater \
+    "$USHOT_UPDATE_TRANSITION_BUILD" \
+    "$USHOT_PUBLIC_UPDATE_BASELINE_BUILD" \
+    || release_die "Update transition build must be newer than the public baseline."
+  release_version_is_strictly_greater \
+    "$USHOT_FIRST_FEED_VERSION" \
+    "$USHOT_UPDATE_TRANSITION_VERSION" \
+    || release_die "First-feed version must be newer than the update transition."
+  release_decimal_is_strictly_greater \
+    "$USHOT_FIRST_FEED_BUILD" \
+    "$USHOT_UPDATE_TRANSITION_BUILD" \
+    || release_die "First-feed build must be newer than the update transition."
+}
+
+release_is_first_feed_identity() {
+  local version="$1"
+  local build_number="$2"
+
+  [[ "$version" == "$USHOT_FIRST_FEED_VERSION" \
+      && "$build_number" == "$USHOT_FIRST_FEED_BUILD" ]]
+}
+
+release_validate_feed_release_identity() {
+  local version="$1"
+  local build_number="$2"
+
+  release_validate_version "$version"
+  release_validate_build_number "$build_number"
+  release_validate_update_rollout_constants
+
+  if release_is_first_feed_identity "$version" "$build_number"; then
+    return 0
+  fi
+
+  release_version_is_strictly_greater "$version" "$USHOT_FIRST_FEED_VERSION" \
+    || release_die "Feed publication version $version must be $USHOT_FIRST_FEED_VERSION or newer."
+  release_decimal_is_strictly_greater "$build_number" "$USHOT_FIRST_FEED_BUILD" \
+    || release_die "Feed publication build $build_number must be $USHOT_FIRST_FEED_BUILD or newer."
+}
+
+release_validate_appcast_channel_field() {
+  local appcast_path="$1"
+  local channel_xpath="$2"
+  local element_name="$3"
+  local expected_value="$4"
+  local field_label="$5"
+  local canonical_count
+  local total_count
+  local actual_value
+
+  canonical_count="$(xmllint --xpath "count($channel_xpath/*[local-name()='$element_name' and namespace-uri()=''])" "$appcast_path")"
+  total_count="$(xmllint --xpath "count($channel_xpath/*[local-name()='$element_name'])" "$appcast_path")"
+  [[ "$canonical_count" == "1" && "$total_count" == "1" ]] \
+    || release_die "Appcast channel must contain exactly one canonical $field_label."
+  actual_value="$(xmllint --xpath "string($channel_xpath/*[local-name()='$element_name' and namespace-uri()=''])" "$appcast_path")"
+  [[ "$actual_value" == "$expected_value" ]] \
+    || release_die "Appcast channel has an unexpected $field_label: $actual_value"
+}
+
+release_validate_canonical_appcast_channel() {
+  local appcast_path="$1"
+  local channel_xpath="/*[local-name()='rss' and namespace-uri()='']/*[local-name()='channel' and namespace-uri()='']"
+
+  release_validate_appcast_channel_field \
+    "$appcast_path" "$channel_xpath" "title" "$USHOT_APPCAST_CHANNEL_TITLE" "title"
+  release_validate_appcast_channel_field \
+    "$appcast_path" "$channel_xpath" "link" "$USHOT_APPCAST_URL" "versioned feed link"
+  release_validate_appcast_channel_field \
+    "$appcast_path" "$channel_xpath" "description" "$USHOT_APPCAST_CHANNEL_DESCRIPTION" "description"
+  release_validate_appcast_channel_field \
+    "$appcast_path" "$channel_xpath" "language" "$USHOT_APPCAST_CHANNEL_LANGUAGE" "language"
 }
 
 release_validate_release_notes_content() {
@@ -179,6 +278,145 @@ release_plist_value() {
     || release_die "Missing $key in $plist_path"
 }
 
+release_require_plist_type() {
+  local plist_path="$1"
+  local key="$2"
+  local expected_type="$3"
+  local actual_type
+
+  actual_type="$(/usr/bin/plutil -type "$key" "$plist_path" 2>/dev/null)" \
+    || release_die "Missing $key in $plist_path"
+  [[ "$actual_type" == "$expected_type" ]] \
+    || release_die "$key in $plist_path must have plist type $expected_type; got $actual_type."
+}
+
+release_validate_public_update_baseline_app_identity() {
+  local app_path="$1"
+  local info_plist="$app_path/Contents/Info.plist"
+  local executable="$app_path/Contents/MacOS/$USHOT_EXECUTABLE_NAME"
+  local sparkle_binary="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
+  local sparkle_info_plist="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist"
+  local string_key
+  local boolean_key
+  local absent_key
+
+  [[ -d "$app_path" ]] || release_die "Public update baseline app bundle not found: $app_path"
+  [[ "$(basename "$app_path")" == "$USHOT_APP_BUNDLE" ]] \
+    || release_die "Public update baseline must be named $USHOT_APP_BUNDLE: $app_path"
+  [[ -f "$info_plist" ]] || release_die "Public update baseline Info.plist not found: $info_plist"
+
+  for string_key in \
+    CFBundleIdentifier \
+    CFBundleName \
+    CFBundleExecutable \
+    CFBundleShortVersionString \
+    CFBundleVersion \
+    SUFeedURL \
+    SUPublicEDKey
+  do
+    release_require_plist_type "$info_plist" "$string_key" string
+  done
+  for boolean_key in \
+    SURequireSignedFeed \
+    SUVerifyUpdateBeforeExtraction \
+    SUEnableAutomaticChecks \
+    SUAutomaticallyUpdate \
+    SUAllowsAutomaticUpdates \
+    SUEnableSystemProfiling
+  do
+    release_require_plist_type "$info_plist" "$boolean_key" bool
+  done
+  release_require_plist_type \
+    "$info_plist" \
+    SUSignedFeedFailureExpirationInterval \
+    integer
+
+  [[ "$(release_plist_value "$info_plist" CFBundleIdentifier)" == "$USHOT_BUNDLE_IDENTIFIER" ]] \
+    || release_die "Public update baseline has an unexpected bundle identifier."
+  [[ "$(release_plist_value "$info_plist" CFBundleName)" == "$USHOT_PRODUCT_NAME" ]] \
+    || release_die "Public update baseline has an unexpected product name."
+  [[ "$(release_plist_value "$info_plist" CFBundleExecutable)" == "$USHOT_EXECUTABLE_NAME" ]] \
+    || release_die "Public update baseline has an unexpected executable name."
+  [[ "$(release_plist_value "$info_plist" CFBundleShortVersionString)" == "$USHOT_PUBLIC_UPDATE_BASELINE_VERSION" ]] \
+    || release_die "Public update baseline version must be $USHOT_PUBLIC_UPDATE_BASELINE_VERSION."
+  [[ "$(release_plist_value "$info_plist" CFBundleVersion)" == "$USHOT_PUBLIC_UPDATE_BASELINE_BUILD" ]] \
+    || release_die "Public update baseline build must be $USHOT_PUBLIC_UPDATE_BASELINE_BUILD."
+  [[ "$(release_plist_value "$info_plist" SUFeedURL)" == "$USHOT_LEGACY_APPCAST_URL" ]] \
+    || release_die "Public update baseline must retain the isolated legacy Sparkle feed URL."
+  [[ "$(release_plist_value "$info_plist" SUPublicEDKey)" == "$USHOT_SPARKLE_PUBLIC_ED_KEY" ]] \
+    || release_die "Public update baseline does not contain Ushot's expected Sparkle Ed25519 public key."
+  [[ "$(release_plist_value "$info_plist" SURequireSignedFeed)" == "true" ]] \
+    || release_die "Public update baseline must require a signed Sparkle feed."
+  [[ "$(release_plist_value "$info_plist" SUSignedFeedFailureExpirationInterval)" == "0" ]] \
+    || release_die "Public update baseline must permanently fail closed when signed-feed verification fails."
+  [[ "$(release_plist_value "$info_plist" SUVerifyUpdateBeforeExtraction)" == "true" ]] \
+    || release_die "Public update baseline must verify updates before extraction."
+  [[ "$(release_plist_value "$info_plist" SUEnableAutomaticChecks)" == "false" ]] \
+    || release_die "Public update baseline must keep automatic update checks disabled."
+  [[ "$(release_plist_value "$info_plist" SUAutomaticallyUpdate)" == "false" ]] \
+    || release_die "Public update baseline must not install updates automatically."
+  [[ "$(release_plist_value "$info_plist" SUAllowsAutomaticUpdates)" == "false" ]] \
+    || release_die "Public update baseline must disallow automatic updates."
+  [[ "$(release_plist_value "$info_plist" SUEnableSystemProfiling)" == "false" ]] \
+    || release_die "Public update baseline must keep Sparkle system profiling disabled."
+
+  for absent_key in \
+    SURequireExactUpdateVersionIdentity \
+    SURequireEdDSAUpdateArchiveSignature
+  do
+    if /usr/bin/plutil -type "$absent_key" "$info_plist" >/dev/null 2>&1; then
+      release_die "Public update baseline unexpectedly contains post-baseline key $absent_key."
+    fi
+  done
+
+  [[ -x "$executable" ]] \
+    || release_die "Public update baseline executable is missing or is not executable."
+  [[ -x "$sparkle_binary" ]] \
+    || release_die "Public update baseline is missing Sparkle's embedded framework binary."
+  [[ -f "$sparkle_info_plist" ]] \
+    || release_die "Public update baseline is missing Sparkle's embedded framework Info.plist."
+  release_require_plist_type "$sparkle_info_plist" CFBundleShortVersionString string
+  release_require_plist_type "$sparkle_info_plist" CFBundleVersion string
+  [[ "$(release_plist_value "$sparkle_info_plist" CFBundleShortVersionString)" == "$USHOT_SPARKLE_VERSION" ]] \
+    || release_die "Public update baseline has an unexpected Sparkle version."
+  [[ "$(release_plist_value "$sparkle_info_plist" CFBundleVersion)" == "$USHOT_PUBLIC_UPDATE_BASELINE_SPARKLE_BUILD" ]] \
+    || release_die "Public update baseline has an unexpected Sparkle build."
+  if /usr/bin/plutil -type SUUpdateVersionIdentityHardeningVersion "$sparkle_info_plist" >/dev/null 2>&1; then
+    release_die "Public update baseline unexpectedly contains the post-baseline Sparkle hardening marker."
+  fi
+
+  release_require_command otool
+  otool -L "$executable" | awk '
+    $1 == "@rpath/Sparkle.framework/Versions/B/Sparkle" { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' || release_die "Public update baseline is not linked to its embedded Sparkle framework."
+  otool -l "$executable" | awk '
+    $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+    in_rpath && $1 == "path" {
+      if ($2 == "@executable_path/../Frameworks") { found = 1 }
+      in_rpath = 0
+    }
+    END { exit(found ? 0 : 1) }
+  ' || release_die "Public update baseline cannot resolve its embedded Sparkle framework."
+  [[ -s "$app_path/Contents/Resources/ThirdPartyNotices.txt" ]] \
+    || release_die "Public update baseline must include its third-party license notices."
+  [[ -s "$app_path/Contents/Resources/LICENSE" ]] \
+    || release_die "Public update baseline must include the Apache-2.0 license."
+}
+
+release_validate_supported_installed_app_identity() {
+  local app_path="$1"
+  local version="$2"
+  local build_number="$3"
+
+  if [[ "$version" == "$USHOT_PUBLIC_UPDATE_BASELINE_VERSION" \
+      && "$build_number" == "$USHOT_PUBLIC_UPDATE_BASELINE_BUILD" ]]; then
+    release_validate_public_update_baseline_app_identity "$app_path"
+    return
+  fi
+  release_validate_app_identity "$app_path" "$version" "$build_number"
+}
+
 release_validate_app_identity() {
   local app_path="$1"
   local expected_version="$2"
@@ -186,11 +424,41 @@ release_validate_app_identity() {
   local info_plist="$app_path/Contents/Info.plist"
   local executable="$app_path/Contents/MacOS/$USHOT_EXECUTABLE_NAME"
   local sparkle_binary="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
+  local sparkle_info_plist="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist"
 
   [[ -d "$app_path" ]] || release_die "App bundle not found: $app_path"
   [[ "$(basename "$app_path")" == "$USHOT_APP_BUNDLE" ]] \
     || release_die "Release product must be named $USHOT_APP_BUNDLE: $app_path"
   [[ -f "$info_plist" ]] || release_die "App Info.plist not found: $info_plist"
+  local string_key
+  for string_key in \
+    CFBundleIdentifier \
+    CFBundleName \
+    CFBundleExecutable \
+    CFBundleShortVersionString \
+    CFBundleVersion \
+    SUFeedURL \
+    SUPublicEDKey
+  do
+    release_require_plist_type "$info_plist" "$string_key" string
+  done
+  local boolean_key
+  for boolean_key in \
+    SURequireSignedFeed \
+    SURequireExactUpdateVersionIdentity \
+    SURequireEdDSAUpdateArchiveSignature \
+    SUVerifyUpdateBeforeExtraction \
+    SUEnableAutomaticChecks \
+    SUAutomaticallyUpdate \
+    SUAllowsAutomaticUpdates \
+    SUEnableSystemProfiling
+  do
+    release_require_plist_type "$info_plist" "$boolean_key" bool
+  done
+  release_require_plist_type \
+    "$info_plist" \
+    SUSignedFeedFailureExpirationInterval \
+    integer
   [[ "$(release_plist_value "$info_plist" CFBundleIdentifier)" == "$USHOT_BUNDLE_IDENTIFIER" ]] \
     || release_die "Built app has an unexpected bundle identifier."
   [[ "$(release_plist_value "$info_plist" CFBundleName)" == "$USHOT_PRODUCT_NAME" ]] \
@@ -205,6 +473,10 @@ release_validate_app_identity() {
     || release_die "Built app has an unexpected Sparkle feed URL."
   [[ "$(release_plist_value "$info_plist" SURequireSignedFeed)" == "true" ]] \
     || release_die "Built app must require a signed Sparkle feed."
+  [[ "$(release_plist_value "$info_plist" SURequireExactUpdateVersionIdentity)" == "true" ]] \
+    || release_die "Built app must require exact appcast/archive version identity."
+  [[ "$(release_plist_value "$info_plist" SURequireEdDSAUpdateArchiveSignature)" == "true" ]] \
+    || release_die "Built app must require an independent EdDSA archive signature."
   [[ "$(release_plist_value "$info_plist" SUSignedFeedFailureExpirationInterval)" == "0" ]] \
     || release_die "Built app must permanently fail closed when signed-feed verification fails."
   [[ "$(release_plist_value "$info_plist" SUVerifyUpdateBeforeExtraction)" == "true" ]] \
@@ -225,6 +497,14 @@ release_validate_app_identity() {
     || release_die "Built app executable is missing or is not executable."
   [[ -x "$sparkle_binary" ]] \
     || release_die "Built app is missing Sparkle's embedded framework binary."
+  [[ -f "$sparkle_info_plist" ]] \
+    || release_die "Built app is missing Sparkle's embedded framework Info.plist."
+  release_require_plist_type \
+    "$sparkle_info_plist" \
+    SUUpdateVersionIdentityHardeningVersion \
+    integer
+  [[ "$(release_plist_value "$sparkle_info_plist" SUUpdateVersionIdentityHardeningVersion)" == "1" ]] \
+    || release_die "Embedded Sparkle framework is missing Ushot update hardening marker version 1."
   release_require_command otool
   otool -L "$executable" | awk '
     $1 == "@rpath/Sparkle.framework/Versions/B/Sparkle" { found = 1 }

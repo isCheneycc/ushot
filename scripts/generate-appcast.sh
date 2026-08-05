@@ -47,6 +47,7 @@ done
 release_validate_version "$VERSION"
 release_validate_build_number "$BUILD_NUMBER"
 release_validate_tag "$TAG" "$VERSION"
+release_validate_feed_release_identity "$VERSION" "$BUILD_NUMBER"
 [[ -s "$ARCHIVE_PATH" ]] || release_die "Sparkle ZIP is missing or empty: $ARCHIVE_PATH"
 [[ "$(basename "$ARCHIVE_PATH")" == "$USHOT_PRODUCT_NAME-$VERSION-$USHOT_ARCHITECTURE.zip" ]] \
   || release_die "Unexpected Sparkle ZIP filename: $(basename "$ARCHIVE_PATH")"
@@ -68,18 +69,7 @@ validate_first_release_seed() {
     || release_die "First-release seed must contain exactly one channel."
   [[ "$(xmllint --xpath 'count(//*[local-name()="item"])' "$appcast_path")" == "0" ]] \
     || release_die "First-release seed must not contain any update items."
-  [[ "$(xmllint --xpath "count($channel_xpath/*[local-name()='title' and namespace-uri()=''])" "$appcast_path")" == "1" \
-      && "$(xmllint --xpath "string($channel_xpath/*[local-name()='title' and namespace-uri()=''])" "$appcast_path")" == "Ushot Updates" ]] \
-    || release_die "First-release seed has an unexpected channel title."
-  [[ "$(xmllint --xpath "count($channel_xpath/*[local-name()='link' and namespace-uri()=''])" "$appcast_path")" == "1" \
-      && "$(xmllint --xpath "string($channel_xpath/*[local-name()='link' and namespace-uri()=''])" "$appcast_path")" == "$USHOT_APPCAST_URL" ]] \
-    || release_die "First-release seed has an unexpected channel link."
-  [[ "$(xmllint --xpath "count($channel_xpath/*[local-name()='description' and namespace-uri()=''])" "$appcast_path")" == "1" \
-      && "$(xmllint --xpath "string($channel_xpath/*[local-name()='description' and namespace-uri()=''])" "$appcast_path")" == "Stable Ushot updates for macOS." ]] \
-    || release_die "First-release seed has an unexpected channel description."
-  [[ "$(xmllint --xpath "count($channel_xpath/*[local-name()='language' and namespace-uri()=''])" "$appcast_path")" == "1" \
-      && "$(xmllint --xpath "string($channel_xpath/*[local-name()='language' and namespace-uri()=''])" "$appcast_path")" == "en" ]] \
-    || release_die "First-release seed has an unexpected channel language."
+  release_validate_canonical_appcast_channel "$appcast_path"
 }
 
 validate_canonical_appcast_items() {
@@ -102,6 +92,7 @@ validate_canonical_appcast_items() {
   [[ "$(xmllint --xpath "count($channel_xpath)" "$appcast_path")" == "1" \
       && "$(xmllint --xpath "count(//*[local-name()='channel'])" "$appcast_path")" == "1" ]] \
     || release_die "Appcast must contain exactly one canonical RSS channel."
+  release_validate_canonical_appcast_channel "$appcast_path"
   item_count="$(xmllint --xpath "count($channel_xpath/*[local-name()='item' and namespace-uri()=''])" "$appcast_path")"
   total_item_count="$(xmllint --xpath 'count(//*[local-name()="item"])' "$appcast_path")"
   [[ "$item_count" =~ ^[0-9]+$ ]] \
@@ -120,6 +111,8 @@ validate_canonical_appcast_items() {
     [[ "$(xmllint --xpath "count($item_xpath/*[local-name()='enclosure' and namespace-uri()=''])" "$appcast_path")" == "1" \
         && "$(xmllint --xpath "count($item_xpath/*[local-name()='enclosure'])" "$appcast_path")" == "1" ]] \
       || release_die "Appcast item $index must contain exactly one enclosure."
+    [[ "$(xmllint --xpath "count($item_xpath/*[local-name()='enclosure']/@*[local-name()='version' or local-name()='shortVersionString'])" "$appcast_path")" == "0" ]] \
+      || release_die "Appcast item $index must express version identity only in canonical Sparkle child elements."
     [[ "$(xmllint --xpath "count($item_xpath/*[local-name()='informationalUpdate'])" "$appcast_path")" == "0" ]] \
       || release_die "Appcast item $index must not be an informational-only update."
     [[ "$(xmllint --xpath "count($item_xpath/*[local-name()='minimumAutoupdateVersion'])" "$appcast_path")" == "0" ]] \
@@ -278,11 +271,11 @@ if [[ "$EXISTING_APPCAST_KIND" == "signed" ]]; then
   done
   release_log "Verified existing production appcast with Sparkle sign_update."
 else
-  [[ "$VERSION" == "0.1.0" && "$BUILD_NUMBER" == "1" ]] \
-    || release_die "The unsigned seed is restricted to the initial 0.1.0 (build 1) release."
-  validate_first_release_seed "$PROJECT_ROOT/updates/appcast.xml"
+  release_is_first_feed_identity "$VERSION" "$BUILD_NUMBER" \
+    || release_die "The unsigned seed is restricted to the exact first-feed identity $USHOT_FIRST_FEED_VERSION (build $USHOT_FIRST_FEED_BUILD); got $VERSION (build $BUILD_NUMBER)."
+  validate_first_release_seed "$PROJECT_ROOT/$USHOT_APPCAST_RELATIVE_PATH"
   validate_first_release_seed "$EXISTING_APPCAST"
-  cmp "$EXISTING_APPCAST" "$PROJECT_ROOT/updates/appcast.xml" \
+  cmp "$EXISTING_APPCAST" "$PROJECT_ROOT/$USHOT_APPCAST_RELATIVE_PATH" \
     || release_die "Unsigned first-release appcast is not byte-identical to the trusted repository seed."
   release_log "Accepted byte-identical seed only because fetch metadata recorded a production HTTP 404."
 fi
@@ -324,25 +317,25 @@ if [[ -e "$SITE_DIRECTORY" || -L "$SITE_DIRECTORY" ]]; then
     || release_die "Pages staging destination exists but is not a real directory: $SITE_DIRECTORY"
   rm -rf "$SITE_DIRECTORY"
 fi
-UPDATES_DIRECTORY="$SITE_DIRECTORY/updates"
-mkdir -p "$UPDATES_DIRECTORY"
+SITE_APPCAST="$SITE_DIRECTORY/$USHOT_APPCAST_RELATIVE_PATH"
+mkdir -p "$(dirname "$SITE_APPCAST")"
 
-ditto "$WORKSPACE_APPCAST" "$UPDATES_DIRECTORY/appcast.xml"
+ditto "$WORKSPACE_APPCAST" "$SITE_APPCAST"
 
 "$SCRIPT_DIR/validate-appcast.sh" \
-  --appcast "$UPDATES_DIRECTORY/appcast.xml" \
+  --appcast "$SITE_APPCAST" \
   --archive "$ARCHIVE_PATH" \
   --release-notes "$RELEASE_NOTES_SOURCE" \
   --version "$VERSION" \
   --build-number "$BUILD_NUMBER" \
   --tag "$TAG"
 
-NEW_ENCLOSURE_SIGNATURE="$(xmllint --xpath "string((/*[local-name()='rss' and namespace-uri()='']/*[local-name()='channel' and namespace-uri()='']/*[local-name()='item' and namespace-uri()=''])[1]/*[local-name()='enclosure' and namespace-uri()='']/@*[local-name()='edSignature' and namespace-uri()='$USHOT_SPARKLE_XML_NAMESPACE'])" "$UPDATES_DIRECTORY/appcast.xml")"
+NEW_ENCLOSURE_SIGNATURE="$(xmllint --xpath "string((/*[local-name()='rss' and namespace-uri()='']/*[local-name()='channel' and namespace-uri()='']/*[local-name()='item' and namespace-uri()=''])[1]/*[local-name()='enclosure' and namespace-uri()='']/@*[local-name()='edSignature' and namespace-uri()='$USHOT_SPARKLE_XML_NAMESPACE'])" "$SITE_APPCAST")"
 verify_sparkle_signature "$ARCHIVE_PATH" "$NEW_ENCLOSURE_SIGNATURE" \
   || release_die "Generated Sparkle enclosure signature failed cryptographic verification."
-verify_sparkle_signature "$UPDATES_DIRECTORY/appcast.xml" \
+verify_sparkle_signature "$SITE_APPCAST" \
   || release_die "Generated signed feed failed cryptographic verification."
 unset PRIVATE_KEY
 
 release_log "Signed Pages payload is ready: $SITE_DIRECTORY"
-printf '%s\n' "$UPDATES_DIRECTORY/appcast.xml"
+printf '%s\n' "$SITE_APPCAST"

@@ -8,22 +8,23 @@ source "$SCRIPT_DIR/release-common.sh"
 
 OUTPUT_PATH=""
 KIND_OUTPUT_PATH=""
-ALLOW_FIRST_RELEASE_SEED="NO"
+VERSION=""
+BUILD_NUMBER=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output) OUTPUT_PATH="${2:?--output requires a value}"; shift 2 ;;
     --kind-output) KIND_OUTPUT_PATH="${2:?--kind-output requires a value}"; shift 2 ;;
-    --allow-first-release-seed) ALLOW_FIRST_RELEASE_SEED="${2:?--allow-first-release-seed requires a value}"; shift 2 ;;
+    --version) VERSION="${2:?--version requires a value}"; shift 2 ;;
+    --build-number) BUILD_NUMBER="${2:?--build-number requires a value}"; shift 2 ;;
     *) release_die "Unknown argument: $1" ;;
   esac
 done
 
-[[ -n "$OUTPUT_PATH" && -n "$KIND_OUTPUT_PATH" ]] \
-  || release_die "usage: $0 --output /path/to/appcast.xml --kind-output /path/to/appcast.kind [--allow-first-release-seed YES]"
-[[ "$ALLOW_FIRST_RELEASE_SEED" == "YES" || "$ALLOW_FIRST_RELEASE_SEED" == "NO" ]] \
-  || release_die "--allow-first-release-seed must be YES or NO."
-SEED_APPCAST="$PROJECT_ROOT/updates/appcast.xml"
+[[ -n "$OUTPUT_PATH" && -n "$KIND_OUTPUT_PATH" && -n "$VERSION" && -n "$BUILD_NUMBER" ]] \
+  || release_die "usage: $0 --output /path/to/appcast.xml --kind-output /path/to/appcast.kind --version X.Y.Z --build-number N"
+release_validate_feed_release_identity "$VERSION" "$BUILD_NUMBER"
+SEED_APPCAST="$PROJECT_ROOT/$USHOT_APPCAST_RELATIVE_PATH"
 [[ -s "$SEED_APPCAST" ]] || release_die "Seed appcast is missing: $SEED_APPCAST"
 release_require_command curl
 release_require_command xmllint
@@ -39,18 +40,7 @@ validate_first_release_seed() {
     || release_die "First-release seed must contain exactly one channel."
   [[ "$(xmllint --xpath 'count(//*[local-name()="item"])' "$appcast_path")" == "0" ]] \
     || release_die "First-release seed must not contain any update items."
-  [[ "$(xmllint --xpath 'count(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="title"])' "$appcast_path")" == "1" \
-      && "$(xmllint --xpath 'string(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="title"])' "$appcast_path")" == "Ushot Updates" ]] \
-    || release_die "First-release seed has an unexpected channel title."
-  [[ "$(xmllint --xpath 'count(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="link"])' "$appcast_path")" == "1" \
-      && "$(xmllint --xpath 'string(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="link"])' "$appcast_path")" == "$USHOT_APPCAST_URL" ]] \
-    || release_die "First-release seed has an unexpected channel link."
-  [[ "$(xmllint --xpath 'count(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="description"])' "$appcast_path")" == "1" \
-      && "$(xmllint --xpath 'string(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="description"])' "$appcast_path")" == "Stable Ushot updates for macOS." ]] \
-    || release_die "First-release seed has an unexpected channel description."
-  [[ "$(xmllint --xpath 'count(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="language"])' "$appcast_path")" == "1" \
-      && "$(xmllint --xpath 'string(/*[local-name()="rss"]/*[local-name()="channel"]/*[local-name()="language"])' "$appcast_path")" == "en" ]] \
-    || release_die "First-release seed has an unexpected channel language."
+  release_validate_canonical_appcast_channel "$appcast_path"
 }
 
 validate_first_release_seed "$SEED_APPCAST"
@@ -77,14 +67,14 @@ case "$HTTP_STATUS" in
     release_log "Fetched production appcast; cryptographic verification is required before regeneration."
     ;;
   404)
-    [[ "$ALLOW_FIRST_RELEASE_SEED" == "YES" ]] \
-      || release_die "Production appcast returned HTTP 404 after the first-release seed window; refusing to reset signed history."
+    release_is_first_feed_identity "$VERSION" "$BUILD_NUMBER" \
+      || release_die "Production appcast returned HTTP 404 for $VERSION (build $BUILD_NUMBER); only $USHOT_FIRST_FEED_VERSION (build $USHOT_FIRST_FEED_BUILD) may bootstrap from the zero-item seed. Refusing to reset signed history."
     ditto "$SEED_APPCAST" "$OUTPUT_PATH"
     cmp "$SEED_APPCAST" "$OUTPUT_PATH" \
       || release_die "Copied first-release seed differs from its trusted repository source."
     validate_first_release_seed "$OUTPUT_PATH"
     printf 'seed' > "$KIND_OUTPUT_PATH"
-    release_log "Production appcast returned HTTP 404; using the byte-identical repository seed."
+    release_log "Production appcast returned HTTP 404 for the exact first-feed identity $VERSION (build $BUILD_NUMBER); using the byte-identical repository seed."
     ;;
   *)
     release_die "Could not fetch the production appcast: HTTP $HTTP_STATUS"

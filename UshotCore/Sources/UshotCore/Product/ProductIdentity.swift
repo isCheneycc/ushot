@@ -11,7 +11,7 @@ public enum ProductIdentity {
     public static let legacyHistoryMigrationMarkerKey =
         "\(bundleIdentifier).history-migration-from-legacy.v1"
     public static let updateFeedURLString =
-        "https://ischeneycc.github.io/ushot/updates/appcast.xml"
+        "https://ischeneycc.github.io/ushot/updates/v1/appcast.xml"
     public static let sparklePublicEDKey =
         "gdZAswkBeWYGYjpqCUmtrUEuyIc/RP5DO+c5I7h+h3Q="
 }

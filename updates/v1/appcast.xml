@@ -2,7 +2,7 @@
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
     <title>Ushot Updates</title>
-    <link>https://ischeneycc.github.io/ushot/updates/appcast.xml</link>
+    <link>https://ischeneycc.github.io/ushot/updates/v1/appcast.xml</link>
     <description>Stable Ushot updates for macOS.</description>
     <language>en</language>
   </channel>

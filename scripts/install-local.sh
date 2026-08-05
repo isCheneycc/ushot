@@ -254,7 +254,7 @@ validate_current_local_app() {
   build_number="$(release_plist_value "$info_plist" CFBundleVersion)"
   release_validate_version "$version"
   release_validate_build_number "$build_number"
-  release_validate_app_identity "$app_path" "$version" "$build_number"
+  release_validate_supported_installed_app_identity "$app_path" "$version" "$build_number"
   release_verify_signature_mode "$app_path" local-signed
 
   installed_team="$(release_team_identifier "$app_path")"
@@ -282,7 +282,7 @@ validate_current_recovery_app() {
   build_number="$(release_plist_value "$info_plist" CFBundleVersion)"
   release_validate_version "$version"
   release_validate_build_number "$build_number"
-  release_validate_app_identity "$app_path" "$version" "$build_number"
+  release_validate_supported_installed_app_identity "$app_path" "$version" "$build_number"
   release_verify_signature_mode "$app_path" local-signed
   installed_team="$(release_team_identifier "$app_path")"
   [[ "$installed_team" == "$expected_team" ]] \
@@ -702,6 +702,7 @@ handle_signal() {
   exit "$signal_status"
 }
 
+install_local_main() {
 trap 'handle_exit $?' EXIT
 trap 'handle_signal HUP 129' HUP
 trap 'handle_signal INT 130' INT
@@ -977,4 +978,9 @@ if [[ "$CURRENT_MOVED" == "YES" ]]; then
 fi
 if [[ "$LEGACY_MOVED" == "YES" ]]; then
   release_log "Recoverable legacy UshotApp backup: $LEGACY_BACKUP_APP"
+fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  install_local_main
 fi
