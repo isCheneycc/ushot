@@ -1,0 +1,15 @@
+.DS_Store
+.build/
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.xcresult
+*.profraw
+*.profdata
+*.dmg
+.env
+Config/Local.xcconfig
+*.p12
+*.cer
+*.provisionprofile

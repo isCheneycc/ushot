@@ -1,0 +1,540 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		010000000000000000000001 /* UshotApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000001 /* UshotApp.swift */; };
+		010000000000000000000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000002 /* AppDelegate.swift */; };
+		010000000000000000000003 /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000003 /* AppEnvironment.swift */; };
+		010000000000000000000004 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000004 /* Assets.xcassets */; };
+		010000000000000000000005 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000005 /* Localizable.xcstrings */; };
+		010000000000000000000006 /* UshotCore in Frameworks */ = {isa = PBXBuildFile; productRef = 0F0000000000000000000001 /* UshotCore */; };
+		010000000000000000000007 /* PhaseZeroFoundationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000006 /* PhaseZeroFoundationTests.swift */; };
+		010000000000000000000008 /* UshotCore in Frameworks */ = {isa = PBXBuildFile; productRef = 0F0000000000000000000002 /* UshotCore */; };
+		010000000000000000000009 /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000000D /* StatusBarController.swift */; };
+		01000000000000000000000A /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000000E /* SettingsWindowController.swift */; };
+		01000000000000000000000B /* SettingsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000000F /* SettingsViews.swift */; };
+		01000000000000000000000C /* ShortcutRecorderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000010 /* ShortcutRecorderView.swift */; };
+		01000000000000000000000D /* CaptureWorkflowCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000011 /* CaptureWorkflowCoordinator.swift */; };
+		01000000000000000000000E /* CaptureSelectionCoordinators.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000012 /* CaptureSelectionCoordinators.swift */; };
+		01000000000000000000000F /* PinnedShotManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000013 /* PinnedShotManager.swift */; };
+		010000000000000000000010 /* AnnotationEditingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000014 /* AnnotationEditingSession.swift */; };
+		010000000000000000000011 /* QuickAnnotationCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000015 /* QuickAnnotationCanvasView.swift */; };
+		010000000000000000000012 /* CanvasEditorManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000016 /* CanvasEditorManager.swift */; };
+		010000000000000000000013 /* CanvasEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000017 /* CanvasEditorView.swift */; };
+		010000000000000000000014 /* PixelToolOverlayPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000018 /* PixelToolOverlayPanel.swift */; };
+		010000000000000000000015 /* ColorPickerCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000019 /* ColorPickerCoordinator.swift */; };
+		010000000000000000000016 /* ScreenRulerCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000001A /* ScreenRulerCoordinator.swift */; };
+		010000000000000000000017 /* HistorySessionRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000001B /* HistorySessionRecorder.swift */; };
+		010000000000000000000018 /* HistoryWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000001C /* HistoryWindowController.swift */; };
+		010000000000000000000019 /* UshotAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000001D /* UshotAppUITests.swift */; };
+		01000000000000000000001A /* AppKitDrawingFonts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000001F /* AppKitDrawingFonts.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		110000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 080000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 050000000000000000000001;
+			remoteInfo = UshotApp;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		020000000000000000000001 /* UshotApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UshotApp.swift; sourceTree = "<group>"; };
+		020000000000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		020000000000000000000003 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
+		020000000000000000000004 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		020000000000000000000005 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		020000000000000000000006 /* PhaseZeroFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhaseZeroFoundationTests.swift; sourceTree = "<group>"; };
+		020000000000000000000007 /* UshotApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = UshotApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		020000000000000000000008 /* UshotCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = UshotCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		020000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		02000000000000000000000A /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
+		02000000000000000000000B /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
+		02000000000000000000000C /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
+		02000000000000000000000D /* StatusBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarController.swift; sourceTree = "<group>"; };
+		02000000000000000000000E /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
+		02000000000000000000000F /* SettingsViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViews.swift; sourceTree = "<group>"; };
+		020000000000000000000010 /* ShortcutRecorderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutRecorderView.swift; sourceTree = "<group>"; };
+		020000000000000000000011 /* CaptureWorkflowCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureWorkflowCoordinator.swift; sourceTree = "<group>"; };
+		020000000000000000000012 /* CaptureSelectionCoordinators.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureSelectionCoordinators.swift; sourceTree = "<group>"; };
+		020000000000000000000013 /* PinnedShotManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedShotManager.swift; sourceTree = "<group>"; };
+		020000000000000000000014 /* AnnotationEditingSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationEditingSession.swift; sourceTree = "<group>"; };
+		020000000000000000000015 /* QuickAnnotationCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickAnnotationCanvasView.swift; sourceTree = "<group>"; };
+		020000000000000000000016 /* CanvasEditorManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasEditorManager.swift; sourceTree = "<group>"; };
+		020000000000000000000017 /* CanvasEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasEditorView.swift; sourceTree = "<group>"; };
+		020000000000000000000018 /* PixelToolOverlayPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelToolOverlayPanel.swift; sourceTree = "<group>"; };
+		020000000000000000000019 /* ColorPickerCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorPickerCoordinator.swift; sourceTree = "<group>"; };
+		02000000000000000000001A /* ScreenRulerCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenRulerCoordinator.swift; sourceTree = "<group>"; };
+		02000000000000000000001B /* HistorySessionRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistorySessionRecorder.swift; sourceTree = "<group>"; };
+		02000000000000000000001C /* HistoryWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryWindowController.swift; sourceTree = "<group>"; };
+		02000000000000000000001D /* UshotAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UshotAppUITests.swift; sourceTree = "<group>"; };
+		02000000000000000000001E /* UshotAppUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = UshotAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		02000000000000000000001F /* AppKitDrawingFonts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppKitDrawingFonts.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		030000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				010000000000000000000006 /* UshotCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		030000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				010000000000000000000008 /* UshotCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		030000000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		040000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				040000000000000000000002 /* UshotApp */,
+				040000000000000000000006 /* UshotCoreTests */,
+				040000000000000000000009 /* UshotAppUITests */,
+				040000000000000000000007 /* Config */,
+				040000000000000000000008 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		040000000000000000000002 /* UshotApp */ = {
+			isa = PBXGroup;
+			children = (
+				040000000000000000000003 /* App */,
+				040000000000000000000004 /* Resources */,
+				020000000000000000000009 /* Info.plist */,
+			);
+			path = UshotApp;
+			sourceTree = "<group>";
+		};
+		040000000000000000000003 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				020000000000000000000001 /* UshotApp.swift */,
+				020000000000000000000002 /* AppDelegate.swift */,
+				020000000000000000000003 /* AppEnvironment.swift */,
+				02000000000000000000000D /* StatusBarController.swift */,
+				02000000000000000000000E /* SettingsWindowController.swift */,
+				02000000000000000000000F /* SettingsViews.swift */,
+				020000000000000000000010 /* ShortcutRecorderView.swift */,
+				02000000000000000000001F /* AppKitDrawingFonts.swift */,
+				020000000000000000000011 /* CaptureWorkflowCoordinator.swift */,
+				020000000000000000000012 /* CaptureSelectionCoordinators.swift */,
+				020000000000000000000013 /* PinnedShotManager.swift */,
+				020000000000000000000014 /* AnnotationEditingSession.swift */,
+				020000000000000000000015 /* QuickAnnotationCanvasView.swift */,
+				020000000000000000000016 /* CanvasEditorManager.swift */,
+				020000000000000000000017 /* CanvasEditorView.swift */,
+				020000000000000000000018 /* PixelToolOverlayPanel.swift */,
+				020000000000000000000019 /* ColorPickerCoordinator.swift */,
+				02000000000000000000001A /* ScreenRulerCoordinator.swift */,
+				02000000000000000000001B /* HistorySessionRecorder.swift */,
+				02000000000000000000001C /* HistoryWindowController.swift */,
+			);
+			path = Sources/App;
+			sourceTree = "<group>";
+		};
+		040000000000000000000004 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				020000000000000000000004 /* Assets.xcassets */,
+				020000000000000000000005 /* Localizable.xcstrings */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		040000000000000000000006 /* UshotCoreTests */ = {
+			isa = PBXGroup;
+			children = (
+				020000000000000000000006 /* PhaseZeroFoundationTests.swift */,
+			);
+			path = UshotCore/Tests/UshotCoreTests;
+			sourceTree = "<group>";
+		};
+		040000000000000000000007 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				02000000000000000000000A /* Base.xcconfig */,
+				02000000000000000000000B /* Debug.xcconfig */,
+				02000000000000000000000C /* Release.xcconfig */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		040000000000000000000008 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				020000000000000000000007 /* UshotApp.app */,
+				020000000000000000000008 /* UshotCoreTests.xctest */,
+				02000000000000000000001E /* UshotAppUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		040000000000000000000009 /* UshotAppUITests */ = {
+			isa = PBXGroup;
+			children = (
+				02000000000000000000001D /* UshotAppUITests.swift */,
+			);
+			path = UshotAppUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		050000000000000000000001 /* UshotApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0D0000000000000000000002 /* Build configuration list for PBXNativeTarget "UshotApp" */;
+			buildPhases = (
+				060000000000000000000001 /* Sources */,
+				030000000000000000000001 /* Frameworks */,
+				070000000000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = UshotApp;
+			packageProductDependencies = (
+				0F0000000000000000000001 /* UshotCore */,
+			);
+			productName = UshotApp;
+			productReference = 020000000000000000000007 /* UshotApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+		050000000000000000000002 /* UshotCoreTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0D0000000000000000000003 /* Build configuration list for PBXNativeTarget "UshotCoreTests" */;
+			buildPhases = (
+				060000000000000000000002 /* Sources */,
+				030000000000000000000002 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = UshotCoreTests;
+			packageProductDependencies = (
+				0F0000000000000000000002 /* UshotCore */,
+			);
+			productName = UshotCoreTests;
+			productReference = 020000000000000000000008 /* UshotCoreTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		050000000000000000000003 /* UshotAppUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0D0000000000000000000004 /* Build configuration list for PBXNativeTarget "UshotAppUITests" */;
+			buildPhases = (
+				060000000000000000000003 /* Sources */,
+				030000000000000000000003 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				100000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = UshotAppUITests;
+			productName = UshotAppUITests;
+			productReference = 02000000000000000000001E /* UshotAppUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		080000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					050000000000000000000001 = {CreatedOnToolsVersion = 16.0; };
+					050000000000000000000002 = {CreatedOnToolsVersion = 16.0; };
+					050000000000000000000003 = {CreatedOnToolsVersion = 16.0; TestTargetID = 050000000000000000000001; };
+				};
+			};
+			buildConfigurationList = 0D0000000000000000000001 /* Build configuration list for PBXProject "ScreenshotApp" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-Hans",
+			);
+			mainGroup = 040000000000000000000001;
+			packageReferences = (
+				0E0000000000000000000001 /* XCLocalSwiftPackageReference "." */,
+			);
+			productRefGroup = 040000000000000000000008 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				050000000000000000000001 /* UshotApp */,
+				050000000000000000000002 /* UshotCoreTests */,
+				050000000000000000000003 /* UshotAppUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		070000000000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				010000000000000000000004 /* Assets.xcassets in Resources */,
+				010000000000000000000005 /* Localizable.xcstrings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		060000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				010000000000000000000001 /* UshotApp.swift in Sources */,
+				010000000000000000000002 /* AppDelegate.swift in Sources */,
+				010000000000000000000003 /* AppEnvironment.swift in Sources */,
+				010000000000000000000009 /* StatusBarController.swift in Sources */,
+				01000000000000000000000A /* SettingsWindowController.swift in Sources */,
+				01000000000000000000000B /* SettingsViews.swift in Sources */,
+				01000000000000000000000C /* ShortcutRecorderView.swift in Sources */,
+				01000000000000000000001A /* AppKitDrawingFonts.swift in Sources */,
+				01000000000000000000000D /* CaptureWorkflowCoordinator.swift in Sources */,
+				01000000000000000000000E /* CaptureSelectionCoordinators.swift in Sources */,
+				01000000000000000000000F /* PinnedShotManager.swift in Sources */,
+				010000000000000000000010 /* AnnotationEditingSession.swift in Sources */,
+				010000000000000000000011 /* QuickAnnotationCanvasView.swift in Sources */,
+				010000000000000000000012 /* CanvasEditorManager.swift in Sources */,
+				010000000000000000000013 /* CanvasEditorView.swift in Sources */,
+				010000000000000000000014 /* PixelToolOverlayPanel.swift in Sources */,
+				010000000000000000000015 /* ColorPickerCoordinator.swift in Sources */,
+				010000000000000000000016 /* ScreenRulerCoordinator.swift in Sources */,
+				010000000000000000000017 /* HistorySessionRecorder.swift in Sources */,
+				010000000000000000000018 /* HistoryWindowController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		060000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				010000000000000000000007 /* PhaseZeroFoundationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		060000000000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				010000000000000000000019 /* UshotAppUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		100000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 050000000000000000000001 /* UshotApp */;
+			targetProxy = 110000000000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0C0000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ALWAYS_USE_SEPARATE_HEADERMAPS = YES;
+				ARCHS = arm64;
+				CLANG_COVERAGE_MAPPING = NO;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_CODE_COVERAGE = NO;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		0C0000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ALWAYS_USE_SEPARATE_HEADERMAPS = YES;
+				ARCHS = arm64;
+				CLANG_COVERAGE_MAPPING = NO;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_CODE_COVERAGE = NO;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		0C0000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 02000000000000000000000B /* Debug.xcconfig */;
+			buildSettings = {
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+			};
+			name = Debug;
+		};
+		0C0000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 02000000000000000000000C /* Release.xcconfig */;
+			buildSettings = {
+				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+			};
+			name = Release;
+		};
+		0C0000000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				BUNDLE_LOADER = "";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.UshotAppTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		0C0000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				BUNDLE_LOADER = "";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.UshotAppTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		0C0000000000000000000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.UshotAppUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = UshotApp;
+				TESTS_WILL_PROVIDE_UI_TARGET_APP = YES;
+			};
+			name = Debug;
+		};
+		0C0000000000000000000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.UshotAppUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = UshotApp;
+				TESTS_WILL_PROVIDE_UI_TARGET_APP = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0D0000000000000000000001 /* Build configuration list for PBXProject "ScreenshotApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0C0000000000000000000001 /* Debug */,
+				0C0000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0D0000000000000000000002 /* Build configuration list for PBXNativeTarget "UshotApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0C0000000000000000000003 /* Debug */,
+				0C0000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0D0000000000000000000003 /* Build configuration list for PBXNativeTarget "UshotCoreTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0C0000000000000000000005 /* Debug */,
+				0C0000000000000000000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0D0000000000000000000004 /* Build configuration list for PBXNativeTarget "UshotAppUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0C0000000000000000000007 /* Debug */,
+				0C0000000000000000000008 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		0E0000000000000000000001 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0F0000000000000000000001 /* UshotCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0E0000000000000000000001 /* XCLocalSwiftPackageReference "." */;
+			productName = UshotCore;
+		};
+		0F0000000000000000000002 /* UshotCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0E0000000000000000000001 /* XCLocalSwiftPackageReference "." */;
+			productName = UshotCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 080000000000000000000001 /* Project object */;
+}
