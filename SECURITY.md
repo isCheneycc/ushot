@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are provided for the latest published Ushot release. Before the first public release, builds from `main` are development artifacts and are not a supported distribution channel.
+Security fixes are provided for the latest published Ushot release. Untagged builds and builds taken directly from `main` are development artifacts, not a supported distribution channel.
 
 ## Reporting a vulnerability
 
