@@ -472,6 +472,34 @@ jobs:
             esac
           }
 
+          wait_for_newly_created_release() {
+            local attempt
+            local delay_seconds=1
+            local release_state
+            local max_attempts=6
+
+            for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+              release_state="$(fetch_release)"
+              if [[ "$release_state" == "present" ]]; then
+                echo "release: newly created draft became visible on list API attempt $attempt/$max_attempts." >&2
+                return 0
+              fi
+              [[ "$release_state" == "absent" ]] || {
+                echo "error: unexpected release read-back state: ${release_state:-empty}." >&2
+                return 1
+              }
+              if (( attempt == max_attempts )); then
+                break
+              fi
+              echo "release: newly created draft is not visible on list API attempt $attempt/$max_attempts; retrying in ${delay_seconds}s." >&2
+              sleep "$delay_seconds"
+              delay_seconds=$((delay_seconds * 2))
+            done
+
+            echo "error: newly created draft cannot be read back after $max_attempts list API attempts." >&2
+            return 1
+          }
+
           validate_release_metadata() {
             jq -e \
               --arg tag "$RELEASE_TAG" \
@@ -497,11 +525,9 @@ jobs:
                 echo 'error: draft creation failed and no resumable Release exists.' >&2
                 exit 1
               }
+            else
+              wait_for_newly_created_release
             fi
-            [[ "$(fetch_release)" == "present" ]] || {
-              echo 'error: newly created draft cannot be read back.' >&2
-              exit 1
-            }
           fi
           validate_release_metadata
 
