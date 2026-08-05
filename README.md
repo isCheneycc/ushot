@@ -1,8 +1,8 @@
-# UshotApp
+# Ushot
 
-UshotApp is a native, local-first macOS 14+ screenshot and annotation utility built with SwiftUI, AppKit, ScreenCaptureKit, Core Graphics, Core Image and Image I/O. It has no account, telemetry, advertising SDK, or network service.
+Ushot is a native, local-first macOS 14+ screenshot and annotation utility built with SwiftUI, AppKit, ScreenCaptureKit, Core Graphics, Core Image and Image I/O. Screenshot pixels, annotations, history and exports stay on the Mac. Ushot has no account, telemetry, advertising SDK or system-profile reporting.
 
-> Product identity, license and signing identity are intentionally temporary. See `docs/DECISIONS_NEEDED.md`.
+The official repository is [`isCheneycc/ushot`](https://github.com/isCheneycc/ushot), the application bundle identifier is `io.github.ischeneycc.ushot`, and the source in this repository is available under the [Apache License 2.0](LICENSE).
 
 ## Implemented features
 
@@ -21,6 +21,32 @@ UshotApp is a native, local-first macOS 14+ screenshot and annotation utility bu
 - Apple Silicon Mac running macOS 14 or later.
 - A full Xcode installation for `.app` builds, tests, signing and distribution. Command Line Tools alone can run the SwiftPM checks described below but cannot execute `xcodebuild`.
 
+## Install an official release
+
+Ushot does not currently have a Developer ID signature or Apple notarization. Only use this procedure for `Ushot-<version>-arm64.dmg` downloaded from the official [Ushot Releases](https://github.com/isCheneycc/ushot/releases) page:
+
+1. Open the release DMG and drag `Ushot.app` into **Applications**.
+2. In Terminal, remove only the downloaded-file quarantine attribute and open Ushot:
+
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Ushot.app"
+   open "/Applications/Ushot.app"
+   ```
+
+Do not use this command on a copy obtained from another repository, mirror or third party. Do not replace it with `xattr -cr`: clearing every extended attribute is broader than the installation requires.
+
+macOS will ask for Screen Recording permission when capture access is first needed. Because this distribution is not Developer ID signed, a later application update may require that permission to be granted again.
+
+The application bundle includes the applicable [third-party license notices](UshotApp/Resources/ThirdPartyNotices.txt), including Sparkle and its bundled components.
+
+## Check for updates
+
+**Check for Updates…** is located in the menu-bar menu after **Settings…** and before **About Ushot**. Ushot does not check automatically, download updates automatically or send a system profile. Only choosing this command starts an update request.
+
+The request reads the signed appcast at `https://ischeneycc.github.io/ushot/updates/appcast.xml`. Release notes are restricted Markdown embedded in that appcast, so displaying them does not make a separate notes request; release publishing rejects links, images, raw HTML and URL-like destinations. An accepted update is downloaded from the official GitHub Release. Sparkle must verify both the complete appcast and every update archive with the EdDSA public key embedded in Ushot before installation. Captures and other user content are never included in these requests. See [PRIVACY.md](PRIVACY.md) for the complete network boundary.
+
+The non-Developer-ID update path is not considered release-ready until the old-version → new-version test matrix has verified Sparkle helper loading, EdDSA rejection, application replacement and Screen Recording permission behavior. The protected workflow also extracts the final ZIP and binds its internal short/build versions to the appcast; Sparkle 2.9.5 has no public client-side pre-install hook for the equivalent check, so that framework gap must be closed before production self-update is declared ready. An appcast or release asset existing on GitHub is not, by itself, evidence that this validation passed.
+
 ## Build and test with Xcode
 
 ```bash
@@ -31,7 +57,7 @@ xcodebuild -project ScreenshotApp.xcodeproj -scheme ScreenshotApp -configuration
 xcodebuild -project ScreenshotApp.xcodeproj -scheme ScreenshotApp -configuration Debug -destination 'platform=macOS,arch=arm64' test
 ```
 
-If an installed `UshotApp.app` is already running, quit it before UI tests or give the test build an isolated identity by adding `APP_BUNDLE_IDENTIFIER=com.example.UshotApp.UITestsHost` to the command.
+If an installed `Ushot.app` is already running, quit it before UI tests or give the test build an isolated identity by adding `APP_BUNDLE_IDENTIFIER=io.github.ischeneycc.ushot.uitests` to the command.
 
 Open `ScreenshotApp.xcodeproj` and run the `ScreenshotApp` scheme to grant Screen Recording permission and complete the checks in `docs/MANUAL_TESTING.md`.
 
@@ -51,20 +77,29 @@ The helper adds the CLT-shipped Swift Testing framework search paths; a full Xco
 Settings are stored as one versioned Codable document in UserDefaults. Optional history is stored under:
 
 ```text
-~/Library/Application Support/com.example.UshotApp/History/<capture-uuid>/
+~/Library/Application Support/io.github.ischeneycc.ushot/History/<capture-uuid>/
 ```
 
 Each record contains `base.png`, `preview.png`, `document.json` and `metadata.json`. Turning history off stops new records and does not delete old records.
 
 ## Release
 
-Installed local Release builds require a stable Apple Development signature so macOS Screen Recording authorization survives code updates. Developer ID signing and notarization use environment variables or a keychain profile; no secret belongs in the repository. See `docs/RELEASING.md`.
+Local development installations use a stable Apple Development identity when one is available. Public GitHub releases currently have no Developer ID signature or notarization and instead rely on Sparkle EdDSA for update-archive authenticity. Signing keys and notarization credentials never belong in the repository or logs. See `docs/RELEASING.md` for the release procedure and `SECURITY.md` for the trust and reporting policy.
+
+The EdDSA private key is release-critical: it must be stored in the protected release environment, backed up independently in encrypted form and tested through a recovery drill before the first update is published. A feed must never be published before all immutable release assets and signatures are available.
+
+## Licensing and future paid features
+
+Code published in this repository remains available under Apache-2.0. A future commercial edition may add separately distributed closed-source modules or services, but that does not revoke or change the license already granted for any published Ushot code.
 
 ## Project documents
 
 - `docs/ARCHITECTURE.md` — module and failure boundaries.
 - `docs/MANUAL_TESTING.md` — required hardware and interaction matrix.
 - `docs/PERFORMANCE.md` — Instruments scenarios and measurement method.
+- `docs/ROADMAP.md` — completed phases and release-readiness work.
 - `PRIVACY.md` — data and permission behavior.
+- `SECURITY.md` — vulnerability reporting and update trust.
+- `CHANGELOG.md` — user-visible changes by release.
 - `CONTRIBUTING.md` — development workflow.
 - `STATUS.md` — current implementation and validation state.

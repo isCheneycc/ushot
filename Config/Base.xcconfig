@@ -1,15 +1,19 @@
-// Replaceable product identity and version settings.
-PRODUCT_NAME = UshotApp
-APP_BUNDLE_IDENTIFIER = com.example.UshotApp
+// Public product identity. Changing the bundle identifier after release breaks
+// update matching and may invalidate Screen Recording authorization.
+PRODUCT_NAME = Ushot
+APP_BUNDLE_IDENTIFIER = io.github.ischeneycc.ushot
 PRODUCT_BUNDLE_IDENTIFIER = $(APP_BUNDLE_IDENTIFIER)
 MARKETING_VERSION = 0.1.0
 CURRENT_PROJECT_VERSION = 1
 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon
+SPARKLE_PUBLIC_ED_KEY = gdZAswkBeWYGYjpqCUmtrUEuyIc/RP5DO+c5I7h+h3Q=
+SPARKLE_KEY_ACCOUNT = io.github.ischeneycc.ushot
 
 MACOSX_DEPLOYMENT_TARGET = 14.0
 ARCHS = arm64
 SUPPORTED_PLATFORMS = macosx
 SWIFT_VERSION = 5.0
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/../Frameworks
 
 GENERATE_INFOPLIST_FILE = NO
 INFOPLIST_FILE = UshotApp/Info.plist

@@ -48,6 +48,7 @@ final class AnnotationEditingSession: ObservableObject {
     var onError: ((Error) -> Void)?
 
     private let renderer: any AnnotationRendering
+    private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
     private var editorSettings: EditorSettings
     private var cancellables: Set<AnyCancellable> = []
     private var authoritativeRenderGeneration = 0
@@ -65,12 +66,14 @@ final class AnnotationEditingSession: ObservableObject {
         previewImage: CapturedImage? = nil,
         document: AnnotationDocument? = nil,
         editorSettings: EditorSettings,
+        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
         renderer: any AnnotationRendering = AnnotationRenderer()
     ) {
         baseImage = capturedImage
         self.previewImage = previewImage ?? capturedImage
         self.authoritativePreviewImage = previewImage ?? capturedImage
         self.renderer = renderer
+        self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
         self.editorSettings = editorSettings
         lineWidthUnit = editorSettings.defaultLineWidthUnit
         let initialStyle = Self.makeDefaultStyle(
@@ -131,11 +134,16 @@ final class AnnotationEditingSession: ObservableObject {
         let sourceDocument = document ?? controller.document
         authoritativeRenderGeneration += 1
         let generation = authoritativeRenderGeneration
+        let updateSensitiveActivityTracker = updateSensitiveActivityTracker
+        let lease = updateSensitiveActivityTracker.begin(
+            operation: "authoritative-annotation-render"
+        )
         let task = makeRenderTask(document: sourceDocument)
         authoritativeRenderTask = task
         scheduleInteractivePreview(document: sourceDocument)
 
         Task { [weak self, task] in
+            defer { updateSensitiveActivityTracker.finish(lease) }
             do {
                 let rendered = try await task.value
                 guard let self,

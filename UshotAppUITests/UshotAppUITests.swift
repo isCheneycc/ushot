@@ -3,7 +3,7 @@ import XCTest
 
 final class UshotAppUITests: XCTestCase {
     private let isolatedSettingsSuiteName =
-        "com.example.UshotApp.UITests.\(UUID().uuidString)"
+        "io.github.ischeneycc.ushot.UITests.\(UUID().uuidString)"
 
     @MainActor
     func testSettingsOpensAndDockToggleChangesValue() {
@@ -716,11 +716,11 @@ final class UshotAppUITests: XCTestCase {
         finder.activate()
         XCTAssertTrue(
             imagePanel.waitForExistence(timeout: 3),
-            "The current screenshot must remain visible when UshotApp deactivates."
+            "The current screenshot must remain visible when Ushot deactivates."
         )
         XCTAssertTrue(
             toolbar.waitForExistence(timeout: 3),
-            "The current toolbar must remain visible when UshotApp deactivates."
+            "The current toolbar must remain visible when Ushot deactivates."
         )
         XCTAssertEqual(pinnedImages.count, 1)
         XCTAssertEqual(toolbars.count, 1)
@@ -1939,7 +1939,7 @@ final class UshotAppUITests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let applicationURL = productsDirectory.appendingPathComponent("UshotApp.app", isDirectory: true)
+        let applicationURL = productsDirectory.appendingPathComponent("Ushot.app", isDirectory: true)
         precondition(
             FileManager.default.fileExists(atPath: applicationURL.path),
             "The UI test target application is missing at \(applicationURL.path)."

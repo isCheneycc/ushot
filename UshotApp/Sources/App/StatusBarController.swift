@@ -2,10 +2,11 @@ import AppKit
 import UshotCore
 
 @MainActor
-final class StatusBarController: NSObject {
+final class StatusBarController: NSObject, NSMenuItemValidation {
     var onAction: ((HotKeyAction) -> Void)?
     var onOpenSettings: (() -> Void)?
     var onOpenHistory: (() -> Void)?
+    var onCheckForUpdates: (() -> Void)?
 
     var isVisible: Bool {
         get { statusItem.isVisible }
@@ -13,19 +14,21 @@ final class StatusBarController: NSObject {
     }
 
     private let statusItem: NSStatusItem
+    private let updateChecker: any UpdateChecking
     private var shortcuts: [HotKeyAction: HotKeyShortcut] = [:]
     private var historyEnabled = false
 
-    override init() {
+    init(updateChecker: any UpdateChecking) {
+        self.updateChecker = updateChecker
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         guard let menuBarIcon = NSImage(named: "MenuBarIcon") else {
             preconditionFailure("Missing MenuBarIcon image asset")
         }
         menuBarIcon.isTemplate = true
-        menuBarIcon.accessibilityDescription = "UshotApp"
+        menuBarIcon.accessibilityDescription = ProductIdentity.name
         statusItem.button?.image = menuBarIcon
-        statusItem.button?.toolTip = "UshotApp"
+        statusItem.button?.toolTip = ProductIdentity.name
         rebuildMenu(shortcuts: [:], historyEnabled: false)
     }
 
@@ -61,16 +64,43 @@ final class StatusBarController: NSObject {
         settings.target = self
         menu.addItem(settings)
 
-        let about = NSMenuItem(title: NSLocalizedString("About UshotApp", comment: "About menu item"), action: #selector(openAbout), keyEquivalent: "")
+        let updateTitle: String
+        switch updateChecker.availability {
+        case .available:
+            updateTitle = String(localized: "Check for Updates…")
+        case .unavailable:
+            updateTitle = String(localized: "Updates Unavailable…")
+        }
+        let checkForUpdates = NSMenuItem(
+            title: updateTitle,
+            action: #selector(checkForUpdates),
+            keyEquivalent: ""
+        )
+        checkForUpdates.toolTip = updateChecker.availability.unavailableReason
+        checkForUpdates.target = self
+        menu.addItem(checkForUpdates)
+
+        let about = NSMenuItem(title: NSLocalizedString("About Ushot", comment: "About menu item"), action: #selector(openAbout), keyEquivalent: "")
         about.target = self
         menu.addItem(about)
 
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: NSLocalizedString("Quit UshotApp", comment: "Quit menu item"), action: #selector(quitApplication), keyEquivalent: "q")
+        let quit = NSMenuItem(title: NSLocalizedString("Quit Ushot", comment: "Quit menu item"), action: #selector(quitApplication), keyEquivalent: "q")
         quit.keyEquivalentModifierMask = [.command]
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(checkForUpdates) else { return true }
+        if updateChecker.availability.unavailableReason != nil {
+            // Keep the explicit unavailable item actionable so the user can
+            // open the configuration reason instead of seeing a false
+            // "already up to date" result.
+            return true
+        }
+        return updateChecker.canCheckForUpdates
     }
 
     private func addAction(_ action: HotKeyAction, to menu: NSMenu) {
@@ -100,6 +130,10 @@ final class StatusBarController: NSObject {
 
     @objc private func openHistory() {
         onOpenHistory?()
+    }
+
+    @objc private func checkForUpdates() {
+        onCheckForUpdates?()
     }
 
     @objc private func openAbout() {

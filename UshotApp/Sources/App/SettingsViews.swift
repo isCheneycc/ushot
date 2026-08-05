@@ -84,7 +84,7 @@ struct SettingsRootView: View {
         .padding(16)
         .frame(minWidth: 720, minHeight: 510)
         .alert(
-            "UshotApp",
+            "Ushot",
             isPresented: Binding(
                 get: { alerts.message != nil },
                 set: { if !$0 { alerts.message = nil } }
@@ -202,7 +202,7 @@ private struct CaptureSettingsView: View {
                         comment: "Screen recording permission status"
                     )
                 )
-                Text("UshotApp needs screen recording permission only to read pixels for screenshots. It does not record, upload, or analyze your screen.")
+                Text("Ushot needs screen recording permission only to read pixels for screenshots. It does not record, upload, or analyze your screen.")
                     .foregroundStyle(.secondary)
                 HStack {
                     Button("Request Access") { requestPermission() }
@@ -2073,7 +2073,10 @@ private struct AdvancedSettingsView: View {
                 appropriateFor: nil,
                 create: true
             )
-            let directory = root.appendingPathComponent("com.example.UshotApp", isDirectory: true)
+            let directory = root.appendingPathComponent(
+                ProductIdentity.applicationSupportDirectoryName,
+                isDirectory: true
+            )
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             NSWorkspace.shared.open(directory)
         } catch {

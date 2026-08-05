@@ -6,6 +6,7 @@ final class CaptureWorkflowCoordinator {
     var onCaptured: ((CaptureResult) -> Void)?
     var onPermissionRequired: (() -> Void)?
     var onError: ((Error) -> Void)?
+    private(set) var isSessionActive = false
 
     private let capturer: any ScreenCapturing
     private let permissionChecker: any CapturePermissionChecking
@@ -33,10 +34,21 @@ final class CaptureWorkflowCoordinator {
 
     func perform(_ action: HotKeyAction) {
         guard let mode = captureMode(for: action) else { return }
+        guard !isSessionActive else {
+            AppLog.capture.notice(
+                "Ignored repeated capture request before enqueue without disturbing the active session: requested=\(String(describing: mode), privacy: .public)"
+            )
+            NSSound.beep()
+            return
+        }
+        isSessionActive = true
         Task { await run(mode: mode) }
     }
 
     private func run(mode: CaptureMode) async {
+        precondition(isSessionActive, "A capture task must own admission before it is enqueued.")
+        defer { isSessionActive = false }
+
         let admission = await stateMachine.admit(mode: mode)
         guard case .accepted = admission else {
             guard case .rejected(let activeState) = admission else {

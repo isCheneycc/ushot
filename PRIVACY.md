@@ -1,23 +1,43 @@
 # Privacy
 
-UshotApp is designed as a local-only utility.
+Ushot is a local-first utility. Screenshot pixels and user-created content stay on the Mac.
 
-## Screen access
+## Screen and accessibility access
 
-macOS Screen Recording permission is required for screenshots and pixel sampling. UshotApp requests no Accessibility permission and uses no private API. Screen pixels are read only in response to an explicit capture or color-picker action.
+macOS Screen Recording permission is required for screenshots, the color picker and other pixel sampling. Screen pixels are read only in response to an explicit capture or color-picker action and are processed locally.
 
-## Data processing
+Window-level smart region snapping works without Accessibility permission. The optional Accessibility permission is used only to refine a hovered application window to a useful interface control. Denying or revoking it leaves ordinary capture and window snapping available. Ushot uses public macOS APIs and never queries its own capture overlay as the target element.
 
-- Captures, annotations, clipboard exports and color samples are processed on the Mac.
-- The application contains no telemetry, analytics, advertising SDK, account system or network client.
-- OSLog entries contain operational categories, identifiers and error descriptions; they must never contain screenshot pixels, OCR/annotation text, clipboard values or file contents.
+The planned initial GitHub distribution has no Developer ID signature or Apple notarization. Installing or updating that build can cause macOS to request Screen Recording or Accessibility permission again.
 
-## Persistence
+## Local data processing
+
+- Captures, annotations, clipboard exports, color samples and image encoding are processed on the Mac.
+- Ushot has no account system, telemetry, analytics, advertising SDK or crash-report upload.
+- Ushot does not collect or submit a system profile. It does not send the Mac model, serial number, display layout, installed applications, locale or capture-permission state.
+- OSLog entries may contain application versions, lifecycle states, durations, non-content geometry and error categories. They must never contain screenshot pixels, OCR/annotation text, clipboard values, filenames, file contents, update private keys or other user content.
+
+## Local persistence
 
 Screenshot history is off by default. When enabled, each editable record is stored under the app's Application Support directory as two PNG files and two versioned JSON files. Turning history off stops new records; it does not silently delete existing records. Users can inspect the directory, delete individual items or clear all history after confirmation.
 
 Settings are stored locally in UserDefaults as one versioned Codable document. Launch at Login is managed through Apple's ServiceManagement API.
 
-## Distribution and networking
+## Update network access
 
-The first website-distributed build uses Hardened Runtime and is not sandboxed, so users can choose arbitrary save destinations and drag files to other apps. That choice does not add networking. A future updater or optional network feature must update this document before release and must not be silently introduced.
+Ushot makes no update request at launch or on a schedule. Sparkle automatic checks, automatic downloads and system-profile submission are explicitly disabled.
+
+Only when the user chooses **Check for Updates…** does Ushot:
+
+1. Request the signed update feed from `https://ischeneycc.github.io/ushot/updates/appcast.xml`. Restricted-Markdown release notes are embedded in this same signed response; Ushot does not make a detached release-notes request, and the release pipeline forbids links, images, raw HTML and URL-like destinations.
+2. If the user accepts the update, download its archive from the official `https://github.com/isCheneycc/ushot/releases` release. GitHub may serve that asset through its normal GitHub-controlled download redirects.
+
+These requests contain normal HTTPS connection metadata visible to the hosting providers, such as the client's IP address and standard HTTP headers. Ushot adds no screenshot, annotation, clipboard, history, system-profile or advertising identifier. There is no Ushot-operated server receiving update analytics.
+
+The update archive is authenticated locally with the Sparkle EdDSA public key embedded in Ushot. HTTPS transport does not replace that signature verification.
+
+## Distribution
+
+The first public build is not sandboxed so users can choose arbitrary save destinations and drag files to other applications. Public release archives are intentionally ad-hoc signed, are not notarized and do not use Developer ID. This distribution choice does not grant Ushot any additional network access.
+
+Any future network-backed feature, telemetry or account functionality requires an explicit product decision and an update to this document before release. It must not be introduced silently.

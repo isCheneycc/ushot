@@ -10,6 +10,12 @@ let package = Package(
         .library(name: "UshotCore", targets: ["UshotCore"]),
         .executable(name: "UshotApp", targets: ["UshotApp"])
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle",
+            exact: "2.9.5"
+        )
+    ],
     targets: [
         .target(
             name: "UshotCore",
@@ -17,7 +23,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "UshotApp",
-            dependencies: ["UshotCore"],
+            dependencies: [
+                "UshotCore",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             path: "UshotApp",
             exclude: ["Info.plist"],
             sources: ["Sources"],

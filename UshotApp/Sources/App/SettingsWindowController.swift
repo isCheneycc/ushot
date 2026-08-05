@@ -17,7 +17,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = NSLocalizedString("UshotApp Settings", comment: "Settings window title")
+        window.title = NSLocalizedString("Ushot Settings", comment: "Settings window title")
         window.setAccessibilityIdentifier("settings.window")
         window.contentViewController = hostingController
         window.isReleasedWhenClosed = false

@@ -31,6 +31,9 @@ final class ColorPickerCoordinator {
 
     var onPermissionRequired: (() -> Void)?
     var onError: ((Error) -> Void)?
+    var isSessionActive: Bool {
+        isPreparing || !panels.isEmpty || preparationTask != nil || samplingTask != nil
+    }
 
     private let samplerFactory: any PixelSamplerCreating
     private let permissionChecker: any CapturePermissionChecking

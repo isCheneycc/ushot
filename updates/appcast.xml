@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Ushot Updates</title>
+    <link>https://ischeneycc.github.io/ushot/updates/appcast.xml</link>
+    <description>Stable Ushot updates for macOS.</description>
+    <language>en</language>
+  </channel>
+</rss>

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-metadata:
+    name: Release metadata and scripts
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate script syntax and public identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
+          source scripts/release-common.sh
+          release_validate_source_settings "$PWD"
+          xmllint --noout updates/appcast.xml
+          plutil -lint UshotApp/Info.plist
+
+  unit-tests:
+    name: Swift unit tests
+    needs: release-metadata
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run package tests
+        run: swift test --package-path . --configuration debug
+
+  public-build-gate:
+    name: Public ad-hoc build gate
+    needs: release-metadata
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/release-common.sh
+          echo "VERSION=$(release_xcconfig_value MARKETING_VERSION Config/Base.xcconfig)" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$(release_xcconfig_value CURRENT_PROJECT_VERSION Config/Base.xcconfig)" >> "$GITHUB_ENV"
+      - name: Build and validate the public distribution mode
+        run: |
+          scripts/build-release.sh \
+            --mode public-adhoc \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER"

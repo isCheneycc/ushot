@@ -32,17 +32,15 @@
 - 仅支持 Apple Silicon，构建架构为 `arm64`。
 - 不支持 Intel Mac，不需要 `x86_64` 或 Universal Binary。
 - 不上架 Mac App Store。
-- 分发方式：官网提供 `.dmg`。
+- 分发方式：GitHub Releases 提供 `.dmg`；当前无独立官网。
 - 项目为开源项目；未来部分新增能力可能采用买断制或订阅制。
 - 第一版不接入账号、服务器、支付、订阅、许可证校验或云同步，但架构需要能在未来加入功能授权层。
 - 全原生开发，禁止 Electron、Tauri、Flutter、React Native、WebView 主界面或 Vue 混合方案。
 
-### 临时项目信息
+### 已确认项目信息
 
-如果仓库中没有现成配置，暂时使用：
-
-- Product Name：`UshotApp`
-- Bundle Identifier：`com.example.UshotApp`
+- Product Name：`Ushot`
+- Bundle Identifier：`io.github.ischeneycc.ushot`
 - Marketing Version：`0.1.0`
 - Build Version：`1`
 - Deployment Target：`macOS 14.0`
@@ -50,7 +48,7 @@
 - 默认语言：跟随系统
 - 首批本地化：简体中文、英文
 - 默认导出格式：PNG
-- 最终开源许可证暂不擅自决定；如果仓库没有 LICENSE，在 README 中标注 `License pending`，并在 `docs/DECISIONS_NEEDED.md` 中记录。
+- 开源许可证：`Apache-2.0`；随应用分发自身及第三方许可证文本。
 
 把 Product Name、Bundle ID、版本号等放入 `.xcconfig` 或同等集中配置，后续能够一次性替换。
 
@@ -1270,3 +1268,6 @@ scripts/
 10. 下一步最具体的代码任务。
 
 现在开始检查当前仓库并执行。不要先向我复述需求，也不要只生成计划。
+> Historical planning artifact. Product identity, distribution, privacy, and
+> update decisions in `AGENTS.md`, `README.md`, and `docs/ARCHITECTURE.md`
+> supersede conflicting requirements below.

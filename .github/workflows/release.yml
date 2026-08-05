@@ -1,0 +1,737 @@
+name: Protected release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing protected release tag in vX.Y.Z form
+        required: true
+        type: string
+      build_number:
+        description: Positive CFBundleVersion committed in Config/Base.xcconfig
+        required: true
+        type: string
+
+concurrency:
+  group: protected-release
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Bind and validate tagged source
+    runs-on: macos-15
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      build_number: ${{ steps.metadata.outputs.build_number }}
+      commit_sha: ${{ steps.metadata.outputs.commit_sha }}
+      tag_object_sha: ${{ steps.metadata.outputs.tag_object_sha }}
+      ci_run_id: ${{ steps.metadata.outputs.ci_run_id }}
+    steps:
+      - name: Bind the workflow run ref to the requested tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || {
+            echo 'error: Protected release must be dispatched with --ref set to the release tag.' >&2
+            exit 1
+          }
+          [[ "$GITHUB_REF_NAME" == "$RELEASE_TAG" ]] || {
+            echo "error: workflow ref $GITHUB_REF_NAME does not match requested tag $RELEASE_TAG." >&2
+            exit 1
+          }
+          [[ "$GITHUB_REF" == "refs/tags/$RELEASE_TAG" ]] || {
+            echo "error: workflow ref $GITHUB_REF is not the exact requested tag." >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - id: metadata
+        name: Verify tag SHA, protected-main ancestry and successful CI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_BUILD_NUMBER: ${{ inputs.build_number }}
+          EXPECTED_RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          scripts/release-preflight.sh \
+            --tag "$RELEASE_TAG" \
+            --build-number "$RELEASE_BUILD_NUMBER" \
+            --repository "$GITHUB_REPOSITORY"
+
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          [[ "$HEAD_COMMIT" == "$EXPECTED_RUN_SHA" ]] || {
+            echo "error: checked-out commit $HEAD_COMMIT does not match workflow SHA $EXPECTED_RUN_SHA." >&2
+            exit 1
+          }
+          [[ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" == "$HEAD_COMMIT" ]] || {
+            echo "error: local tag $RELEASE_TAG does not resolve to workflow SHA $HEAD_COMMIT." >&2
+            exit 1
+          }
+          LOCAL_TAG_OBJECT="$(git rev-parse "refs/tags/$RELEASE_TAG")"
+
+          REMOTE_REFS="$(git ls-remote --exit-code \
+            "https://github.com/$GITHUB_REPOSITORY.git" \
+            "refs/tags/$RELEASE_TAG" \
+            "refs/tags/$RELEASE_TAG^{}")"
+          REMOTE_TAG_OBJECT="$(awk -v tag_ref="refs/tags/$RELEASE_TAG" '
+            $2 == tag_ref { print $1 }
+          ' <<<"$REMOTE_REFS")"
+          REMOTE_TAG_COMMIT="$(awk -v tag_ref="refs/tags/$RELEASE_TAG" '
+            $2 == tag_ref { direct = $1 }
+            $2 == tag_ref "^{}" { peeled = $1 }
+            END { print (peeled != "" ? peeled : direct) }
+          ' <<<"$REMOTE_REFS")"
+          [[ "$REMOTE_TAG_OBJECT" == "$LOCAL_TAG_OBJECT" ]] || {
+            echo "error: remote tag object $RELEASE_TAG moved: expected $LOCAL_TAG_OBJECT, got ${REMOTE_TAG_OBJECT:-missing}." >&2
+            exit 1
+          }
+          [[ "$REMOTE_TAG_COMMIT" == "$HEAD_COMMIT" ]] || {
+            echo "error: remote tag $RELEASE_TAG moved: expected $HEAD_COMMIT, got ${REMOTE_TAG_COMMIT:-missing}." >&2
+            exit 1
+          }
+
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.protected')" == "true" ]] || {
+            echo 'error: release admission requires protected main.' >&2
+            exit 1
+          }
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "$HEAD_COMMIT" refs/remotes/origin/main || {
+            echo "error: release tag $RELEASE_TAG is not an ancestor of protected main." >&2
+            exit 1
+          }
+
+          CI_RUN_IDS="$(gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$HEAD_COMMIT" \
+            -f event=push \
+            -f status=success \
+            -f per_page=100 \
+            --jq '.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success") | .id')"
+          CI_RUN_ID="${CI_RUN_IDS%%$'\n'*}"
+          [[ -n "$CI_RUN_ID" ]] || {
+            echo "error: no successful main-branch CI run exists for $HEAD_COMMIT." >&2
+            exit 1
+          }
+
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "build_number=$RELEASE_BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$HEAD_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "tag_object_sha=$LOCAL_TAG_OBJECT" >> "$GITHUB_OUTPUT"
+          echo "ci_run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
+
+  build-and-sign:
+    name: Build, sign and preserve immutable artifacts
+    needs: preflight
+    runs-on: macos-15
+    environment: release
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      BUILD_NUMBER: ${{ needs.preflight.outputs.build_number }}
+      RELEASE_COMMIT: ${{ needs.preflight.outputs.commit_sha }}
+      RELEASE_TAG_OBJECT: ${{ needs.preflight.outputs.tag_object_sha }}
+      ARTIFACTS_DIRECTORY: ${{ github.workspace }}/build/release/public-adhoc/artifacts
+      PAGES_DIRECTORY: ${{ github.workspace }}/build/pages
+      CURRENT_APPCAST: ${{ github.workspace }}/build/current-appcast.xml
+      CURRENT_APPCAST_KIND: ${{ github.workspace }}/build/current-appcast.kind
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Revalidate the bound source before any release build
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/release-preflight.sh \
+            --tag "$RELEASE_TAG" \
+            --build-number "$BUILD_NUMBER" \
+            --repository "$GITHUB_REPOSITORY"
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_COMMIT" ]] || {
+            echo 'error: build checkout no longer matches the admitted release commit.' >&2
+            exit 1
+          }
+          [[ "$(git rev-parse "refs/tags/$RELEASE_TAG")" == "$RELEASE_TAG_OBJECT" ]] || {
+            echo 'error: local release tag object no longer matches preflight.' >&2
+            exit 1
+          }
+          REMOTE_REFS="$(git ls-remote --exit-code \
+            "https://github.com/$GITHUB_REPOSITORY.git" \
+            "refs/tags/$RELEASE_TAG" \
+            "refs/tags/$RELEASE_TAG^{}")"
+          REMOTE_TAG_OBJECT="$(awk -v tag_ref="refs/tags/$RELEASE_TAG" '
+            $2 == tag_ref { print $1 }
+          ' <<<"$REMOTE_REFS")"
+          REMOTE_TAG_COMMIT="$(awk -v tag_ref="refs/tags/$RELEASE_TAG" '
+            $2 == tag_ref { direct = $1 }
+            $2 == tag_ref "^{}" { peeled = $1 }
+            END { print (peeled != "" ? peeled : direct) }
+          ' <<<"$REMOTE_REFS")"
+          [[ "$REMOTE_TAG_OBJECT" == "$RELEASE_TAG_OBJECT" ]] || {
+            echo "error: remote tag object $RELEASE_TAG no longer matches $RELEASE_TAG_OBJECT." >&2
+            exit 1
+          }
+          [[ "$REMOTE_TAG_COMMIT" == "$RELEASE_COMMIT" ]] || {
+            echo "error: remote tag $RELEASE_TAG no longer resolves to $RELEASE_COMMIT." >&2
+            exit 1
+          }
+
+      - name: Build and validate the intentional public ad-hoc distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/build-release.sh \
+            --mode public-adhoc \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER"
+          scripts/package-release.sh \
+            --mode public-adhoc \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --tag "$RELEASE_TAG"
+
+      - name: Fetch checksum-pinned Sparkle tools and the current production feed
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/download-sparkle-tools.sh >/dev/null
+          ALLOW_FIRST_RELEASE_SEED=NO
+          if [[ "$VERSION" == "0.1.0" && "$BUILD_NUMBER" == "1" ]]; then
+            ALLOW_FIRST_RELEASE_SEED=YES
+          fi
+          scripts/fetch-current-appcast.sh \
+            --output "$CURRENT_APPCAST" \
+            --kind-output "$CURRENT_APPCAST_KIND" \
+            --allow-first-release-seed "$ALLOW_FIRST_RELEASE_SEED"
+
+      - name: Sign and validate the update feed without a repository write token
+        shell: bash
+        env:
+          SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          SPARKLE_BIN="$(scripts/download-sparkle-tools.sh | tail -n 1)"
+          printf '%s' "$SPARKLE_ED25519_PRIVATE_KEY" | \
+            env -u SPARKLE_ED25519_PRIVATE_KEY scripts/generate-appcast.sh \
+              --version "$VERSION" \
+              --build-number "$BUILD_NUMBER" \
+              --tag "$RELEASE_TAG" \
+              --archive "$ARTIFACTS_DIRECTORY/Ushot-$VERSION-arm64.zip" \
+              --release-notes "updates/release-notes/$VERSION.md" \
+              --existing-appcast "$CURRENT_APPCAST" \
+              --existing-appcast-kind "$(<"$CURRENT_APPCAST_KIND")" \
+              --site-directory "$PAGES_DIRECTORY" \
+              --sparkle-bin "$SPARKLE_BIN" \
+              --key-source stdin
+          unset SPARKLE_ED25519_PRIVATE_KEY
+
+      - name: Revalidate the exact release asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/validate-release-assets.sh \
+            --directory "$ARTIFACTS_DIRECTORY" \
+            --mode public-adhoc \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --tag "$RELEASE_TAG"
+          [[ -s "$PAGES_DIRECTORY/updates/appcast.xml" ]] || {
+            echo 'error: signed Pages appcast is missing.' >&2
+            exit 1
+          }
+
+      - name: Preserve exact release assets for write-only publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ushot-release-assets
+          path: |
+            ${{ env.ARTIFACTS_DIRECTORY }}/Ushot-${{ env.VERSION }}-arm64.dmg
+            ${{ env.ARTIFACTS_DIRECTORY }}/Ushot-${{ env.VERSION }}-arm64.zip
+            ${{ env.ARTIFACTS_DIRECTORY }}/Ushot-${{ env.VERSION }}-arm64.dSYM.zip
+            ${{ env.ARTIFACTS_DIRECTORY }}/Ushot-${{ env.VERSION }}-arm64.release-manifest.json
+            ${{ env.ARTIFACTS_DIRECTORY }}/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 30
+
+      - name: Preserve the signed Pages payload for last-step deployment
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ env.PAGES_DIRECTORY }}
+          retention-days: 30
+
+  publish-release:
+    name: Resume, verify and publish the GitHub Release
+    needs:
+      - preflight
+      - build-and-sign
+    runs-on: macos-15
+    permissions:
+      actions: read
+      contents: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      BUILD_NUMBER: ${{ needs.preflight.outputs.build_number }}
+      RELEASE_COMMIT: ${{ needs.preflight.outputs.commit_sha }}
+      RELEASE_TAG_OBJECT: ${{ needs.preflight.outputs.tag_object_sha }}
+      CI_RUN_ID: ${{ needs.preflight.outputs.ci_run_id }}
+      ARTIFACTS_DIRECTORY: ${{ github.workspace }}/build/publish-assets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Revalidate the clean tagged checkout before accepting artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/release-preflight.sh \
+            --tag "$RELEASE_TAG" \
+            --build-number "$BUILD_NUMBER" \
+            --repository "$GITHUB_REPOSITORY"
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_COMMIT" ]] || {
+            echo 'error: publication checkout does not match the admitted release commit.' >&2
+            exit 1
+          }
+          [[ "$(git rev-parse "refs/tags/$RELEASE_TAG")" == "$RELEASE_TAG_OBJECT" ]] || {
+            echo 'error: publication checkout has a different release tag object.' >&2
+            exit 1
+          }
+
+      - name: Recover the exact artifacts produced by this workflow run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ushot-release-assets
+          path: ${{ env.ARTIFACTS_DIRECTORY }}
+
+      - name: Validate recovered assets without network credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/validate-release-assets.sh \
+            --directory "$ARTIFACTS_DIRECTORY" \
+            --mode public-adhoc \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --tag "$RELEASE_TAG"
+
+      - name: Recheck protected-main admission and the successful CI run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REMOTE_REFS="$(git ls-remote --exit-code \
+            "https://github.com/$GITHUB_REPOSITORY.git" \
+            "refs/tags/$RELEASE_TAG" \
+            "refs/tags/$RELEASE_TAG^{}")"
+          REMOTE_TAG_OBJECT="$(awk -v tag_ref="refs/tags/$RELEASE_TAG" '
+            $2 == tag_ref { print $1 }
+          ' <<<"$REMOTE_REFS")"
+          REMOTE_TAG_COMMIT="$(awk -v tag_ref="refs/tags/$RELEASE_TAG" '
+            $2 == tag_ref { direct = $1 }
+            $2 == tag_ref "^{}" { peeled = $1 }
+            END { print (peeled != "" ? peeled : direct) }
+          ' <<<"$REMOTE_REFS")"
+          [[ "$REMOTE_TAG_OBJECT" == "$RELEASE_TAG_OBJECT" ]] || {
+            echo "error: remote tag object $RELEASE_TAG no longer matches $RELEASE_TAG_OBJECT." >&2
+            exit 1
+          }
+          [[ "$REMOTE_TAG_COMMIT" == "$RELEASE_COMMIT" ]] || {
+            echo "error: remote tag $RELEASE_TAG no longer resolves to $RELEASE_COMMIT." >&2
+            exit 1
+          }
+
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.protected')" == "true" ]] || {
+            echo 'error: main is not protected at publication time.' >&2
+            exit 1
+          }
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "$RELEASE_COMMIT" refs/remotes/origin/main || {
+            echo "error: $RELEASE_TAG is no longer an ancestor of protected main." >&2
+            exit 1
+          }
+
+          CI_JSON="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID")"
+          jq -e \
+            --arg commit "$RELEASE_COMMIT" \
+            '.head_sha == $commit and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion == "success"' \
+            <<<"$CI_JSON" >/dev/null || {
+              echo "error: admitted CI run $CI_RUN_ID is not a successful main push for $RELEASE_COMMIT." >&2
+              exit 1
+            }
+
+      - name: Resume the draft, verify every remote byte and publish atomically
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RELEASE_JSON="$RUNNER_TEMP/github-release.json"
+          RELEASE_LIST_JSON="$RUNNER_TEMP/github-releases.json"
+          RELEASE_DOWNLOADS="$RUNNER_TEMP/github-release-downloads"
+          RELEASE_NOTES="updates/release-notes/$VERSION.md"
+          RELEASE_TITLE="Ushot $VERSION"
+          mkdir -p "$RELEASE_DOWNLOADS"
+
+          resolve_remote_tag_state() {
+            local remote_refs
+            local remote_object
+            local remote_commit
+            remote_refs="$(git ls-remote --exit-code \
+              "https://github.com/$GITHUB_REPOSITORY.git" \
+              "refs/tags/$RELEASE_TAG" \
+              "refs/tags/$RELEASE_TAG^{}")"
+            remote_object="$(awk -v tag_ref="refs/tags/$RELEASE_TAG" '
+              $2 == tag_ref { print $1 }
+            ' <<<"$remote_refs")"
+            remote_commit="$(awk -v tag_ref="refs/tags/$RELEASE_TAG" '
+              $2 == tag_ref { direct = $1 }
+              $2 == tag_ref "^{}" { peeled = $1 }
+              END { print (peeled != "" ? peeled : direct) }
+            ' <<<"$remote_refs")"
+            printf '%s %s\n' "$remote_object" "$remote_commit"
+          }
+
+          assert_remote_tag() {
+            local remote_object
+            local remote_commit
+            read -r remote_object remote_commit <<< "$(resolve_remote_tag_state)"
+            [[ "$remote_object" == "$RELEASE_TAG_OBJECT" ]] || {
+              echo "error: refusing mutation because $RELEASE_TAG object is ${remote_object:-missing}, not $RELEASE_TAG_OBJECT." >&2
+              exit 1
+            }
+            [[ "$remote_commit" == "$RELEASE_COMMIT" ]] || {
+              echo "error: refusing mutation because $RELEASE_TAG resolves to ${remote_commit:-missing}, not $RELEASE_COMMIT." >&2
+              exit 1
+            }
+          }
+
+          fetch_release() {
+            local release_count
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              > "$RELEASE_LIST_JSON"
+            release_count="$(jq -r \
+              --arg tag "$RELEASE_TAG" \
+              '[.[][] | select(.tag_name == $tag)] | length' \
+              "$RELEASE_LIST_JSON")"
+            case "$release_count" in
+              0) printf '%s' absent ;;
+              1)
+                jq \
+                  --arg tag "$RELEASE_TAG" \
+                  '.[][] | select(.tag_name == $tag)' \
+                  "$RELEASE_LIST_JSON" \
+                  > "$RELEASE_JSON"
+                printf '%s' present
+                ;;
+              *)
+                echo "error: GitHub returned $release_count releases for tag $RELEASE_TAG." >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          validate_release_metadata() {
+            jq -e \
+              --arg tag "$RELEASE_TAG" \
+              --arg title "$RELEASE_TITLE" \
+              --rawfile notes "$RELEASE_NOTES" \
+              '.tag_name == $tag and .name == $title and .body == $notes and .prerelease == false and (.draft | type == "boolean")' \
+              "$RELEASE_JSON" >/dev/null || {
+                echo 'error: existing GitHub Release metadata does not match the immutable release inputs.' >&2
+                exit 1
+              }
+          }
+
+          RELEASE_STATE="$(fetch_release)"
+          if [[ "$RELEASE_STATE" == "absent" ]]; then
+            assert_remote_tag
+            if ! gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$RELEASE_NOTES" \
+              --draft; then
+              [[ "$(fetch_release)" == "present" ]] || {
+                echo 'error: draft creation failed and no resumable Release exists.' >&2
+                exit 1
+              }
+            fi
+            [[ "$(fetch_release)" == "present" ]] || {
+              echo 'error: newly created draft cannot be read back.' >&2
+              exit 1
+            }
+          fi
+          validate_release_metadata
+
+          DMG_NAME="Ushot-$VERSION-arm64.dmg"
+          ZIP_NAME="Ushot-$VERSION-arm64.zip"
+          DSYM_NAME="Ushot-$VERSION-arm64.dSYM.zip"
+          MANIFEST_NAME="Ushot-$VERSION-arm64.release-manifest.json"
+          CHECKSUMS_NAME="SHA256SUMS.txt"
+          EXPECTED_NAMES=("$DMG_NAME" "$ZIP_NAME" "$DSYM_NAME" "$MANIFEST_NAME" "$CHECKSUMS_NAME")
+
+          DUPLICATE_NAMES="$(jq -r '.assets | group_by(.name)[] | select(length != 1) | .[0].name' "$RELEASE_JSON")"
+          [[ -z "$DUPLICATE_NAMES" ]] || {
+            echo "error: duplicate GitHub assets exist: $DUPLICATE_NAMES" >&2
+            exit 1
+          }
+          UNEXPECTED_NAMES="$(jq -r \
+            --arg dmg "$DMG_NAME" \
+            --arg zip "$ZIP_NAME" \
+            --arg dsym "$DSYM_NAME" \
+            --arg manifest "$MANIFEST_NAME" \
+            --arg checksums "$CHECKSUMS_NAME" \
+            '.assets[].name | select(. != $dmg and . != $zip and . != $dsym and . != $manifest and . != $checksums)' \
+            "$RELEASE_JSON")"
+          [[ -z "$UNEXPECTED_NAMES" ]] || {
+            echo "error: unexpected GitHub assets prevent safe recovery: $UNEXPECTED_NAMES" >&2
+            exit 1
+          }
+
+          MISSING_NAMES=()
+          for name in "${EXPECTED_NAMES[@]}"; do
+            REMOTE_COUNT="$(jq -r --arg name "$name" '[.assets[] | select(.name == $name)] | length' "$RELEASE_JSON")"
+            if [[ "$REMOTE_COUNT" == "0" ]]; then
+              MISSING_NAMES+=("$name")
+              continue
+            fi
+            [[ "$REMOTE_COUNT" == "1" ]] || {
+              echo "error: expected exactly one GitHub asset named $name." >&2
+              exit 1
+            }
+            LOCAL_SIZE="$(stat -f '%z' "$ARTIFACTS_DIRECTORY/$name")"
+            LOCAL_SHA="$(shasum -a 256 "$ARTIFACTS_DIRECTORY/$name" | awk '{print $1}')"
+            REMOTE_SIZE="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .size' "$RELEASE_JSON")"
+            REMOTE_ASSET_ID="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .id' "$RELEASE_JSON")"
+            REMOTE_UPLOAD_STATE="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | (.state // "")' "$RELEASE_JSON")"
+            REMOTE_DIGEST="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | (.digest // "")' "$RELEASE_JSON")"
+            [[ "$REMOTE_SIZE" == "$LOCAL_SIZE" ]] || {
+              echo "error: existing asset size mismatch for $name." >&2
+              exit 1
+            }
+            [[ -z "$REMOTE_UPLOAD_STATE" || "$REMOTE_UPLOAD_STATE" == "uploaded" ]] || {
+              echo "error: existing asset $name is not fully uploaded." >&2
+              exit 1
+            }
+            if [[ -n "$REMOTE_DIGEST" ]]; then
+              [[ "$REMOTE_DIGEST" == "sha256:$LOCAL_SHA" ]] || {
+                echo "error: existing asset digest mismatch for $name." >&2
+                exit 1
+              }
+            else
+              [[ "$REMOTE_ASSET_ID" =~ ^[1-9][0-9]*$ ]] || {
+                echo "error: existing asset has an invalid API identifier: $name" >&2
+                exit 1
+              }
+              gh api \
+                --header 'Accept: application/octet-stream' \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$REMOTE_ASSET_ID" \
+                > "$RELEASE_DOWNLOADS/$name"
+              [[ "$(shasum -a 256 "$RELEASE_DOWNLOADS/$name" | awk '{print $1}')" == "$LOCAL_SHA" ]] || {
+                echo "error: downloaded existing asset digest mismatch for $name." >&2
+                exit 1
+              }
+            fi
+          done
+
+          RELEASE_IS_DRAFT="$(jq -r '.draft' "$RELEASE_JSON")"
+          if [[ "$RELEASE_IS_DRAFT" == "false" && "${#MISSING_NAMES[@]}" -ne 0 ]]; then
+            echo 'error: a published Release is missing assets and will not be mutated.' >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_IS_DRAFT" == "true" ]]; then
+            for name in "${MISSING_NAMES[@]}"; do
+              assert_remote_tag
+              gh release upload "$RELEASE_TAG" \
+                "$ARTIFACTS_DIRECTORY/$name" \
+                --repo "$GITHUB_REPOSITORY"
+            done
+          fi
+
+          scripts/verify-github-release-assets.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --directory "$ARTIFACTS_DIRECTORY" \
+            --expected-state either
+
+          [[ "$(fetch_release)" == "present" ]] || {
+            echo 'error: GitHub Release disappeared before publication.' >&2
+            exit 1
+          }
+          validate_release_metadata
+          RELEASE_IS_DRAFT="$(jq -r '.draft' "$RELEASE_JSON")"
+          if [[ "$RELEASE_IS_DRAFT" == "true" ]]; then
+            assert_remote_tag
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft=false \
+              --latest
+          fi
+          assert_remote_tag
+          scripts/verify-github-release-assets.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --directory "$ARTIFACTS_DIRECTORY" \
+            --expected-state published
+
+      - name: Verify the published Sparkle ZIP through the anonymous public boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_NAME="Ushot-$VERSION-arm64.zip"
+          PUBLIC_ZIP="$(mktemp "$RUNNER_TEMP/ushot-public-zip.XXXXXX")"
+          trap 'rm -f "$PUBLIC_ZIP"' EXIT
+          curl --fail --silent --show-error --location \
+            --proto '=https' \
+            --tlsv1.2 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$ZIP_NAME" \
+            --output "$PUBLIC_ZIP"
+          [[ "$(stat -f '%z' "$PUBLIC_ZIP")" == "$(stat -f '%z' "$ARTIFACTS_DIRECTORY/$ZIP_NAME")" ]] || {
+            echo 'error: anonymously downloaded ZIP has the wrong size.' >&2
+            exit 1
+          }
+          [[ "$(shasum -a 256 "$PUBLIC_ZIP" | awk '{print $1}')" == "$(shasum -a 256 "$ARTIFACTS_DIRECTORY/$ZIP_NAME" | awk '{print $1}')" ]] || {
+            echo 'error: anonymously downloaded ZIP has the wrong SHA-256 digest.' >&2
+            exit 1
+          }
+
+  deploy-appcast:
+    name: Deploy the signed appcast after immutable assets exist
+    needs:
+      - preflight
+      - build-and-sign
+      - publish-release
+    runs-on: macos-15
+    permissions:
+      actions: read
+      contents: read
+      pages: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      BUILD_NUMBER: ${{ needs.preflight.outputs.build_number }}
+      RELEASE_COMMIT: ${{ needs.preflight.outputs.commit_sha }}
+      RELEASE_TAG_OBJECT: ${{ needs.preflight.outputs.tag_object_sha }}
+      CI_RUN_ID: ${{ needs.preflight.outputs.ci_run_id }}
+      ARTIFACTS_DIRECTORY: ${{ github.workspace }}/build/pages-release-assets
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Revalidate the tagged source before a deployment retry
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/release-preflight.sh \
+            --tag "$RELEASE_TAG" \
+            --build-number "$BUILD_NUMBER" \
+            --repository "$GITHUB_REPOSITORY"
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_COMMIT" ]] || {
+            echo 'error: Pages checkout does not match the admitted release commit.' >&2
+            exit 1
+          }
+          [[ "$(git rev-parse "refs/tags/$RELEASE_TAG")" == "$RELEASE_TAG_OBJECT" ]] || {
+            echo 'error: Pages checkout has a different release tag object.' >&2
+            exit 1
+          }
+
+      - name: Recover the original release assets for deployment admission
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ushot-release-assets
+          path: ${{ env.ARTIFACTS_DIRECTORY }}
+
+      - name: Recheck the immutable tag and published asset bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REMOTE_REFS="$(git ls-remote --exit-code \
+            "https://github.com/$GITHUB_REPOSITORY.git" \
+            "refs/tags/$RELEASE_TAG" \
+            "refs/tags/$RELEASE_TAG^{}")"
+          REMOTE_TAG_OBJECT="$(awk -v tag_ref="refs/tags/$RELEASE_TAG" '
+            $2 == tag_ref { print $1 }
+          ' <<<"$REMOTE_REFS")"
+          REMOTE_TAG_COMMIT="$(awk -v tag_ref="refs/tags/$RELEASE_TAG" '
+            $2 == tag_ref { direct = $1 }
+            $2 == tag_ref "^{}" { peeled = $1 }
+            END { print (peeled != "" ? peeled : direct) }
+          ' <<<"$REMOTE_REFS")"
+          [[ "$REMOTE_TAG_OBJECT" == "$RELEASE_TAG_OBJECT" ]] || {
+            echo "error: refusing Pages deployment because $RELEASE_TAG object no longer matches $RELEASE_TAG_OBJECT." >&2
+            exit 1
+          }
+          [[ "$REMOTE_TAG_COMMIT" == "$RELEASE_COMMIT" ]] || {
+            echo "error: refusing Pages deployment because $RELEASE_TAG no longer resolves to $RELEASE_COMMIT." >&2
+            exit 1
+          }
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.protected')" == "true" ]] || {
+            echo 'error: refusing Pages deployment because main is not protected.' >&2
+            exit 1
+          }
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "$RELEASE_COMMIT" refs/remotes/origin/main || {
+            echo "error: refusing Pages deployment because $RELEASE_TAG is not an ancestor of protected main." >&2
+            exit 1
+          }
+          CI_JSON="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID")"
+          jq -e \
+            --arg commit "$RELEASE_COMMIT" \
+            '.head_sha == $commit and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion == "success"' \
+            <<<"$CI_JSON" >/dev/null || {
+              echo "error: refusing Pages deployment because CI run $CI_RUN_ID is no longer an admitted success." >&2
+              exit 1
+            }
+          scripts/verify-github-release-assets.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --directory "$ARTIFACTS_DIRECTORY" \
+            --expected-state published
+
+      - id: deployment
+        name: Deploy the preserved signed Pages artifact
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

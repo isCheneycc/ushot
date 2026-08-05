@@ -11,20 +11,32 @@ final class PinnedShotManager {
     private let exporter: any ImageExporting
     private let settingsStore: SettingsStore
     private let historyStore: any ScreenshotHistoryStoring
+    private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
+    private let admitAppWork: @MainActor () throws -> Void
     private var currentController: PinnedShotPanelController?
     private var regionDraftController: PinnedShotPanelController?
     private var preparedRegionDraftToolbarController: PinnedShotToolbarController?
     private var canvasEditorLeases: [ObjectIdentifier: UUID] = [:]
     private var memoryPressureSource: DispatchSourceMemoryPressure?
 
+    var hasBlockingUpdateActivity: Bool {
+        !canvasEditorLeases.isEmpty
+            || regionDraftController != nil
+            || currentController?.hasBlockingUpdateActivity == true
+    }
+
     init(
         exporter: any ImageExporting = SystemImageExporter(),
         settingsStore: SettingsStore,
-        historyStore: any ScreenshotHistoryStoring
+        historyStore: any ScreenshotHistoryStoring,
+        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
+        admitAppWork: @escaping @MainActor () throws -> Void = {}
     ) {
         self.exporter = exporter
         self.settingsStore = settingsStore
         self.historyStore = historyStore
+        self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
+        self.admitAppWork = admitAppWork
         let source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.warning, .critical],
             queue: .main
@@ -82,7 +94,8 @@ final class PinnedShotManager {
         )
         let session = AnnotationEditingSession(
             capturedImage: capturedImage,
-            editorSettings: settingsStore.settings.editor
+            editorSettings: settingsStore.settings.editor,
+            updateSensitiveActivityTracker: updateSensitiveActivityTracker
         )
         let identifier = UUID()
         let captureSettings = settingsStore.settings.capture
@@ -109,7 +122,9 @@ final class PinnedShotManager {
             exporter: exporter,
             settingsStore: settingsStore,
             outputSettings: settingsStore.settings.output,
-            presentationMode: .pinned(showsToolbar: showsToolbar)
+            presentationMode: .pinned(showsToolbar: showsToolbar),
+            updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+            admitAppWork: admitAppWork
         )
         controller.onClose = { [weak self] identifier in
             guard self?.currentController?.identifier == identifier else { return }
@@ -149,7 +164,8 @@ final class PinnedShotManager {
         let identifier = UUID()
         let session = AnnotationEditingSession(
             capturedImage: capturedImage,
-            editorSettings: settingsStore.settings.editor
+            editorSettings: settingsStore.settings.editor,
+            updateSensitiveActivityTracker: updateSensitiveActivityTracker
         )
         AppLog.capture.notice(
             "Presenting transparent region confirmation surface: id=\(identifier.uuidString, privacy: .public), logical=\(capturedImage.logicalSize.width, privacy: .public)x\(capturedImage.logicalSize.height, privacy: .public), cachedPixels=\(capturedImage.image.width, privacy: .public)x\(capturedImage.image.height, privacy: .public), outputCommitted=false"
@@ -175,7 +191,9 @@ final class PinnedShotManager {
             settingsStore: settingsStore,
             outputSettings: settingsStore.settings.output,
             presentationMode: .regionDraft,
-            preparedToolbarController: preparedToolbarController
+            preparedToolbarController: preparedToolbarController,
+            updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+            admitAppWork: admitAppWork
         )
         controller.onClose = { [weak self] identifier in
             if self?.currentController?.identifier == identifier {
@@ -329,6 +347,16 @@ final class PinnedShotManager {
     }
 
     private func presentCanvasEditor(for session: AnnotationEditingSession, reason: String) {
+        do {
+            try admitAppWork()
+        } catch {
+            AppLog.updates.notice(
+                "Rejected canvas-editor presentation during an update transaction: reason=\(reason, privacy: .public)"
+            )
+            NSSound.beep()
+            onError?(error)
+            return
+        }
         guard let onOpenEditor else {
             preconditionFailure("Canvas-editor presentation requires an installed application coordinator.")
         }
@@ -391,6 +419,7 @@ final class PinnedShotManager {
                 session: session,
                 store: historyStore,
                 settingsStore: settingsStore,
+                updateSensitiveActivityTracker: updateSensitiveActivityTracker,
                 onError: { [weak self] error in self?.onError?(error) }
             )
             session.attachHistoryRecorder(recorder)
@@ -585,6 +614,8 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private let ownsReusableRegionToolbar: Bool
     private let settingsStore: SettingsStore
     private let outputSettings: OutputSettings
+    private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
+    private let admitAppWork: @MainActor () throws -> Void
     private var presentationMode: PinnedShotPresentationMode
     private var promiseDelegates: [FilePromiseDelegate] = []
     private var cancellables: Set<AnyCancellable> = []
@@ -603,12 +634,25 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private var didReleaseRegionToolbar = false
     private var toolbarContextMenuItem: NSMenuItem?
     private var windowMoveInteraction: WindowMoveInteraction?
+    private var liveResizeInProgress = false
     private var canvasEditorPresented = false
     private var restoresToolbarAfterCanvasEditor = false
     private var isApplyingEditorSettings = false
 
     var isRegionDraft: Bool { presentationMode.isRegionDraft }
     private var exportInProgress: Bool { activeExportTransaction != nil }
+    var hasBlockingUpdateActivity: Bool {
+        presentationMode.isRegionDraft
+            || presentationMode.showsToolbar
+            || canvasEditorPresented
+            || activeSavePanel != nil
+            || exportInProgress
+            || !promiseDelegates.isEmpty
+            || regionDraftTransitionInProgress
+            || regionDraftGeometryUpdateInProgress
+            || windowMoveInteraction != nil
+            || liveResizeInProgress
+    }
 
     init(
         identifier: UUID,
@@ -617,7 +661,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         settingsStore: SettingsStore,
         outputSettings: OutputSettings,
         presentationMode: PinnedShotPresentationMode,
-        preparedToolbarController: PinnedShotToolbarController? = nil
+        preparedToolbarController: PinnedShotToolbarController? = nil,
+        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
+        admitAppWork: @escaping @MainActor () throws -> Void = {}
     ) {
         precondition(
             preparedToolbarController == nil || presentationMode.isRegionDraft,
@@ -629,6 +675,8 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         self.payload = PinnedShotPayload(capturedImage: session.previewImage, exporter: exporter)
         self.settingsStore = settingsStore
         self.outputSettings = outputSettings
+        self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
+        self.admitAppWork = admitAppWork
         self.presentationMode = presentationMode
         self.ownsReusableRegionToolbar = presentationMode.isRegionDraft
 
@@ -1031,6 +1079,15 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     func windowWillClose(_ notification: Notification) {
         cancelActiveExport(reason: "window-will-close")
         disableAnnotationEditing(reason: "window-will-close")
+        let externalDragCloseReason = closeReason?.rawValue ?? "window-without-explicit-reason"
+        let forcesExternalDragCancellation = closeReason == .applicationTermination
+        let externalDragDelegates = promiseDelegates
+        for promiseDelegate in externalDragDelegates {
+            promiseDelegate.sourceWillClose(
+                reason: externalDragCloseReason,
+                force: forcesExternalDragCancellation
+            )
+        }
         removeKeyboardMonitor()
         activeSavePanel?.cancel(nil)
         activeSavePanel = nil
@@ -1153,7 +1210,13 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         endedAt screenPoint: NSPoint,
         operation: NSDragOperation
     ) {
-        promiseDelegates.removeAll()
+        guard let promiseDelegate = promiseDelegates.first(where: { $0.owns(session) }) else {
+            AppLog.export.fault(
+                "External drag ended without its file-promise lifecycle owner: id=\(self.identifier.uuidString, privacy: .public), operation=\(operation.rawValue, privacy: .public)"
+            )
+            return
+        }
+        promiseDelegate.draggingSessionDidEnd(operation: operation)
     }
 
     private func configurePanels(initialSize: CGSize) {
@@ -1230,6 +1293,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 self.windowMoveInteraction == nil,
                 "A pinned screenshot cannot begin a second window move before pointer-up."
             )
+            guard self.admitUpdateSensitiveAction("move-window") else { return }
             let panelOrigin = self.imagePanel.frame.origin
             self.windowMoveInteraction = WindowMoveInteraction(
                 startedAt: ProcessInfo.processInfo.systemUptime,
@@ -1292,6 +1356,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             }
         }
         imagePanel.onEscape = { [weak self] in self?.handleEscape() }
+        imagePanel.shouldAcceptLeftMouseDown = { [weak self] in
+            self?.admitPinnedPointerInput(action: "left-mouse-down") ?? false
+        }
         session.onError = { [weak self] error in
             guard let self else { return }
             if self.closeReason != nil {
@@ -1337,6 +1404,28 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         if !presentationMode.isRegionDraft {
             configurePinnedContextMenu()
         }
+    }
+
+    func windowWillStartLiveResize(_ notification: Notification) {
+        guard notification.object as? NSWindow === imagePanel else { return }
+        liveResizeInProgress = true
+        guard admitPinnedPointerInput(action: "live-resize") else {
+            AppLog.updates.fault(
+                "AppKit began a pinned live resize after update ownership rejected its pointer input: id=\(self.identifier.uuidString, privacy: .public)"
+            )
+            return
+        }
+        AppLog.capture.debug(
+            "Pinned screenshot live resize began: id=\(self.identifier.uuidString, privacy: .public)"
+        )
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard notification.object as? NSWindow === imagePanel else { return }
+        liveResizeInProgress = false
+        AppLog.capture.debug(
+            "Pinned screenshot live resize ended: id=\(self.identifier.uuidString, privacy: .public)"
+        )
     }
 
     private func wireActions() {
@@ -1880,6 +1969,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     }
 
     private func requestCopy(source: CopyRequestSource) {
+        guard admitUpdateSensitiveAction("copy-\(source.rawValue)") else { return }
         resolveActiveLineWidthEdit(.commitOrReject, reason: "copy-\(source.rawValue)")
         imageView.endTextEditingIfNeeded(reason: .externalAction)
         let completionPolicy: CopyCompletionPolicy = source == .contextMenu || retainsAfterCopy
@@ -2287,6 +2377,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             NSSound.beep()
             return
         }
+        guard admitUpdateSensitiveAction("toggle-toolbar") else { return }
         setPinnedToolbarVisible(!presentationMode.showsToolbar, reason: "context-menu")
     }
 
@@ -2412,6 +2503,50 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     }
 
     private func beginExternalDrag(event: NSEvent) {
+        guard admitUpdateSensitiveAction("external-drag") else { return }
+
+        guard promiseDelegates.isEmpty else {
+            let error = FilePromiseLifecycleError.concurrentDrag()
+            AppLog.export.error(
+                "Rejected overlapping external drag: id=\(self.identifier.uuidString, privacy: .public), activePromises=\(self.promiseDelegates.count, privacy: .public)"
+            )
+            NSSound.beep()
+            onError?(error)
+            return
+        }
+
+        let lifecycleID = UUID()
+        let lease = updateSensitiveActivityTracker.begin(
+            operation: "pinned-external-drag"
+        )
+        let promiseDelegate = FilePromiseDelegate(
+            identifier: lifecycleID,
+            payload: payload,
+            filenameTemplate: outputSettings.filenameTemplate,
+            updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+            lease: lease,
+            onFinished: { [weak self] finishedID in
+                guard let self else { return }
+                guard let index = self.promiseDelegates.firstIndex(where: {
+                    $0.identifier == finishedID
+                }) else {
+                    AppLog.export.fault(
+                        "A file-promise lifecycle finished without controller ownership: lifecycle=\(finishedID.uuidString, privacy: .public)"
+                    )
+                    return
+                }
+                self.promiseDelegates.remove(at: index)
+                AppLog.export.debug(
+                    "Released external drag lifecycle ownership: lifecycle=\(finishedID.uuidString, privacy: .public), remaining=\(self.promiseDelegates.count, privacy: .public)"
+                )
+            }
+        )
+        promiseDelegate.armLifecycleRetention()
+        promiseDelegates.append(promiseDelegate)
+        AppLog.export.notice(
+            "Began external drag lifecycle: id=\(self.identifier.uuidString, privacy: .public), lifecycle=\(lifecycleID.uuidString, privacy: .public)"
+        )
+
         do {
             let item = NSPasteboardItem()
             item.setData(try payload.pngData(), forType: .png)
@@ -2421,24 +2556,48 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             let imageDraggingItem = NSDraggingItem(pasteboardWriter: item)
             imageDraggingItem.setDraggingFrame(imageView.bounds, contents: imageView.draggingImage)
 
-            let promiseDelegate = FilePromiseDelegate(
-                payload: payload,
-                filenameTemplate: outputSettings.filenameTemplate
-            )
-            promiseDelegates.append(promiseDelegate)
             let provider = NSFilePromiseProvider(
                 fileType: UTType.png.identifier,
                 delegate: promiseDelegate
             )
             let promiseItem = NSDraggingItem(pasteboardWriter: provider)
             promiseItem.setDraggingFrame(imageView.bounds, contents: imageView.draggingImage)
-            imageView.beginDraggingSession(
+            let draggingSession = imageView.beginDraggingSession(
                 with: [imageDraggingItem, promiseItem],
                 event: event,
                 source: self
             )
+            promiseDelegate.bind(to: draggingSession)
         } catch {
+            promiseDelegate.dragSetupDidFail(error)
             onError?(error)
+        }
+    }
+
+    private func admitUpdateSensitiveAction(_ action: String) -> Bool {
+        do {
+            try admitAppWork()
+            return true
+        } catch {
+            AppLog.updates.notice(
+                "Rejected pinned screenshot action during an update transaction: action=\(action, privacy: .public), id=\(self.identifier.uuidString, privacy: .public)"
+            )
+            NSSound.beep()
+            onError?(error)
+            return false
+        }
+    }
+
+    private func admitPinnedPointerInput(action: String) -> Bool {
+        do {
+            try admitAppWork()
+            return true
+        } catch {
+            AppLog.updates.notice(
+                "Rejected pinned screenshot pointer input during an update transaction: action=\(action, privacy: .public), id=\(self.identifier.uuidString, privacy: .public)"
+            )
+            NSSound.beep()
+            return false
         }
     }
 
@@ -2710,6 +2869,7 @@ private final class RegionDraftChromeView: NSView {
 
 private final class PinnedShotPanel: NSPanel {
     var onEscape: (() -> Void)?
+    var shouldAcceptLeftMouseDown: (() -> Bool)?
     var inputRole = "unconfigured"
 
     override var canBecomeKey: Bool { true }
@@ -2717,6 +2877,7 @@ private final class PinnedShotPanel: NSPanel {
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown {
+            guard shouldAcceptLeftMouseDown?() != false else { return }
             let point = event.locationInWindow
             let targetDescription: String
             if let contentView {
@@ -4080,42 +4241,412 @@ private final class PinnedShotPayload: @unchecked Sendable {
     }
 }
 
+private enum FilePromiseLifecycleError {
+    private static let domain = "\(ProductIdentity.bundleIdentifier).file-promise"
+
+    static func concurrentDrag() -> NSError {
+        NSError(
+            domain: domain,
+            code: 1,
+            userInfo: [
+                NSLocalizedDescriptionKey: String(
+                    localized: "Finish the current drag before starting another one."
+                )
+            ]
+        )
+    }
+
+    static func duplicateWriteRequest() -> NSError {
+        NSError(
+            domain: domain,
+            code: 2,
+            userInfo: [
+                NSLocalizedDescriptionKey: String(
+                    localized: "The destination requested the same promised file more than once."
+                )
+            ]
+        )
+    }
+
+    static func lifecycleEnded() -> NSError {
+        NSError(
+            domain: domain,
+            code: 3,
+            userInfo: [
+                NSLocalizedDescriptionKey: String(
+                    localized: "The promised file is no longer available because its drag ended."
+                )
+            ]
+        )
+    }
+}
+
+/// Coordinates the one callback that AppKit is allowed to issue from the
+/// file-promise operation queue with the lifecycle decisions made on the main
+/// actor. Sealing and callback registration are one atomic boundary, so a late
+/// callback can be rejected without ever writing during an update transaction.
+private final class FilePromiseCallbackRegistry: @unchecked Sendable {
+    enum Registration {
+        case accepted
+        case duplicate
+        case terminal
+    }
+
+    private enum State {
+        case open
+        case registered
+        case terminal
+    }
+
+    private let lock = NSLock()
+    private var state: State = .open
+
+    func registerWriteCallback() -> Registration {
+        lock.lock()
+        defer { lock.unlock() }
+        switch state {
+        case .open:
+            state = .registered
+            return .accepted
+        case .registered:
+            return .duplicate
+        case .terminal:
+            return .terminal
+        }
+    }
+
+    /// Atomically closes a lifecycle only when no write callback has won the
+    /// race. A `false` result means the registered callback now owns completion.
+    func sealIfNoWriteCallback() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        switch state {
+        case .open:
+            state = .terminal
+            return true
+        case .registered:
+            return false
+        case .terminal:
+            preconditionFailure("A file-promise callback registry cannot be sealed twice.")
+        }
+    }
+
+    func sealAfterWriteCallback() {
+        lock.lock()
+        defer { lock.unlock() }
+        switch state {
+        case .registered:
+            state = .terminal
+        case .open:
+            preconditionFailure("A file-promise write cannot finish before its callback is registered.")
+        case .terminal:
+            preconditionFailure("A file-promise callback registry cannot finish twice.")
+        }
+    }
+
+    var hasRegisteredWriteCallback: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return state == .registered
+    }
+
+    var isTerminal: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return state == .terminal
+    }
+}
+
+private final class FilePromiseCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: ((Error?) -> Void)?
+
+    init(_ handler: @escaping (Error?) -> Void) {
+        self.handler = handler
+    }
+
+    func finish(with error: Error?) {
+        let completion: (Error?) -> Void
+        lock.lock()
+        guard let handler else {
+            lock.unlock()
+            preconditionFailure("A file-promise completion handler cannot be called more than once.")
+        }
+        completion = handler
+        self.handler = nil
+        lock.unlock()
+        completion(error)
+    }
+}
+
+@MainActor
 private final class FilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate {
+    private enum WriteState {
+        case notRequested
+        case writing
+        case finished
+    }
+
+    let identifier: UUID
     private let payload: PinnedShotPayload
-    private let filenameTemplate: String
+    private let promisedFilename: String
+    private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
+    private let callbackRegistry = FilePromiseCallbackRegistry()
+    private let onFinished: @MainActor (UUID) -> Void
     private let queue: OperationQueue = {
         let queue = OperationQueue()
-        queue.name = "com.example.UshotApp.file-promise"
+        queue.name = "\(ProductIdentity.bundleIdentifier).file-promise"
         queue.maxConcurrentOperationCount = 1
         return queue
     }()
+    private weak var draggingSession: NSDraggingSession?
+    private var lease: UpdateSensitiveActivityTracker.Lease?
+    private var lifecycleRetention: FilePromiseDelegate?
+    private var dragEndedOperation: NSDragOperation?
+    private var sourceCloseReason: String?
+    private var forceSourceClose = false
+    private var fileNameWasRequested = false
+    private var writeState: WriteState = .notRequested
+    private var isDeliveringWriteCompletion = false
 
-    init(payload: PinnedShotPayload, filenameTemplate: String) {
+    init(
+        identifier: UUID,
+        payload: PinnedShotPayload,
+        filenameTemplate: String,
+        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
+        lease: UpdateSensitiveActivityTracker.Lease,
+        onFinished: @escaping @MainActor (UUID) -> Void
+    ) {
+        self.identifier = identifier
         self.payload = payload
-        self.filenameTemplate = filenameTemplate
+        self.promisedFilename = FilenameTemplateFormatter().filename(
+            template: filenameTemplate,
+            date: Date()
+        )
+        self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
+        self.lease = lease
+        self.onFinished = onFinished
+    }
+
+    deinit {
+        precondition(
+            callbackRegistry.isTerminal,
+            "A file-promise delegate must not deinitialize before its lifecycle is terminal."
+        )
+    }
+
+    func armLifecycleRetention() {
+        precondition(lifecycleRetention == nil, "A file-promise lifecycle may retain itself only once.")
+        precondition(lease != nil, "A file-promise lifecycle must own a lease before it is armed.")
+        lifecycleRetention = self
+    }
+
+    func bind(to session: NSDraggingSession) {
+        precondition(draggingSession == nil, "A file-promise lifecycle may bind to only one drag session.")
+        precondition(lease != nil, "A terminal file-promise lifecycle cannot bind to a drag session.")
+        draggingSession = session
+        AppLog.export.debug(
+            "Bound external drag session: lifecycle=\(self.identifier.uuidString, privacy: .public)"
+        )
+    }
+
+    func owns(_ session: NSDraggingSession) -> Bool {
+        draggingSession === session
+    }
+
+    func draggingSessionDidEnd(operation: NSDragOperation) {
+        guard dragEndedOperation == nil else {
+            AppLog.export.fault(
+                "Received duplicate external drag end callback: lifecycle=\(self.identifier.uuidString, privacy: .public), operation=\(operation.rawValue, privacy: .public)"
+            )
+            return
+        }
+        dragEndedOperation = operation
+        AppLog.export.notice(
+            "External drag session ended: lifecycle=\(self.identifier.uuidString, privacy: .public), operation=\(operation.rawValue, privacy: .public), fileNameRequested=\(self.fileNameWasRequested, privacy: .public), writeRegistered=\(self.callbackRegistry.hasRegisteredWriteCallback, privacy: .public)"
+        )
+        reconcileLifecycle(reason: "drag-ended")
+    }
+
+    func sourceWillClose(reason: String, force: Bool) {
+        guard lease != nil else { return }
+        guard sourceCloseReason == nil else {
+            AppLog.export.fault(
+                "Received duplicate source-close callback for external drag: lifecycle=\(self.identifier.uuidString, privacy: .public), previous=\(self.sourceCloseReason ?? "unknown", privacy: .public), current=\(reason, privacy: .public)"
+            )
+            return
+        }
+        sourceCloseReason = reason
+        forceSourceClose = force
+        AppLog.export.notice(
+            "External drag source is closing: lifecycle=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public), forced=\(force, privacy: .public)"
+        )
+        reconcileLifecycle(reason: "source-close")
+    }
+
+    func dragSetupDidFail(_ error: Error) {
+        guard lease != nil else {
+            preconditionFailure("A terminal file-promise lifecycle cannot report a setup failure.")
+        }
+        let nsError = error as NSError
+        AppLog.export.error(
+            "External drag setup failed: lifecycle=\(self.identifier.uuidString, privacy: .public), domain=\(nsError.domain, privacy: .public), code=\(nsError.code, privacy: .public)"
+        )
+        finishWithoutWrite(reason: "setup-failed")
     }
 
     func filePromiseProvider(
         _ filePromiseProvider: NSFilePromiseProvider,
         fileNameForType fileType: String
     ) -> String {
-        FilenameTemplateFormatter().filename(template: filenameTemplate, date: Date())
+        guard lease != nil else {
+            AppLog.export.fault(
+                "Requested a filename from a terminal file-promise lifecycle: lifecycle=\(self.identifier.uuidString, privacy: .public)"
+            )
+            return promisedFilename
+        }
+        fileNameWasRequested = true
+        AppLog.export.debug(
+            "Requested external drag filename: lifecycle=\(self.identifier.uuidString, privacy: .public)"
+        )
+        return promisedFilename
     }
 
-    func filePromiseProvider(
+    nonisolated func filePromiseProvider(
         _ filePromiseProvider: NSFilePromiseProvider,
         writePromiseTo url: URL,
         completionHandler: @escaping (Error?) -> Void
     ) {
-        do {
-            try payload.writePNG(to: url)
-            completionHandler(nil)
-        } catch {
-            completionHandler(error)
+        let completion = FilePromiseCompletion(completionHandler)
+        switch callbackRegistry.registerWriteCallback() {
+        case .accepted:
+            Task { @MainActor [self] in
+                await performRegisteredWrite(to: url, completion: completion)
+            }
+        case .duplicate:
+            AppLog.export.fault("Received duplicate file-promise write callback")
+            completion.finish(with: FilePromiseLifecycleError.duplicateWriteRequest())
+        case .terminal:
+            AppLog.export.fault("Received file-promise write callback after lifecycle termination")
+            completion.finish(with: FilePromiseLifecycleError.lifecycleEnded())
         }
     }
 
     func operationQueue(for filePromiseProvider: NSFilePromiseProvider) -> OperationQueue {
         queue
+    }
+
+    private func performRegisteredWrite(
+        to url: URL,
+        completion: FilePromiseCompletion
+    ) async {
+        guard lease != nil else {
+            AppLog.export.fault(
+                "A registered file-promise write reached a terminal lifecycle: lifecycle=\(self.identifier.uuidString, privacy: .public)"
+            )
+            completion.finish(with: FilePromiseLifecycleError.lifecycleEnded())
+            return
+        }
+        guard writeState == .notRequested else {
+            AppLog.export.fault(
+                "A file-promise lifecycle attempted to start more than one write: lifecycle=\(self.identifier.uuidString, privacy: .public)"
+            )
+            completion.finish(with: FilePromiseLifecycleError.duplicateWriteRequest())
+            return
+        }
+
+        writeState = .writing
+        AppLog.export.notice(
+            "Began pinned file-promise output: lifecycle=\(self.identifier.uuidString, privacy: .public)"
+        )
+
+        let writeError: Error?
+        do {
+            let payload = payload
+            try await Task.detached {
+                try payload.writePNG(to: url)
+            }.value
+            writeError = nil
+            AppLog.export.notice(
+                "Completed pinned file-promise output: lifecycle=\(self.identifier.uuidString, privacy: .public)"
+            )
+        } catch {
+            writeError = error
+            let nsError = error as NSError
+            AppLog.export.error(
+                "Pinned file-promise output failed: lifecycle=\(self.identifier.uuidString, privacy: .public), domain=\(nsError.domain, privacy: .public), code=\(nsError.code, privacy: .public)"
+            )
+        }
+
+        writeState = .finished
+        isDeliveringWriteCompletion = true
+        completion.finish(with: writeError)
+        isDeliveringWriteCompletion = false
+        reconcileLifecycle(reason: writeError == nil ? "write-completed" : "write-failed")
+    }
+
+    private func reconcileLifecycle(reason: String) {
+        guard lease != nil else { return }
+        guard !isDeliveringWriteCompletion else { return }
+
+        switch writeState {
+        case .writing:
+            return
+        case .finished:
+            guard dragEndedOperation != nil || sourceCloseReason != nil else { return }
+            finishAfterWrite(reason: reason)
+        case .notRequested:
+            if callbackRegistry.hasRegisteredWriteCallback {
+                return
+            }
+            if forceSourceClose {
+                finishWithoutWrite(reason: "forced-source-close")
+                return
+            }
+            guard let dragEndedOperation else { return }
+            if dragEndedOperation.isEmpty {
+                finishWithoutWrite(reason: "cancelled-drag")
+            } else if !fileNameWasRequested {
+                finishWithoutWrite(reason: "drop-did-not-request-file-promise")
+            } else if sourceCloseReason != nil {
+                finishWithoutWrite(reason: "closed-while-awaiting-file-promise")
+            } else {
+                AppLog.export.notice(
+                    "Retaining accepted file promise while awaiting its write callback: lifecycle=\(self.identifier.uuidString, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    private func finishWithoutWrite(reason: String) {
+        guard lease != nil else {
+            preconditionFailure("A file-promise lifecycle cannot finish more than once.")
+        }
+        guard callbackRegistry.sealIfNoWriteCallback() else {
+            AppLog.export.debug(
+                "A file-promise write callback won the lifecycle-finalization race: lifecycle=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public)"
+            )
+            return
+        }
+        finishLease(reason: reason)
+    }
+
+    private func finishAfterWrite(reason: String) {
+        precondition(writeState == .finished, "Only a completed file-promise write may finish this path.")
+        callbackRegistry.sealAfterWriteCallback()
+        finishLease(reason: reason)
+    }
+
+    private func finishLease(reason: String) {
+        guard let lease else {
+            preconditionFailure("A file-promise lifecycle cannot release its update lease twice.")
+        }
+        updateSensitiveActivityTracker.finish(lease)
+        self.lease = nil
+        AppLog.export.notice(
+            "Finished external drag lifecycle: lifecycle=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public)"
+        )
+        onFinished(identifier)
+        lifecycleRetention = nil
     }
 }

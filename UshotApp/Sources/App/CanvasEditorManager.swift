@@ -7,14 +7,18 @@ import UshotCore
 final class CanvasEditorManager {
     private let exporter: any ImageExporting
     private let settingsStore: SettingsStore
+    private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
     private var controllers: [ObjectIdentifier: CanvasEditorWindowController] = [:]
+    var hasOpenEditors: Bool { !controllers.isEmpty }
 
     init(
         exporter: any ImageExporting = SystemImageExporter(),
-        settingsStore: SettingsStore
+        settingsStore: SettingsStore,
+        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
     ) {
         self.exporter = exporter
         self.settingsStore = settingsStore
+        self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
     }
 
     func open(
@@ -34,7 +38,8 @@ final class CanvasEditorManager {
         let controller = CanvasEditorWindowController(
             session: session,
             exporter: exporter,
-            settingsStore: settingsStore
+            settingsStore: settingsStore,
+            updateSensitiveActivityTracker: updateSensitiveActivityTracker
         )
         controller.registerCloseCallback(onClose, ownershipID: ownershipID)
         controller.onClose = { [weak self] in self?.controllers[key] = nil }
@@ -52,6 +57,7 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
     private let session: AnnotationEditingSession
     private let exporter: any ImageExporting
     private let outputSettings: OutputSettings
+    private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
     private var closeCallbacks: [() -> Void] = []
     private var registeredCloseOwnershipIDs: Set<UUID> = []
     private var didCompleteCloseLifecycle = false
@@ -59,18 +65,20 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
     init(
         session: AnnotationEditingSession,
         exporter: any ImageExporting,
-        settingsStore: SettingsStore
+        settingsStore: SettingsStore,
+        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
     ) {
         self.session = session
         self.exporter = exporter
         self.outputSettings = settingsStore.settings.output
+        self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = NSLocalizedString("UshotApp Canvas Editor", comment: "Canvas editor window title")
+        window.title = NSLocalizedString("Ushot Canvas Editor", comment: "Canvas editor window title")
         window.setAccessibilityIdentifier("editor.window")
         window.minSize = NSSize(width: 900, height: 600)
         window.isReleasedWhenClosed = false
@@ -124,8 +132,12 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
     }
 
     private func copyImage() {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
+        let updateSensitiveActivityTracker = updateSensitiveActivityTracker
+        let lease = updateSensitiveActivityTracker.begin(
+            operation: "canvas-editor-copy"
+        )
+        Task { @MainActor [self] in
+            defer { updateSensitiveActivityTracker.finish(lease) }
             do {
                 let resolved = try await self.session.resolvedPreviewImage()
                 let image = resolved.image
@@ -156,7 +168,12 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
         )
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
-            Task { @MainActor in
+            let updateSensitiveActivityTracker = self.updateSensitiveActivityTracker
+            let lease = updateSensitiveActivityTracker.begin(
+                operation: "canvas-editor-export"
+            )
+            Task { @MainActor [self] in
+                defer { updateSensitiveActivityTracker.finish(lease) }
                 do {
                     let resolved = try await self.session.resolvedPreviewImage()
                     let image = resolved.image

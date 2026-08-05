@@ -33,6 +33,15 @@
 		010000000000000000000018 /* HistoryWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000001C /* HistoryWindowController.swift */; };
 		010000000000000000000019 /* UshotAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000001D /* UshotAppUITests.swift */; };
 		01000000000000000000001A /* AppKitDrawingFonts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000001F /* AppKitDrawingFonts.swift */; };
+		01000000000000000000001B /* UpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000020 /* UpdateController.swift */; };
+		01000000000000000000001C /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0F0000000000000000000003 /* Sparkle */; };
+		01000000000000000000001D /* AnnotationArrowHitTestingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000021 /* AnnotationArrowHitTestingTests.swift */; };
+		01000000000000000000001E /* AnnotationPreviewRevisionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000022 /* AnnotationPreviewRevisionTests.swift */; };
+		01000000000000000000001F /* ProductIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000023 /* ProductIdentityTests.swift */; };
+		010000000000000000000020 /* UpdateCheckingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000024 /* UpdateCheckingTests.swift */; };
+		010000000000000000000021 /* ThirdPartyNotices.txt in Resources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000025 /* ThirdPartyNotices.txt */; };
+		010000000000000000000022 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000026 /* LICENSE */; };
+		010000000000000000000023 /* UpdateSensitiveActivityTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000027 /* UpdateSensitiveActivityTracker.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -52,7 +61,7 @@
 		020000000000000000000004 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		020000000000000000000005 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		020000000000000000000006 /* PhaseZeroFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhaseZeroFoundationTests.swift; sourceTree = "<group>"; };
-		020000000000000000000007 /* UshotApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = UshotApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		020000000000000000000007 /* Ushot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Ushot.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		020000000000000000000008 /* UshotCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = UshotCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		020000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		02000000000000000000000A /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
@@ -77,6 +86,14 @@
 		02000000000000000000001D /* UshotAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UshotAppUITests.swift; sourceTree = "<group>"; };
 		02000000000000000000001E /* UshotAppUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = UshotAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		02000000000000000000001F /* AppKitDrawingFonts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppKitDrawingFonts.swift; sourceTree = "<group>"; };
+		020000000000000000000020 /* UpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateController.swift; sourceTree = "<group>"; };
+		020000000000000000000021 /* AnnotationArrowHitTestingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationArrowHitTestingTests.swift; sourceTree = "<group>"; };
+		020000000000000000000022 /* AnnotationPreviewRevisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationPreviewRevisionTests.swift; sourceTree = "<group>"; };
+		020000000000000000000023 /* ProductIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProductIdentityTests.swift; sourceTree = "<group>"; };
+		020000000000000000000024 /* UpdateCheckingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateCheckingTests.swift; sourceTree = "<group>"; };
+		020000000000000000000025 /* ThirdPartyNotices.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = ThirdPartyNotices.txt; sourceTree = "<group>"; };
+		020000000000000000000026 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = LICENSE; sourceTree = "<group>"; };
+		020000000000000000000027 /* UpdateSensitiveActivityTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateSensitiveActivityTracker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -85,6 +102,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				010000000000000000000006 /* UshotCore in Frameworks */,
+				01000000000000000000001C /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -113,6 +131,7 @@
 				040000000000000000000006 /* UshotCoreTests */,
 				040000000000000000000009 /* UshotAppUITests */,
 				040000000000000000000007 /* Config */,
+				020000000000000000000026 /* LICENSE */,
 				040000000000000000000008 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -134,6 +153,8 @@
 				020000000000000000000002 /* AppDelegate.swift */,
 				020000000000000000000003 /* AppEnvironment.swift */,
 				02000000000000000000000D /* StatusBarController.swift */,
+				020000000000000000000020 /* UpdateController.swift */,
+				020000000000000000000027 /* UpdateSensitiveActivityTracker.swift */,
 				02000000000000000000000E /* SettingsWindowController.swift */,
 				02000000000000000000000F /* SettingsViews.swift */,
 				020000000000000000000010 /* ShortcutRecorderView.swift */,
@@ -159,6 +180,7 @@
 			children = (
 				020000000000000000000004 /* Assets.xcassets */,
 				020000000000000000000005 /* Localizable.xcstrings */,
+				020000000000000000000025 /* ThirdPartyNotices.txt */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -166,7 +188,11 @@
 		040000000000000000000006 /* UshotCoreTests */ = {
 			isa = PBXGroup;
 			children = (
+				020000000000000000000021 /* AnnotationArrowHitTestingTests.swift */,
+				020000000000000000000022 /* AnnotationPreviewRevisionTests.swift */,
 				020000000000000000000006 /* PhaseZeroFoundationTests.swift */,
+				020000000000000000000023 /* ProductIdentityTests.swift */,
+				020000000000000000000024 /* UpdateCheckingTests.swift */,
 			);
 			path = UshotCore/Tests/UshotCoreTests;
 			sourceTree = "<group>";
@@ -184,7 +210,7 @@
 		040000000000000000000008 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				020000000000000000000007 /* UshotApp.app */,
+				020000000000000000000007 /* Ushot.app */,
 				020000000000000000000008 /* UshotCoreTests.xctest */,
 				02000000000000000000001E /* UshotAppUITests.xctest */,
 			);
@@ -206,6 +232,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 0D0000000000000000000002 /* Build configuration list for PBXNativeTarget "UshotApp" */;
 			buildPhases = (
+				120000000000000000000001 /* Validate Sparkle Release Configuration */,
 				060000000000000000000001 /* Sources */,
 				030000000000000000000001 /* Frameworks */,
 				070000000000000000000001 /* Resources */,
@@ -217,9 +244,10 @@
 			name = UshotApp;
 			packageProductDependencies = (
 				0F0000000000000000000001 /* UshotCore */,
+				0F0000000000000000000003 /* Sparkle */,
 			);
-			productName = UshotApp;
-			productReference = 020000000000000000000007 /* UshotApp.app */;
+			productName = Ushot;
+			productReference = 020000000000000000000007 /* Ushot.app */;
 			productType = "com.apple.product-type.application";
 		};
 		050000000000000000000002 /* UshotCoreTests */ = {
@@ -285,6 +313,7 @@
 			mainGroup = 040000000000000000000001;
 			packageReferences = (
 				0E0000000000000000000001 /* XCLocalSwiftPackageReference "." */,
+				0E0000000000000000000002 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			productRefGroup = 040000000000000000000008 /* Products */;
 			projectDirPath = "";
@@ -304,10 +333,34 @@
 			files = (
 				010000000000000000000004 /* Assets.xcassets in Resources */,
 				010000000000000000000005 /* Localizable.xcstrings in Resources */,
+				010000000000000000000021 /* ThirdPartyNotices.txt in Resources */,
+				010000000000000000000022 /* LICENSE in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		120000000000000000000001 /* Validate Sparkle Release Configuration */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Validate Sparkle Release Configuration";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ \"$CONFIGURATION\" != \"Release\" ]; then\n  exit 0\nfi\n\nushot_key=\"${SPARKLE_PUBLIC_ED_KEY:-}\"\ncase \"$ushot_key\" in\n  \"\"|*'$('*)\n    echo \"error: SPARKLE_PUBLIC_ED_KEY is missing or unresolved.\" >&2\n    exit 1\n    ;;\nesac\n\nushot_key_bytes=$(printf '%s' \"$ushot_key\" | /usr/bin/base64 -D 2>/dev/null | /usr/bin/wc -c | /usr/bin/tr -d ' ')\nif [ \"$ushot_key_bytes\" != \"32\" ]; then\n  echo \"error: SPARKLE_PUBLIC_ED_KEY must be a base64-encoded 32-byte EdDSA public key.\" >&2\n  exit 1\nfi\n\nushot_feed=$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' \"$SRCROOT/UshotApp/Info.plist\" 2>/dev/null)\nif [ \"$ushot_feed\" != \"https://ischeneycc.github.io/ushot/updates/appcast.xml\" ]; then\n  echo \"error: SUFeedURL must use the production HTTPS appcast path.\" >&2\n  exit 1\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		060000000000000000000001 /* Sources */ = {
@@ -318,6 +371,8 @@
 				010000000000000000000002 /* AppDelegate.swift in Sources */,
 				010000000000000000000003 /* AppEnvironment.swift in Sources */,
 				010000000000000000000009 /* StatusBarController.swift in Sources */,
+				01000000000000000000001B /* UpdateController.swift in Sources */,
+				010000000000000000000023 /* UpdateSensitiveActivityTracker.swift in Sources */,
 				01000000000000000000000A /* SettingsWindowController.swift in Sources */,
 				01000000000000000000000B /* SettingsViews.swift in Sources */,
 				01000000000000000000000C /* ShortcutRecorderView.swift in Sources */,
@@ -341,7 +396,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				01000000000000000000001D /* AnnotationArrowHitTestingTests.swift in Sources */,
+				01000000000000000000001E /* AnnotationPreviewRevisionTests.swift in Sources */,
 				010000000000000000000007 /* PhaseZeroFoundationTests.swift in Sources */,
+				01000000000000000000001F /* ProductIdentityTests.swift in Sources */,
+				010000000000000000000020 /* UpdateCheckingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -398,6 +457,7 @@
 			baseConfigurationReference = 02000000000000000000000B /* Debug.xcconfig */;
 			buildSettings = {
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				PRODUCT_NAME = Ushot;
 			};
 			name = Debug;
 		};
@@ -406,6 +466,7 @@
 			baseConfigurationReference = 02000000000000000000000C /* Release.xcconfig */;
 			buildSettings = {
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				PRODUCT_NAME = Ushot;
 			};
 			name = Release;
 		};
@@ -418,7 +479,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.UshotAppTests;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.ischeneycc.ushot.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;
@@ -434,7 +495,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.UshotAppTests;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.ischeneycc.ushot.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;
@@ -449,7 +510,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.UshotAppUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.ischeneycc.ushot.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;
@@ -466,7 +527,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.UshotAppUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.ischeneycc.ushot.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;
@@ -523,6 +584,17 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		0E0000000000000000000002 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = exactVersion;
+				version = 2.9.5;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		0F0000000000000000000001 /* UshotCore */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -533,6 +605,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 0E0000000000000000000001 /* XCLocalSwiftPackageReference "." */;
 			productName = UshotCore;
+		};
+		0F0000000000000000000003 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0E0000000000000000000002 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -4,6 +4,7 @@ import UshotCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let updateSensitiveActivityTracker = UpdateSensitiveActivityTracker()
     private(set) var environment: AppEnvironment?
     private var statusBarController: StatusBarController?
     private var settingsWindowController: SettingsWindowController?
@@ -42,7 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.handle(action)
             }
 
-            let statusBarController = StatusBarController()
+            let statusBarController = StatusBarController(
+                updateChecker: environment.updateChecker
+            )
             statusBarController.onAction = { [weak self] action in
                 self?.handle(action)
             }
@@ -52,13 +55,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusBarController.onOpenHistory = { [weak self] in
                 self?.showHistory()
             }
+            statusBarController.onCheckForUpdates = { [weak self] in
+                self?.checkForUpdates()
+            }
             self.statusBarController = statusBarController
 
             let pinnedShotManager = PinnedShotManager(
                 settingsStore: environment.settingsStore,
-                historyStore: environment.historyStore
+                historyStore: environment.historyStore,
+                updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+                admitAppWork: { [weak self] in
+                    guard let self else {
+                        throw UpdateCheckError.rejected(
+                            reason: String(localized: "Ushot is shutting down and cannot start new work.")
+                        )
+                    }
+                    try self.admitNewAppWork(action: "pinned-screenshot")
+                }
             )
-            let canvasEditorManager = CanvasEditorManager(settingsStore: environment.settingsStore)
+            let canvasEditorManager = CanvasEditorManager(
+                settingsStore: environment.settingsStore,
+                updateSensitiveActivityTracker: updateSensitiveActivityTracker
+            )
             self.canvasEditorManager = canvasEditorManager
             pinnedShotManager.onError = { [weak self] error in
                 self?.presentCaptureError(error)
@@ -131,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else if !handledUITestScenario {
                 performStartupBehavior(environment.settingsStore.settings.general.startupBehavior)
             }
-            AppLog.lifecycle.notice("UshotApp launched")
+            AppLog.lifecycle.notice("Ushot launched")
         } catch {
             presentFatalLaunchError(error)
         }
@@ -146,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             AppLog.hotKeys.fault("Hot keys could not be unregistered during termination: \(error.localizedDescription, privacy: .public)")
         }
-        AppLog.lifecycle.notice("UshotApp is terminating")
+        AppLog.lifecycle.notice("Ushot is terminating")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -166,6 +184,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handle(_ action: HotKeyAction) {
+        do {
+            try admitNewAppWork(action: String(describing: action))
+        } catch {
+            AppLog.updates.notice(
+                "Rejected app action during an active update transaction: action=\(String(describing: action), privacy: .public)"
+            )
+            NSSound.beep()
+            return
+        }
+
         switch action {
         case .captureRegion, .captureWindow, .captureCurrentDisplay, .captureSelectedDisplay, .captureAllDisplays:
             colorPickerCoordinator?.cancel()
@@ -190,16 +218,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showHistory() {
         guard let environment else { return }
+        do {
+            try admitNewAppWork(action: "show-history")
+        } catch {
+            presentUpdateError(error)
+            return
+        }
         if historyWindowController == nil {
             historyWindowController = HistoryWindowController(
                 store: environment.historyStore,
                 settingsStore: environment.settingsStore,
+                updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+                admitAppWork: { [weak self] in
+                    guard let self else {
+                        throw UpdateCheckError.rejected(
+                            reason: String(localized: "Ushot is shutting down and cannot start new work.")
+                        )
+                    }
+                    try self.admitNewAppWork(action: "history")
+                },
                 onOpenSession: { [weak self] session in
                     self?.canvasEditorManager?.open(session: session)
                 }
             )
         }
         historyWindowController?.show()
+    }
+
+    private func checkForUpdates() {
+        guard let updateChecker = environment?.updateChecker else {
+            preconditionFailure("The update command cannot run before the app environment exists.")
+        }
+        do {
+            try updateChecker.checkForUpdates { [weak self] in
+                guard let self else {
+                    throw UpdateCheckError.rejected(
+                        reason: String(localized: "Ushot is shutting down and cannot check for updates.")
+                    )
+                }
+                try self.admitUpdateCheck()
+            }
+        } catch {
+            presentUpdateError(error)
+        }
+    }
+
+    private func admitUpdateCheck() throws {
+        let captureActive = captureWorkflow?.isSessionActive == true
+        let colorPickerActive = colorPickerCoordinator?.isSessionActive == true
+        let screenRulerActive = screenRulerCoordinator?.isSessionActive == true
+        let editorActive = canvasEditorManager?.hasOpenEditors == true
+        let historyActive = historyWindowController?.hasBlockingUpdateActivity == true
+        let pinnedActivity = pinnedShotManager?.hasBlockingUpdateActivity == true
+        let backgroundActivityCount = updateSensitiveActivityTracker.activeOperationCount
+
+        guard
+            !captureActive,
+            !colorPickerActive,
+            !screenRulerActive,
+            !editorActive,
+            !historyActive,
+            !pinnedActivity,
+            backgroundActivityCount == 0
+        else {
+            AppLog.updates.notice(
+                "Rejected update check while app work is active: capture=\(captureActive, privacy: .public), colorPicker=\(colorPickerActive, privacy: .public), screenRuler=\(screenRulerActive, privacy: .public), editor=\(editorActive, privacy: .public), history=\(historyActive, privacy: .public), pinnedActivity=\(pinnedActivity, privacy: .public), backgroundActivities=\(backgroundActivityCount, privacy: .public)"
+            )
+            throw UpdateCheckError.rejected(
+                reason: String(
+                    localized: "Finish or close the active capture, editing, or output task before checking for updates."
+                )
+            )
+        }
+    }
+
+    private func admitNewAppWork(action: String) throws {
+        guard environment?.updateChecker.isSessionActive != true else {
+            AppLog.updates.notice(
+                "Rejected new app work during an update transaction: action=\(action, privacy: .public)"
+            )
+            throw UpdateCheckError.rejected(
+                reason: String(
+                    localized: "An update is in progress. Finish it before starting another task."
+                )
+            )
+        }
     }
 
     private func performStartupBehavior(_ behavior: StartupBehavior) {
@@ -241,7 +344,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             canvasEditorManager?.open(session: AnnotationEditingSession(
                 capturedImage: captured,
-                editorSettings: environment.settingsStore.settings.editor
+                editorSettings: environment.settingsStore.settings.editor,
+                updateSensitiveActivityTracker: updateSensitiveActivityTracker
             ))
             return true
         }
@@ -254,7 +358,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             let session = AnnotationEditingSession(
                 capturedImage: captured,
-                editorSettings: environment.settingsStore.settings.editor
+                editorSettings: environment.settingsStore.settings.editor,
+                updateSensitiveActivityTracker: updateSensitiveActivityTracker
             )
             session.controller.add(AnnotationItem(
                 kind: .rectangle,
@@ -635,10 +740,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
+    private func presentUpdateError(_ error: Error) {
+        let nsError = error as NSError
+        AppLog.updates.error(
+            "Update check was not started: domain=\(nsError.domain, privacy: .public), code=\(nsError.code, privacy: .public)"
+        )
+        let alert = NSAlert(error: error)
+        alert.messageText = String(localized: "Unable to Check for Updates")
+        alert.alertStyle = .warning
+        alert.layout()
+        alert.window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 5)
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        alert.window.hidesOnDeactivate = false
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
     private func presentFatalLaunchError(_ error: Error) {
         AppLog.lifecycle.fault("Application startup failed: \(error.localizedDescription, privacy: .public)")
         let alert = NSAlert(error: error)
-        alert.messageText = NSLocalizedString("UshotApp could not start", comment: "Fatal startup error title")
+        alert.messageText = NSLocalizedString("Ushot could not start", comment: "Fatal startup error title")
         alert.runModal()
         NSApplication.shared.terminate(nil)
     }

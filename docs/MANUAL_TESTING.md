@@ -13,6 +13,84 @@ Record macOS version, hardware, display arrangement and app build before each ru
 - [ ] Displays with different color profiles
 - [ ] Sleep/wake and display hot-plug
 
+## Installation, Update and Release Trust
+
+This section is release-blocking. It has not been completed for the non-Developer-ID distribution. Record the source/target versions, Git tags, asset hashes, macOS version, account type, network conditions, Screen Recording state and relevant privacy-safe logs for every run; do not infer a pass from a successful build or appcast generation. Even a completed matrix cannot waive Sparkle 2.9.5's missing public pre-install check of the extracted app's short/build versions: production self-update remains blocked until that client-side gap is closed.
+
+### Public artifact identity
+
+- [ ] From a clean release workspace, confirm the tag, `CFBundleShortVersionString`, `CFBundleVersion` and release manifest agree and the bundle identifier is exactly `io.github.ischeneycc.ushot`
+- [ ] Confirm the release contains exactly the expected versioned assets: `Ushot-<semver>-arm64.dmg`, `Ushot-<semver>-arm64.zip`, `Ushot-<semver>-arm64.dSYM.zip`, `Ushot-<semver>-arm64.release-manifest.json` and `SHA256SUMS.txt`; verify every checksum after downloading the assets back from GitHub
+- [ ] Inspect the public app and confirm it is intentionally ad-hoc signed, has no Team ID, Apple Development/Developer ID authority or `get-task-allow`, and uses the public configuration with Hardened Runtime disabled. Confirm the DMG is unsigned and not notarized. A local Apple Development-signed result is not a substitute
+- [ ] Confirm the ZIP contains the same application bytes and metadata as the DMG's `Ushot.app`; neither archive may contain private keys, credentials, local paths, history, screenshots or unrelated build products
+- [ ] Confirm the GitHub Release assets are complete and immutable before deploying `https://ischeneycc.github.io/ushot/updates/appcast.xml`; fetch every enclosure URL from a clean network before making the appcast visible, and confirm the Pages payload contains only signed `updates/appcast.xml`
+
+### Protected workflow admission and recovery
+
+- [ ] Dispatch `release.yml` with `--ref vX.Y.Z` and the identical `tag=vX.Y.Z` input. Confirm the workflow binds the run ref, input, local/remote tag object (including an annotated tag's object SHA), peeled commit and `GITHUB_SHA`, verifies that commit is an ancestor of protected `main`, and records a successful `CI` push run on `main` for that exact SHA
+- [ ] Attempt dispatch from `main`, with a mismatched tag input, with a tag outside protected `main`, and with no successful CI run for the tagged commit. Confirm each attempt fails before the protected signing environment or any Release mutation is reached
+- [ ] Inspect the release workflow definition and run permissions. Confirm each of its checkouts uses `persist-credentials: false`, build/sign has only `contents: read` plus the protected environment secret, and publish has `contents: write` but does not reference or receive `SPARKLE_ED25519_PRIVATE_KEY`
+- [ ] Confirm release generation invokes Sparkle `generate_appcast --embed-release-notes`. Inspect every generated non-seed item: it must use the exact RSS/Sparkle namespaces and direct hierarchy, contain exactly one nonempty restricted-Markdown `description` with `sparkle:format="markdown"`, one full enclosure, and no item-level `releaseNotesLink`, `link`, `fullReleaseNotesLink` or delta enclosure
+- [ ] For the first-release path, confirm the repository appcast and copied fallback contain exactly one fixed Ushot channel and zero `item` elements. This zero-item seed may migrate into the embedded-notes format. Add an item or change the channel link in a disposable test branch and confirm signing fails even if the production URL returns 404
+- [ ] Supply a validly signed legacy fixture containing detached release notes, an item-level link, a full-release-notes link or a delta. Confirm each existing-feed case is rejected before generation/deployment and is neither rewritten nor re-signed automatically
+- [ ] Add a Markdown link, image, raw HTML/autolink, entity, bare domain, URI scheme, IP address and wrong-namespace `item`/`description`/`enclosure` in separate disposable fixtures. Confirm every source or retained-item case fails before signing without printing the release-note content
+- [ ] Against a valid signed feed, attempt equal/lower marketing versions, equal/lower build numbers and very long decimal components. Confirm both new values must be strictly greater than every retained item and comparison does not overflow
+- [ ] Pass `build/../escape`, a dot component and a symlink below `build/` as disposable Pages staging destinations. Confirm all are rejected before deletion or signed output is written
+- [ ] Interrupt draft asset upload after at least one asset succeeds, then choose **Re-run failed jobs** on the same workflow run. Confirm existing assets are revalidated, only missing names are uploaded, no asset is overwritten, the exact five-asset set is verified, and the draft publishes once
+- [ ] Exercise a fixture or API response where an expected GitHub asset has no `digest`. Confirm the verifier downloads that remote asset and recomputes SHA-256; matching name, HTTPS and byte length alone must not pass it
+- [ ] Add an unexpected draft asset or replace an expected asset with different bytes, then retry. Confirm recovery fails closed without deleting, clobbering or publishing the draft
+- [ ] Let the Release publish, force only Pages deployment to fail, then rerun the failed `deploy-appcast` job from the same workflow run. Confirm it reuses the preserved signed appcast artifact, rechecks the tag and published bytes, leaves the Release untouched and exposes only `updates/appcast.xml` after successful deployment
+
+### First installation
+
+- [ ] Download the DMG only from `https://github.com/isCheneycc/ushot/releases`, compare it with `SHA256SUMS.txt`, drag `Ushot.app` into `/Applications`, and record the initial Gatekeeper result on a clean standard user account
+- [ ] Run `xattr -dr com.apple.quarantine "/Applications/Ushot.app"`, then verify only `com.apple.quarantine` was removed and unrelated extended attributes were not cleared. Confirm `xattr -cr`, `sudo` and a broad recursive path are never required
+- [ ] Run `open "/Applications/Ushot.app"`; confirm the expected Ushot process launches from `/Applications/Ushot.app`, its bundle identity/version match the release manifest, and no update request occurs during launch or idle time
+- [ ] Repeat with a copy from an untrusted/mutated location only as a negative documentation review: instructions must never tell the user to bypass Gatekeeper for that copy
+
+### Manual update privacy
+
+- [ ] Observe network activity from clean launch through five minutes of idle use, capture, editing and export. Confirm there is no update request, telemetry, analytics or system-profile submission
+- [ ] Choose **Check for Updates…** after Settings and before About Ushot. Confirm this explicit action is the only trigger, it requests exactly `https://ischeneycc.github.io/ushot/updates/appcast.xml`, makes no detached release-notes request, and any accepted archive comes from the matching official GitHub Release (including only normal GitHub-controlled asset redirects)
+- [ ] Inspect the appcast request and Sparkle configuration. Confirm automatic checks, automatic downloads and system-profile submission are disabled; no screenshot, annotation, clipboard/history content, display layout, Mac model, serial number, installed-app list, permission state or persistent advertising identifier is sent
+- [ ] Inspect updater policy and logs for an available item. Confirm `SURequireSignedFeed` authenticates the complete appcast, the item is accepted only when `signingValidationStatus` is `succeeded`, and `shouldDownloadReleaseNotes` remains false
+- [ ] Inspect the signed embedded Markdown and release logs. Confirm there are no links, images, raw HTML, autolinks, entities or URL/domain/network-address-like destinations, no external-resource request occurs, and rejected content is not printed
+- [ ] Activate the command repeatedly while a check is in progress. Confirm only one transaction exists, the menu follows `canCheckForUpdates`, and the log records a privacy-safe rejection/admission reason instead of starting duplicate downloads
+- [ ] Test a deliberately misconfigured build with no valid embedded EdDSA public key. Confirm the updater does not start, makes no network request, exposes an unavailable check state and records a configuration fault without logging secret material
+
+### Old-version → new-version update
+
+- [ ] On a clean standard account, install the oldest supported public version from its DMG, grant Screen Recording when capture first requires it, create non-sensitive settings and optional history fixtures, and record its executable hash and bundle metadata
+- [ ] Publish a higher semantic version using the protected release workflow, then choose **Check for Updates…** in the old version. Confirm the intended Markdown notes render from the signed appcast without another request, the ZIP downloads, Sparkle's helper loads under the actual public ad-hoc configuration, appcast and archive EdDSA verification succeed independently, and Ushot is replaced and relaunched atomically
+- [ ] Inspect the old and new executable load commands plus the running replacement. Confirm Sparkle is linked at `@rpath/Sparkle.framework/Versions/B/Sparkle`, `LC_RPATH` contains `@executable_path/../Frameworks`, and source/build/package/install gates reject a fixture with that runtime path removed
+- [ ] After relaunch, confirm the running executable comes from `/Applications/Ushot.app`, its version/hash match the new release manifest, no stale helper or old app is running, settings/history remain readable, and capture/copy/save still work
+- [ ] Confirm the in-app update does not ask the user to run a broader `xattr` command. Inspect quarantine behavior and record whether macOS prompts again
+- [ ] Re-test Screen Recording and optional Accessibility behavior after replacement. Record whether each authorization survives; if either must be granted again, verify the shipped README and release notes say so accurately
+- [ ] Choose **Check for Updates…** again from the new version and confirm Sparkle reports that it is current without downloading the same archive
+- [ ] Repeat with a skipped-version path when two or more public versions exist. Confirm update ordering follows the appcast and never installs an older/equal build as a newer release
+
+### Authenticity and failure handling
+
+- [ ] Alter one byte of a valid ZIP without changing its appcast signature. Confirm Sparkle rejects the archive, leaves the installed version byte-identical and shows one actionable error
+- [ ] Sign a test archive with another EdDSA key, remove the signature, and provide malformed signature data in separate runs. Every run must fail closed before replacement; HTTPS and matching SHA-256 values must not bypass EdDSA
+- [ ] Alter one byte inside an embedded appcast description, remove or duplicate that description, change its `sparkle:format`, and provide a feed whose signing validation status is not `succeeded`. Confirm every case is rejected before item presentation or archive download, even when the enclosure signature remains valid
+- [ ] Provide separately signed test feeds containing `releaseNotesLink`, item-level `link`, `fullReleaseNotesLink` and a delta enclosure. Confirm each is rejected visibly, no detached notes or delta is downloaded, and the client never rewrites the feed into an accepted shape
+- [ ] Test an unreachable/404 appcast, malformed XML, unreachable enclosure, interrupted connection and GitHub/Pages timeout. Confirm one visible failure, one terminal log reason, no partial replacement and a successful retry after service returns
+- [ ] Interrupt download and installation at the safe points supported by Sparkle, then relaunch Ushot and the Mac. Confirm either the complete old or complete new app exists—never a mixed or unlaunchable bundle
+- [ ] Test insufficient disk space and an unwritable application location. Confirm the existing app remains available, the failure is not swallowed and retry is possible after correcting the condition
+- [ ] Inspect update logs for initialization, manual intent/admission, configuration validation, state transitions, target version, durations and terminal reason. Confirm they contain no captured pixels, annotation/clipboard text, filenames/file contents, private keys, URL credentials or system profile
+
+### Active-work admission
+
+- [ ] Start each of these states before accepting an update: initial region selection, region confirmation with unsaved annotations, inline text composition, pinned quick editing, full Canvas Editor editing, active Copy render and an open Save panel. Confirm installation cannot silently terminate or discard the active work
+- [ ] Verify there is one authoritative admission result for capture/edit/output state and that its rejection is visible and logged. Until this is implemented and passes, record it as a release blocker rather than treating Sparkle's default relaunch prompt as sufficient
+
+### Key recovery
+
+- [ ] From the independent encrypted backup, restore the Sparkle EdDSA private key into an isolated protected environment without printing it. Sign a disposable test update and confirm an existing public-key build accepts it
+- [ ] Confirm CI receives `SPARKLE_ED25519_PRIVATE_KEY` only from a protected GitHub Environment, passes it to the signing tool through a non-logging input channel, masks accidental output and removes transient key material. Confirm that job has no repository write token and that the separate publishing job has no signing secret
+- [ ] Exercise the documented compromised-key stop procedure without publishing: publication halts, evidence is preserved, maintainers are notified privately, and no replacement appcast is produced until a migration path for installed clients is verified
+
 ## Permission and Capture
 
 - [ ] Screen recording permission: not determined, denied, granted and revoked

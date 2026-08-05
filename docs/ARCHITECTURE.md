@@ -1,6 +1,6 @@
 # Architecture
 
-UshotApp is a native, local-only macOS application. The shipping application target is an AppKit/SwiftUI hybrid and the reusable implementation lives in `UshotCore`. `Package.swift` compiles the same sources used by the Xcode project, so command-line validation cannot drift into a second implementation.
+Ushot is a native, local-first macOS application with bundle identifier `io.github.ischeneycc.ushot`. The shipping `UshotApp` target is an AppKit/SwiftUI hybrid and the reusable implementation lives in `UshotCore`. `Package.swift` compiles the same sources used by the Xcode project, so command-line validation cannot drift into a second implementation.
 
 ## Boundaries
 
@@ -13,12 +13,30 @@ UshotApp is a native, local-only macOS application. The shipping application tar
 - `UshotCore/History`: versioned atomic on-disk records. Disabled by default.
 - `UshotCore/Color` and `UshotCore/Measurement`: system-managed live pixel sampling and point/pixel ruler calculations.
 - `UshotCore/Settings`: a versioned Codable settings schema and its persistence boundary.
+- `UshotCore/Product`: the single source of truth for the public name, permanent bundle identifier, Application Support namespace and legacy identity migration keys.
 - `UshotCore/FeatureGating`: the single future entitlement seam. Capture and drawing code never contains payment checks.
 - `UshotCore/Logging`: privacy-safe OSLog categories. Pixel data and user content are never logged.
+- The application update adapter: the only network-capable boundary. It wraps Sparkle for explicit manual checks and remains replaceable through `UpdateChecking`.
 
 ## Dependency Direction
 
 The app target depends on `UshotCore`; the core never imports app UI. OS-facing implementations conform to protocols (`ScreenCapturing`, `PixelSampling`, `CapturePermissionChecking`, `GlobalHotKeyManaging`, `AnnotationRendering`, `ImageExporting`, `ScreenshotHistoryStoring`, `FeatureEntitlementChecking`, `UpdateChecking`). Tests replace those boundaries without requesting screen-recording permission.
+
+## Update and release trust boundary
+
+The menu-bar command **Check for Updates…** is the only normal update-network admission point. It appears after Settings and before About Ushot and delegates to `UpdateChecking`; duplicate checks are rejected by Sparkle's `canCheckForUpdates` state instead of creating a second transaction. Automatic checks, automatic downloads and Sparkle system-profile submission are explicitly disabled.
+
+The updater delegate always returns `https://ischeneycc.github.io/ushot/updates/appcast.xml`, so a UserDefaults or launch-argument `SUFeedURL` override cannot redirect the request. `SURequireSignedFeed` authenticates the complete appcast, including its embedded Markdown descriptions, and signed-feed failure recovery is permanently disabled (`SUSignedFeedFailureExpirationInterval = 0`): a feed that cannot be verified never becomes usable with time. The policy driver accepts an update item only when `signingValidationStatus == .succeeded`. Every item must have exactly one nonempty `description` with `sparkle:format="markdown"`; item-level `releaseNotesLink`, `link`, `fullReleaseNotesLink` and delta enclosures are rejected. `shouldDownloadReleaseNotes` always returns false, so Sparkle cannot fetch detached notes.
+
+Embedded release descriptions use restricted Markdown. The release pipeline rejects links, images, raw HTML, autolinks, entities and URL/domain/network-address-like destinations in both the new source and every retained description. Accepted archives are immutable versioned ZIP assets from the official `https://github.com/isCheneycc/ushot/releases/download/...` boundary. Sparkle independently validates each archive against the exact EdDSA public key embedded at build time. Missing or changed key configuration disables the updater and emits a configuration fault; it must never start an unverifiable session or treat HTTPS/checksums as a signature substitute.
+
+Initial installation and in-app replacement are separate paths. The initial DMG contains `Ushot.app`; the user drags it to Applications and, because the public artifact has no Developer ID or notarization, removes only `com.apple.quarantine`. Sparkle consumes the ZIP enclosure for an update. The first public artifacts are intentionally ad-hoc signed with no Team ID or `get-task-allow`; public builds disable Hardened Runtime to avoid the unsupported ad-hoc/Library Validation combination blocking Sparkle helpers. Every mode embeds Sparkle and the executable carries `@executable_path/../Frameworks` in `LC_RPATH`; source/build/package/install checks fail closed if the framework cannot resolve. Local Apple Development signing is only a stable developer-install identity and is not the public trust mechanism.
+
+The release transaction publishes `Ushot-<semver>-arm64.dmg`, `Ushot-<semver>-arm64.zip`, `Ushot-<semver>-arm64.dSYM.zip`, `Ushot-<semver>-arm64.release-manifest.json` and `SHA256SUMS.txt`. It runs Sparkle `generate_appcast --embed-release-notes`, validates exact RSS/Sparkle namespaces and hierarchy, requires both the new semantic version and build to be strictly greater than every retained signed item, and signs the complete appcast. The committed first-release seed is the sole zero-item migration input; a pre-existing feed with detached or unrestricted notes is rejected instead of being normalized or re-signed. The protected release environment supplies the EdDSA private key without logging it. All versioned assets and checksums are uploaded and verified before the GitHub Release is published; the Pages payload contains only signed `updates/appcast.xml` and is deployed last, so a client cannot discover a partial release.
+
+The workflow also extracts the final ZIP and requires its `CFBundleShortVersionString` and `CFBundleVersion` to match the appcast. That is a publication gate, not a runtime substitute: Sparkle 2.9.5 has no public pre-install path for inspecting the extracted bundle and does not independently enforce both comparisons. Production self-update therefore remains blocked until an upstream upgrade, reviewed hardening or replacement closes this client-side gap.
+
+This trust design is not evidence of operational readiness. A clean-account old-version → new-version test must still prove Sparkle helper loading, signature rejection, atomic replacement/relaunch, quarantine behavior and Screen Recording authorization behavior. App actions, history operations, pinned-screenshot editing/output, capture sessions and Canvas editors now participate in one update-admission boundary; new work is rejected while the updater owns a transaction, and Sparkle postpones relaunch until the same boundary reports no active work.
 
 ## State and Failure Model
 
@@ -42,4 +60,6 @@ All selection geometry is represented in the global desktop coordinate space, in
 
 ## Data and Privacy
 
-There is no server, account, telemetry or network path. History is opt-in and stored under Application Support as inspectable PNG/JSON files. Settings and documents carry schema versions and explicit migrations. The app is not sandboxed for the website-distributed first release and uses Hardened Runtime.
+There is no Ushot-operated server, account, telemetry, analytics or system-profile collection. Captures, annotations, exports and history stay local; history is opt-in and stored under Application Support as inspectable PNG/JSON files. Settings and documents carry schema versions and explicit migrations.
+
+Only an explicit manual update check reaches the GitHub Pages appcast. Its signed embedded restricted Markdown supplies release notes without a second network request or a link destination; after user acceptance, the client reaches the official GitHub Release asset. Normal HTTPS connection metadata is visible to contacted hosting providers, but no screenshot or user content is attached. The first website-distributed public build is not sandboxed, uses deliberate ad-hoc signing, has no Developer ID/notarization and disables Hardened Runtime as described by the update trust boundary. Local development configurations may continue using Hardened Runtime and Apple Development signing.

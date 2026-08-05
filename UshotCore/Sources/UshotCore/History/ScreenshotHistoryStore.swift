@@ -114,6 +114,16 @@ public protocol ScreenshotHistoryStoring: Sendable {
     func enforceRetention(days: Int, maximumItemCount: Int, now: Date) async throws
 }
 
+public struct HistoryDirectoryMigrationResult: Equatable, Sendable {
+    public let copiedItemCount: Int
+    public let identicalItemCount: Int
+
+    public init(copiedItemCount: Int, identicalItemCount: Int) {
+        self.copiedItemCount = copiedItemCount
+        self.identicalItemCount = identicalItemCount
+    }
+}
+
 public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
     public nonisolated let rootDirectory: URL
 
@@ -156,6 +166,242 @@ public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
                 .appendingPathComponent("History", isDirectory: true),
             fileManager: fileManager
         )
+    }
+
+    /// Copies a legacy History directory into the current Application Support
+    /// namespace without deleting the recoverable source. Each copied entry is
+    /// staged and renamed on the same volume, and conflicting entries fail
+    /// closed instead of silently choosing one version.
+    public static func migrateApplicationSupportHistory(
+        fromBundleIdentifier legacyBundleIdentifier: String,
+        toBundleIdentifier currentBundleIdentifier: String,
+        fileManager: FileManager = .default
+    ) throws -> HistoryDirectoryMigrationResult {
+        guard
+            !legacyBundleIdentifier.isEmpty,
+            !currentBundleIdentifier.isEmpty,
+            legacyBundleIdentifier != currentBundleIdentifier
+        else {
+            throw ScreenshotAppError.historyPersistenceFailed(
+                description: "History migration requires two distinct, non-empty application identifiers."
+            )
+        }
+
+        do {
+            let supportDirectory = try fileManager.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            let legacyRoot = supportDirectory
+                .appendingPathComponent(legacyBundleIdentifier, isDirectory: true)
+                .appendingPathComponent("History", isDirectory: true)
+            let currentRoot = supportDirectory
+                .appendingPathComponent(currentBundleIdentifier, isDirectory: true)
+                .appendingPathComponent("History", isDirectory: true)
+            return try migrateHistory(
+                from: legacyRoot,
+                to: currentRoot,
+                fileManager: fileManager
+            )
+        } catch let error as ScreenshotAppError {
+            throw error
+        } catch {
+            throw ScreenshotAppError.historyPersistenceFailed(
+                description: error.localizedDescription
+            )
+        }
+    }
+
+    static func migrateHistory(
+        from legacyRoot: URL,
+        to currentRoot: URL,
+        fileManager: FileManager = .default
+    ) throws -> HistoryDirectoryMigrationResult {
+        guard fileManager.fileExists(atPath: legacyRoot.path) else {
+            return HistoryDirectoryMigrationResult(
+                copiedItemCount: 0,
+                identicalItemCount: 0
+            )
+        }
+        try requireOrdinaryDirectory(legacyRoot)
+
+        if fileManager.fileExists(atPath: currentRoot.path) {
+            try requireOrdinaryDirectory(currentRoot)
+        } else {
+            try fileManager.createDirectory(
+                at: currentRoot,
+                withIntermediateDirectories: true
+            )
+        }
+
+        let legacyItems = try fileManager.contentsOfDirectory(
+            at: legacyRoot,
+            includingPropertiesForKeys: nil,
+            options: []
+        ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+        var copiedItemCount = 0
+        var identicalItemCount = 0
+
+        for legacyItem in legacyItems {
+            try requireSupportedMigrationTree(
+                legacyItem,
+                fileManager: fileManager
+            )
+            let destination = currentRoot.appendingPathComponent(
+                legacyItem.lastPathComponent,
+                isDirectory: false
+            )
+            if fileManager.fileExists(atPath: destination.path) {
+                guard try itemsAreIdentical(
+                    legacyItem,
+                    destination,
+                    fileManager: fileManager
+                ) else {
+                    throw ScreenshotAppError.historyPersistenceFailed(
+                        description: "Legacy and current history contain different data for \(legacyItem.lastPathComponent)."
+                    )
+                }
+                identicalItemCount += 1
+                continue
+            }
+
+            let staged = currentRoot.appendingPathComponent(
+                ".history-migration-\(UUID().uuidString)",
+                isDirectory: false
+            )
+            do {
+                try fileManager.copyItem(at: legacyItem, to: staged)
+                try requireSupportedMigrationTree(
+                    staged,
+                    fileManager: fileManager
+                )
+                try fileManager.moveItem(at: staged, to: destination)
+            } catch {
+                if fileManager.fileExists(atPath: staged.path) {
+                    do {
+                        try fileManager.removeItem(at: staged)
+                    } catch let cleanupError {
+                        throw ScreenshotAppError.historyPersistenceFailed(
+                            description: "History migration failed and its private staging item could not be removed: \(cleanupError.localizedDescription)"
+                        )
+                    }
+                }
+                throw error
+            }
+            copiedItemCount += 1
+        }
+
+        return HistoryDirectoryMigrationResult(
+            copiedItemCount: copiedItemCount,
+            identicalItemCount: identicalItemCount
+        )
+    }
+
+    private static func requireSupportedMigrationTree(
+        _ url: URL,
+        fileManager: FileManager
+    ) throws {
+        let keys: Set<URLResourceKey> = [
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isSymbolicLinkKey
+        ]
+        let values = try url.resourceValues(forKeys: keys)
+        guard values.isSymbolicLink != true else {
+            throw ScreenshotAppError.historyPersistenceFailed(
+                description: "History migration refuses symbolic links."
+            )
+        }
+        if values.isRegularFile == true {
+            return
+        }
+        guard values.isDirectory == true else {
+            throw ScreenshotAppError.historyPersistenceFailed(
+                description: "History migration encountered an unsupported filesystem item."
+            )
+        }
+
+        let children = try fileManager.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: Array(keys),
+            options: []
+        )
+        for child in children {
+            try requireSupportedMigrationTree(child, fileManager: fileManager)
+        }
+    }
+
+    private static func requireOrdinaryDirectory(_ url: URL) throws {
+        let values = try url.resourceValues(forKeys: [
+            .isDirectoryKey,
+            .isSymbolicLinkKey
+        ])
+        guard values.isDirectory == true, values.isSymbolicLink != true else {
+            throw ScreenshotAppError.historyPersistenceFailed(
+                description: "History migration encountered a non-directory or symbolic-link root."
+            )
+        }
+    }
+
+    private static func itemsAreIdentical(
+        _ lhs: URL,
+        _ rhs: URL,
+        fileManager: FileManager
+    ) throws -> Bool {
+        let keys: Set<URLResourceKey> = [
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isSymbolicLinkKey
+        ]
+        let lhsValues = try lhs.resourceValues(forKeys: keys)
+        let rhsValues = try rhs.resourceValues(forKeys: keys)
+
+        guard
+            lhsValues.isSymbolicLink != true,
+            rhsValues.isSymbolicLink != true
+        else {
+            throw ScreenshotAppError.historyPersistenceFailed(
+                description: "History migration refuses symbolic links."
+            )
+        }
+
+        if lhsValues.isRegularFile == true || rhsValues.isRegularFile == true {
+            guard
+                lhsValues.isRegularFile == true,
+                rhsValues.isRegularFile == true
+            else { return false }
+            return fileManager.contentsEqual(atPath: lhs.path, andPath: rhs.path)
+        }
+
+        guard
+            lhsValues.isDirectory == true,
+            rhsValues.isDirectory == true
+        else {
+            throw ScreenshotAppError.historyPersistenceFailed(
+                description: "History migration encountered an unsupported filesystem item."
+            )
+        }
+        let lhsChildren = try fileManager.contentsOfDirectory(
+            at: lhs,
+            includingPropertiesForKeys: nil,
+            options: []
+        ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let rhsChildren = try fileManager.contentsOfDirectory(
+            at: rhs,
+            includingPropertiesForKeys: nil,
+            options: []
+        ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard lhsChildren.map(\.lastPathComponent) == rhsChildren.map(\.lastPathComponent) else {
+            return false
+        }
+        for (lhsChild, rhsChild) in zip(lhsChildren, rhsChildren) {
+            guard try itemsAreIdentical(lhsChild, rhsChild, fileManager: fileManager) else {
+                return false
+            }
+        }
+        return true
     }
 
     public func save(_ record: ScreenshotHistoryRecord) async throws {

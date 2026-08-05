@@ -3,7 +3,8 @@ import Foundation
 
 @MainActor
 public final class SettingsStore: ObservableObject {
-    public nonisolated static let storageKey = "com.example.UshotApp.settings"
+    public nonisolated static let storageKey = ProductIdentity.settingsStorageKey
+    public nonisolated static let legacyStorageKey = ProductIdentity.legacySettingsStorageKey
 
     @Published public private(set) var settings: AppSettings
     @Published public private(set) var loadError: ScreenshotAppError?

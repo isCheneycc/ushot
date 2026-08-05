@@ -5,17 +5,22 @@ import UshotCore
 @MainActor
 final class HistoryWindowController: NSWindowController {
     private let model: HistoryBrowserModel
+    var hasBlockingUpdateActivity: Bool { model.hasBlockingUpdateActivity }
 
     init(
         store: any ScreenshotHistoryStoring,
         settingsStore: SettingsStore,
         exporter: any ImageExporting = SystemImageExporter(),
+        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
+        admitAppWork: @escaping @MainActor () throws -> Void = {},
         onOpenSession: @escaping (AnnotationEditingSession) -> Void
     ) {
         model = HistoryBrowserModel(
             store: store,
             settingsStore: settingsStore,
             exporter: exporter,
+            updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+            admitAppWork: admitAppWork,
             onOpenSession: onOpenSession
         )
         let window = NSWindow(
@@ -55,27 +60,37 @@ private final class HistoryBrowserModel: ObservableObject {
 
     private let store: any ScreenshotHistoryStoring
     private let exporter: any ImageExporting
+    private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
+    private let admitAppWork: @MainActor () throws -> Void
     private let onOpenSession: (AnnotationEditingSession) -> Void
     private var loadGeneration = 0
+    private var activeOperationCount = 0
+    var hasBlockingUpdateActivity: Bool { activeOperationCount > 0 }
 
     init(
         store: any ScreenshotHistoryStoring,
         settingsStore: SettingsStore,
         exporter: any ImageExporting,
+        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
+        admitAppWork: @escaping @MainActor () throws -> Void,
         onOpenSession: @escaping (AnnotationEditingSession) -> Void
     ) {
         self.store = store
         self.settingsStore = settingsStore
         self.exporter = exporter
+        self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
+        self.admitAppWork = admitAppWork
         self.onOpenSession = onOpenSession
     }
 
     func refresh() {
+        guard beginUpdateSensitiveOperation("refresh") else { return }
         loadGeneration += 1
         let generation = loadGeneration
         isLoading = true
         Task { [weak self] in
             guard let self else { return }
+            defer { finishUpdateSensitiveOperation("refresh") }
             do {
                 let records = try await store.list()
                 guard generation == loadGeneration else { return }
@@ -90,15 +105,18 @@ private final class HistoryBrowserModel: ObservableObject {
     }
 
     func open(_ summary: HistoryRecordSummary) {
+        guard beginUpdateSensitiveOperation("open-editor") else { return }
         Task { [weak self] in
             guard let self else { return }
+            defer { finishUpdateSensitiveOperation("open-editor") }
             do {
                 let record = try await store.load(id: summary.id)
                 let session = AnnotationEditingSession(
                     capturedImage: record.baseImage,
                     previewImage: record.previewImage,
                     document: record.document,
-                    editorSettings: settingsStore.settings.editor
+                    editorSettings: settingsStore.settings.editor,
+                    updateSensitiveActivityTracker: updateSensitiveActivityTracker
                 )
                 // Do not mount a history editor around a bitmap rejected by
                 // session admission. Compatible caches return immediately;
@@ -109,6 +127,7 @@ private final class HistoryBrowserModel: ObservableObject {
                     session: session,
                     store: store,
                     settingsStore: settingsStore,
+                    updateSensitiveActivityTracker: updateSensitiveActivityTracker,
                     onError: { [weak self] error in self?.present(error) }
                 )
                 session.attachHistoryRecorder(recorder)
@@ -120,8 +139,10 @@ private final class HistoryBrowserModel: ObservableObject {
     }
 
     func copy(_ summary: HistoryRecordSummary) {
+        guard beginUpdateSensitiveOperation("copy") else { return }
         Task { [weak self] in
             guard let self else { return }
+            defer { finishUpdateSensitiveOperation("copy") }
             do {
                 let record = try await store.load(id: summary.id)
                 let image = try await resolvedPreviewImage(for: record).image
@@ -143,8 +164,10 @@ private final class HistoryBrowserModel: ObservableObject {
     }
 
     func export(_ summary: HistoryRecordSummary) {
+        guard beginUpdateSensitiveOperation("export") else { return }
         Task { [weak self] in
             guard let self else { return }
+            defer { finishUpdateSensitiveOperation("export") }
             do {
                 let record = try await store.load(id: summary.id)
                 let output = settingsStore.settings.output
@@ -177,21 +200,27 @@ private final class HistoryBrowserModel: ObservableObject {
             capturedImage: record.baseImage,
             previewImage: record.previewImage,
             document: record.document,
-            editorSettings: settingsStore.settings.editor
+            editorSettings: settingsStore.settings.editor,
+            updateSensitiveActivityTracker: updateSensitiveActivityTracker
         )
         return try await session.resolvedPreviewImage()
     }
 
     func delete(_ summary: HistoryRecordSummary) {
+        guard beginUpdateSensitiveOperation("delete") else { return }
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Delete this history item?", comment: "History delete confirmation")
         alert.informativeText = NSLocalizedString("Its base image and editable annotations will be permanently removed.", comment: "History delete explanation")
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Delete", comment: "Delete button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel button"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            finishUpdateSensitiveOperation("delete")
+            return
+        }
         Task { [weak self] in
             guard let self else { return }
+            defer { finishUpdateSensitiveOperation("delete") }
             do {
                 try await store.delete(id: summary.id)
                 refresh()
@@ -202,15 +231,20 @@ private final class HistoryBrowserModel: ObservableObject {
     }
 
     func clear() {
+        guard beginUpdateSensitiveOperation("clear") else { return }
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Clear all screenshot history?", comment: "History clear confirmation")
         alert.informativeText = NSLocalizedString("Every saved base image, preview, and editable annotation document will be permanently removed.", comment: "History clear explanation")
         alert.alertStyle = .critical
         alert.addButton(withTitle: NSLocalizedString("Clear History", comment: "Clear history button"))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel button"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            finishUpdateSensitiveOperation("clear")
+            return
+        }
         Task { [weak self] in
             guard let self else { return }
+            defer { finishUpdateSensitiveOperation("clear") }
             do {
                 try await store.clear()
                 refresh()
@@ -223,6 +257,31 @@ private final class HistoryBrowserModel: ObservableObject {
     private func present(_ error: Error) {
         AppLog.history.error("History browser operation failed: \(error.localizedDescription, privacy: .public)")
         errorMessage = error.localizedDescription
+    }
+
+    private func beginUpdateSensitiveOperation(_ operation: String) -> Bool {
+        do {
+            try admitAppWork()
+            activeOperationCount += 1
+            AppLog.history.debug(
+                "Began history operation lease: operation=\(operation, privacy: .public), active=\(self.activeOperationCount, privacy: .public)"
+            )
+            return true
+        } catch {
+            AppLog.updates.notice(
+                "Rejected history operation during an update transaction: operation=\(operation, privacy: .public)"
+            )
+            present(error)
+            return false
+        }
+    }
+
+    private func finishUpdateSensitiveOperation(_ operation: String) {
+        precondition(activeOperationCount > 0, "A history operation lease cannot underflow.")
+        activeOperationCount -= 1
+        AppLog.history.debug(
+            "Finished history operation lease: operation=\(operation, privacy: .public), active=\(self.activeOperationCount, privacy: .public)"
+        )
     }
 }
 

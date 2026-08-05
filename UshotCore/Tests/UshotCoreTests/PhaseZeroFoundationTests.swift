@@ -524,12 +524,6 @@ final class UshotCoreFoundationTests: XCTestCase {
         }
     }
 
-    func testNoOpUpdateCheckerReportsNoUpdate() async throws {
-        let result = try await NoOpUpdateChecker().checkForUpdates()
-        XCTAssertFalse(result.isUpdateAvailable)
-        XCTAssertNil(result.version)
-    }
-
     @MainActor
     func testDefaultSettingsMatchProductDefaults() {
         let settings = AppSettings.defaults
@@ -2539,13 +2533,6 @@ func openSourceProviderEntitlesEveryDeclaredFeature() {
     for feature in AppFeature.allCases {
         #expect(provider.isEntitled(to: feature))
     }
-}
-
-@Test
-func noOpUpdateCheckerReportsNoUpdate() async throws {
-    let result = try await NoOpUpdateChecker().checkForUpdates()
-    #expect(result.isUpdateAvailable == false)
-    #expect(result.version == nil)
 }
 
 @Test @MainActor

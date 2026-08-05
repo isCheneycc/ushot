@@ -5,6 +5,7 @@ import UshotCore
 @MainActor
 final class ScreenRulerCoordinator {
     var onError: ((Error) -> Void)?
+    var isSessionActive: Bool { !panels.isEmpty }
 
     private var panels: [PixelToolOverlayPanel] = []
     private var views: [ScreenRulerOverlayView] = []
