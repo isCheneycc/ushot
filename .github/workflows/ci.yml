@@ -61,3 +61,8 @@ jobs:
             --mode public-adhoc \
             --version "$VERSION" \
             --build-number "$BUILD_NUMBER"
+          scripts/package-release.sh \
+            --mode public-adhoc \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --tag "v$VERSION"

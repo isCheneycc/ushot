@@ -28,7 +28,6 @@ done
 release_validate_version "$VERSION"
 release_validate_build_number "$BUILD_NUMBER"
 release_validate_tag "$TAG" "$VERSION"
-release_require_command plutil
 release_require_command codesign
 release_require_command cmp
 release_require_command ditto
@@ -36,6 +35,7 @@ release_require_command dwarfdump
 release_require_command file
 release_require_command find
 release_require_command hdiutil
+release_require_command jq
 release_require_command readlink
 release_require_command sort
 release_require_command stat
@@ -64,22 +64,46 @@ done < "$DIRECTORY/$CHECKSUMS_NAME"
   cd "$DIRECTORY"
   shasum -a 256 -c "$CHECKSUMS_NAME"
 )
-plutil -p "$DIRECTORY/$MANIFEST_NAME" >/dev/null
-[[ "$(plutil -extract schemaVersion raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "1" ]] \
+release_log "Validating the release manifest as JSON."
+jq -e '
+  type == "object" and
+  (.schemaVersion | type == "number") and
+  (.product | type == "string") and
+  (.bundleIdentifier | type == "string") and
+  (.version | type == "string") and
+  (.buildNumber | type == "string") and
+  (.tag | type == "string") and
+  (.architecture | type == "string") and
+  (.appcastURL | type == "string") and
+  (.signing | type == "object") and
+  (.signing.mode | type == "string") and
+  (.signing.hardenedRuntime | type == "boolean") and
+  (.signing.developmentEntitlements | type == "boolean") and
+  (.assets | type == "array" and length == 3) and
+  all(.assets[];
+    type == "object" and
+    (.name | type == "string") and
+    (.bytes | type == "number") and
+    (.sha256 | type == "string") and
+    (.purpose | type == "string")
+  )
+' "$DIRECTORY/$MANIFEST_NAME" >/dev/null \
+  || release_die "Release manifest is not a valid JSON object with the required schema."
+[[ "$(jq -r '.schemaVersion' "$DIRECTORY/$MANIFEST_NAME")" == "1" ]] \
   || release_die "Release manifest schema version mismatch."
-[[ "$(plutil -extract version raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$VERSION" ]] \
+[[ "$(jq -r '.version' "$DIRECTORY/$MANIFEST_NAME")" == "$VERSION" ]] \
   || release_die "Release manifest version mismatch."
-[[ "$(plutil -extract buildNumber raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$BUILD_NUMBER" ]] \
+[[ "$(jq -r '.buildNumber' "$DIRECTORY/$MANIFEST_NAME")" == "$BUILD_NUMBER" ]] \
   || release_die "Release manifest build number mismatch."
-[[ "$(plutil -extract tag raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$TAG" ]] \
+[[ "$(jq -r '.tag' "$DIRECTORY/$MANIFEST_NAME")" == "$TAG" ]] \
   || release_die "Release manifest tag mismatch."
-[[ "$(plutil -extract bundleIdentifier raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$USHOT_BUNDLE_IDENTIFIER" ]] \
+[[ "$(jq -r '.bundleIdentifier' "$DIRECTORY/$MANIFEST_NAME")" == "$USHOT_BUNDLE_IDENTIFIER" ]] \
   || release_die "Release manifest bundle identifier mismatch."
-[[ "$(plutil -extract product raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$USHOT_PRODUCT_NAME" ]] \
+[[ "$(jq -r '.product' "$DIRECTORY/$MANIFEST_NAME")" == "$USHOT_PRODUCT_NAME" ]] \
   || release_die "Release manifest product mismatch."
-[[ "$(plutil -extract architecture raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$USHOT_ARCHITECTURE" ]] \
+[[ "$(jq -r '.architecture' "$DIRECTORY/$MANIFEST_NAME")" == "$USHOT_ARCHITECTURE" ]] \
   || release_die "Release manifest architecture mismatch."
-[[ "$(plutil -extract appcastURL raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$USHOT_APPCAST_URL" ]] \
+[[ "$(jq -r '.appcastURL' "$DIRECTORY/$MANIFEST_NAME")" == "$USHOT_APPCAST_URL" ]] \
   || release_die "Release manifest appcast URL mismatch."
 
 EXPECTED_SIGNING_MODE="ad-hoc"
@@ -88,31 +112,30 @@ if [[ "$MODE" == "developer-id" ]]; then
   EXPECTED_SIGNING_MODE="developer-id"
   EXPECTED_HARDENED_RUNTIME="true"
 fi
-[[ "$(plutil -extract signing.mode raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$EXPECTED_SIGNING_MODE" ]] \
+[[ "$(jq -r '.signing.mode' "$DIRECTORY/$MANIFEST_NAME")" == "$EXPECTED_SIGNING_MODE" ]] \
   || release_die "Release manifest signing mode mismatch."
-[[ "$(plutil -extract signing.hardenedRuntime raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$EXPECTED_HARDENED_RUNTIME" ]] \
+[[ "$(jq -r '.signing.hardenedRuntime' "$DIRECTORY/$MANIFEST_NAME")" == "$EXPECTED_HARDENED_RUNTIME" ]] \
   || release_die "Release manifest Hardened Runtime value mismatch."
-[[ "$(plutil -extract signing.developmentEntitlements raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "false" ]] \
+[[ "$(jq -r '.signing.developmentEntitlements' "$DIRECTORY/$MANIFEST_NAME")" == "false" ]] \
   || release_die "Release manifest must reject development entitlements."
 
 ASSET_NAMES=("$DMG_NAME" "$ZIP_NAME" "$DSYM_ZIP_NAME")
 ASSET_PURPOSES=("initial-install" "sparkle-update" "debug-symbols")
 for index in 0 1 2; do
   name="${ASSET_NAMES[$index]}"
-  [[ "$(plutil -extract "assets.$index.name" raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$name" ]] \
+  [[ "$(jq -r ".assets[$index].name" "$DIRECTORY/$MANIFEST_NAME")" == "$name" ]] \
     || release_die "Release manifest asset name mismatch at index $index."
-  [[ "$(plutil -extract "assets.$index.bytes" raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$(release_file_size "$DIRECTORY/$name")" ]] \
+  [[ "$(jq -r ".assets[$index].bytes" "$DIRECTORY/$MANIFEST_NAME")" == "$(release_file_size "$DIRECTORY/$name")" ]] \
     || release_die "Release manifest asset size mismatch for $name."
-  [[ "$(plutil -extract "assets.$index.sha256" raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "$(release_sha256 "$DIRECTORY/$name")" ]] \
+  [[ "$(jq -r ".assets[$index].sha256" "$DIRECTORY/$MANIFEST_NAME")" == "$(release_sha256 "$DIRECTORY/$name")" ]] \
     || release_die "Release manifest asset checksum mismatch for $name."
-  [[ "$(plutil -extract "assets.$index.purpose" raw -o - "$DIRECTORY/$MANIFEST_NAME")" == "${ASSET_PURPOSES[$index]}" ]] \
+  [[ "$(jq -r ".assets[$index].purpose" "$DIRECTORY/$MANIFEST_NAME")" == "${ASSET_PURPOSES[$index]}" ]] \
     || release_die "Release manifest asset purpose mismatch for $name."
 done
-if plutil -extract assets.3 xml1 -o - "$DIRECTORY/$MANIFEST_NAME" >/dev/null 2>&1; then
-  release_die "Release manifest must contain exactly three asset records."
-fi
 
-VALIDATION_WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/ushot-assets.XXXXXX")"
+if ! VALIDATION_WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/ushot-assets.XXXXXX")"; then
+  release_die "Could not create the release-validation workspace."
+fi
 ZIP_EXTRACT_ROOT="$VALIDATION_WORKSPACE/zip"
 DSYM_EXTRACT_ROOT="$VALIDATION_WORKSPACE/dsym"
 DMG_MOUNT_ROOT="$VALIDATION_WORKSPACE/dmg"
@@ -128,7 +151,8 @@ cleanup() {
   rm -rf "$VALIDATION_WORKSPACE"
 }
 trap cleanup EXIT
-mkdir -p "$ZIP_EXTRACT_ROOT" "$DSYM_EXTRACT_ROOT" "$DMG_MOUNT_ROOT"
+mkdir -p "$ZIP_EXTRACT_ROOT" "$DSYM_EXTRACT_ROOT" "$DMG_MOUNT_ROOT" \
+  || release_die "Could not prepare the release-validation workspace."
 
 validate_archive_paths() {
   local archive_label="$1"
@@ -214,7 +238,10 @@ compare_bundle_trees() {
     || release_die "ZIP and DMG differ by path, filesystem type, mode, symlink target, size or SHA-256 content."
 }
 
-ZIP_ENTRIES="$(zipinfo -1 "$DIRECTORY/$ZIP_NAME")"
+release_log "Validating and extracting the application ZIP."
+if ! ZIP_ENTRIES="$(zipinfo -1 "$DIRECTORY/$ZIP_NAME")"; then
+  release_die "Could not enumerate the application ZIP: $ZIP_NAME"
+fi
 [[ -n "$ZIP_ENTRIES" ]] || release_die "Sparkle ZIP is empty: $ZIP_NAME"
 validate_archive_paths "Sparkle ZIP" "$ZIP_ENTRIES"
 UNEXPECTED_ZIP_ENTRIES="$(printf '%s\n' "$ZIP_ENTRIES" | grep -Ev "^($USHOT_APP_BUNDLE/|__MACOSX/$|__MACOSX/$USHOT_APP_BUNDLE/)" || true)"
@@ -223,7 +250,8 @@ UNEXPECTED_ZIP_ENTRIES="$(printf '%s\n' "$ZIP_ENTRIES" | grep -Ev "^($USHOT_APP_
 DUPLICATE_ZIP_ENTRIES="$(printf '%s\n' "$ZIP_ENTRIES" | sort | uniq -d)"
 [[ -z "$DUPLICATE_ZIP_ENTRIES" ]] \
   || release_die "Sparkle ZIP contains duplicate paths: $DUPLICATE_ZIP_ENTRIES"
-ditto -x -k "$DIRECTORY/$ZIP_NAME" "$ZIP_EXTRACT_ROOT"
+ditto -x -k "$DIRECTORY/$ZIP_NAME" "$ZIP_EXTRACT_ROOT" \
+  || release_die "Could not extract the application ZIP: $ZIP_NAME"
 ZIP_APP="$ZIP_EXTRACT_ROOT/$USHOT_APP_BUNDLE"
 [[ -d "$ZIP_APP" && ! -L "$ZIP_APP" ]] \
   || release_die "Sparkle ZIP did not extract one real $USHOT_APP_BUNDLE directory."
@@ -231,7 +259,10 @@ validate_bundle_symlinks "$ZIP_APP"
 release_validate_app_identity "$ZIP_APP" "$VERSION" "$BUILD_NUMBER"
 release_verify_signature_mode "$ZIP_APP" "$MODE"
 
-DSYM_ENTRIES="$(zipinfo -1 "$DIRECTORY/$DSYM_ZIP_NAME")"
+release_log "Validating and extracting the dSYM ZIP."
+if ! DSYM_ENTRIES="$(zipinfo -1 "$DIRECTORY/$DSYM_ZIP_NAME")"; then
+  release_die "Could not enumerate the dSYM ZIP: $DSYM_ZIP_NAME"
+fi
 [[ -n "$DSYM_ENTRIES" ]] || release_die "dSYM ZIP is empty: $DSYM_ZIP_NAME"
 validate_archive_paths "dSYM ZIP" "$DSYM_ENTRIES"
 UNEXPECTED_DSYM_ENTRIES="$(printf '%s\n' "$DSYM_ENTRIES" | grep -Ev "^($USHOT_APP_BUNDLE\\.dSYM/|__MACOSX/$|__MACOSX/$USHOT_APP_BUNDLE\\.dSYM/)" || true)"
@@ -240,14 +271,17 @@ UNEXPECTED_DSYM_ENTRIES="$(printf '%s\n' "$DSYM_ENTRIES" | grep -Ev "^($USHOT_AP
 DUPLICATE_DSYM_ENTRIES="$(printf '%s\n' "$DSYM_ENTRIES" | sort | uniq -d)"
 [[ -z "$DUPLICATE_DSYM_ENTRIES" ]] \
   || release_die "dSYM ZIP contains duplicate paths: $DUPLICATE_DSYM_ENTRIES"
-ditto -x -k "$DIRECTORY/$DSYM_ZIP_NAME" "$DSYM_EXTRACT_ROOT"
+ditto -x -k "$DIRECTORY/$DSYM_ZIP_NAME" "$DSYM_EXTRACT_ROOT" \
+  || release_die "Could not extract the dSYM ZIP: $DSYM_ZIP_NAME"
 EXTRACTED_DSYM="$DSYM_EXTRACT_ROOT/$USHOT_APP_BUNDLE.dSYM"
 [[ -d "$EXTRACTED_DSYM" && ! -L "$EXTRACTED_DSYM" ]] \
   || release_die "dSYM ZIP did not extract one real $USHOT_APP_BUNDLE.dSYM directory."
 validate_bundle_symlinks "$EXTRACTED_DSYM"
 release_verify_dsym "$ZIP_APP" "$EXTRACTED_DSYM"
 
-hdiutil verify "$DIRECTORY/$DMG_NAME" >/dev/null
+release_log "Verifying and mounting the DMG read-only."
+hdiutil verify "$DIRECTORY/$DMG_NAME" >/dev/null \
+  || release_die "DMG verification failed: $DMG_NAME"
 if [[ "$MODE" == "public-adhoc" ]]; then
   if codesign --display "$DIRECTORY/$DMG_NAME" >/dev/null 2>&1; then
     release_die "Public DMG must remain unsigned."
@@ -266,7 +300,8 @@ hdiutil attach \
   -noautoopen \
   -mountpoint "$DMG_MOUNT_ROOT" \
   "$DIRECTORY/$DMG_NAME" \
-  >/dev/null
+  >/dev/null \
+  || release_die "Could not mount the DMG read-only: $DMG_NAME"
 DMG_ATTACHED=YES
 EXPECTED_DMG_ROOT_NAMES="$(printf '%s\n' Applications "$USHOT_APP_BUNDLE" | sort)"
 ACTUAL_DMG_ROOT_NAMES="$(find "$DMG_MOUNT_ROOT" -mindepth 1 -maxdepth 1 -exec basename '{}' ';' | sort)"
@@ -284,7 +319,8 @@ release_validate_app_identity "$DMG_APP" "$VERSION" "$BUILD_NUMBER"
 release_verify_signature_mode "$DMG_APP" "$MODE"
 release_verify_dsym "$DMG_APP" "$EXTRACTED_DSYM"
 compare_bundle_trees "$ZIP_APP" "$DMG_APP"
-hdiutil detach "$DMG_MOUNT_ROOT" >/dev/null
+hdiutil detach "$DMG_MOUNT_ROOT" >/dev/null \
+  || release_die "Could not detach the validated DMG: $DMG_NAME"
 DMG_ATTACHED=NO
 
 release_log "Validated exact release asset set for $TAG."
