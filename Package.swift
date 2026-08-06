@@ -8,12 +8,16 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "UshotCore", targets: ["UshotCore"]),
-        .executable(name: "UshotApp", targets: ["UshotApp"])
+        .executable(name: "UshotApp", targets: ["UshotApp"]),
+        .executable(
+            name: "AuthenticatedAppcastValidator",
+            targets: ["AuthenticatedAppcastValidator"]
+        )
     ],
     dependencies: [
         .package(
             url: "https://github.com/isCheneycc/Sparkle",
-            exact: "2.9.5-ushot.2"
+            exact: "2.9.5-ushot.4"
         )
     ],
     targets: [
@@ -31,6 +35,11 @@ let package = Package(
             exclude: ["Info.plist"],
             sources: ["Sources"],
             resources: [.process("Resources")]
+        ),
+        .executableTarget(
+            name: "AuthenticatedAppcastValidator",
+            dependencies: ["UshotCore"],
+            path: "Tools/AuthenticatedAppcastValidator"
         ),
         .testTarget(
             name: "UshotCoreTests",

@@ -18,6 +18,10 @@ final class ProductIdentityTests: XCTestCase {
             "https://ischeneycc.github.io/ushot/updates/v1/appcast.xml"
         )
         XCTAssertEqual(
+            ProductIdentity.sparklePublicEDKey,
+            "+zRL11/2yYePt5O+OetThnLGwyvAvFtPPXxiBBOTTjE="
+        )
+        XCTAssertEqual(
             Data(base64Encoded: ProductIdentity.sparklePublicEDKey)?.count,
             32
         )

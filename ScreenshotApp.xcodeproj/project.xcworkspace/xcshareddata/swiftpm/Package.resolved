@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/isCheneycc/Sparkle",
       "state" : {
-        "revision" : "f4d8362bf9b6231596db3a0cc8812fdca8100961",
-        "version" : "2.9.5-ushot.2"
+        "revision" : "3d81360ff115ffb80222c2723d72cb4cfa802774",
+        "version" : "2.9.5-ushot.4"
       }
     }
   ],

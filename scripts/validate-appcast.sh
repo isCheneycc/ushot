@@ -104,6 +104,8 @@ for ((index = 1; index <= ITEM_COUNT; index++)); do
     || release_die "Appcast item $index must carry an EdDSA archive signature."
 done
 
+release_validate_authenticated_appcast_runtime_policy "$APPCAST_PATH"
+
 FIRST_ITEM_XPATH="($CHANNEL_XPATH/*[local-name()='item' and namespace-uri()=''])[1]"
 FIRST_ITEM_VERSION="$(xmllint --xpath "string($FIRST_ITEM_XPATH/*[local-name()='version' and namespace-uri()='$USHOT_SPARKLE_XML_NAMESPACE'])" "$APPCAST_PATH")"
 FIRST_ITEM_SHORT_VERSION="$(xmllint --xpath "string($FIRST_ITEM_XPATH/*[local-name()='shortVersionString' and namespace-uri()='$USHOT_SPARKLE_XML_NAMESPACE'])" "$APPCAST_PATH")"

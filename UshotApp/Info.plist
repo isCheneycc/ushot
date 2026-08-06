@@ -50,6 +50,10 @@
     <true/>
     <key>SURequireEdDSAUpdateArchiveSignature</key>
     <true/>
+    <key>SURequireHostSignedAppcastValidation</key>
+    <true/>
+    <key>SUMaximumSignedAppcastContentLength</key>
+    <integer>1048576</integer>
     <key>SUSignedFeedFailureExpirationInterval</key>
     <integer>0</integer>
 </dict>

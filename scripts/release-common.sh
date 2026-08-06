@@ -22,16 +22,26 @@ USHOT_APPCAST_CHANNEL_DESCRIPTION="Stable Ushot updates for macOS."
 USHOT_APPCAST_CHANNEL_LANGUAGE="en"
 USHOT_SPARKLE_VERSION="2.9.5"
 USHOT_SPARKLE_ARCHIVE_SHA256="015336b601493e05c237964954bff6191370003d94edefe663724c88840d73cc"
-USHOT_SPARKLE_KEY_ACCOUNT="io.github.ischeneycc.ushot"
-USHOT_SPARKLE_PUBLIC_ED_KEY="gdZAswkBeWYGYjpqCUmtrUEuyIc/RP5DO+c5I7h+h3Q="
+USHOT_UPDATE_TRANSITION_SPARKLE_VERSION="2.9.5-ushot.2"
+USHOT_UPDATE_TRANSITION_SPARKLE_BUILD="2062"
+USHOT_SIGNED_FEED_VALIDATION_SPARKLE_VERSION="2.9.5-ushot.4"
+USHOT_SIGNED_FEED_VALIDATION_SPARKLE_BUILD="2064"
+USHOT_SPARKLE_KEY_ACCOUNT="io.github.ischeneycc.ushot.20260806"
+USHOT_SPARKLE_PUBLIC_ED_KEY="+zRL11/2yYePt5O+OetThnLGwyvAvFtPPXxiBBOTTjE="
+USHOT_PRE_ROTATION_SPARKLE_PUBLIC_ED_KEY="gdZAswkBeWYGYjpqCUmtrUEuyIc/RP5DO+c5I7h+h3Q="
 USHOT_SPARKLE_XML_NAMESPACE="http://www.andymatuschak.org/xml-namespaces/sparkle"
+USHOT_MAX_AUTHENTICATED_APPCAST_BYTES="1048576"
+USHOT_SIGNED_APPCAST_TRAILER_ALLOWANCE_BYTES="512"
+USHOT_MAX_SIGNED_APPCAST_BYTES="1049088"
 USHOT_PUBLIC_UPDATE_BASELINE_VERSION="0.1.1"
 USHOT_PUBLIC_UPDATE_BASELINE_BUILD="2"
 USHOT_PUBLIC_UPDATE_BASELINE_SPARKLE_BUILD="2060"
 USHOT_UPDATE_TRANSITION_VERSION="0.1.2"
 USHOT_UPDATE_TRANSITION_BUILD="3"
-USHOT_FIRST_FEED_VERSION="0.1.3"
-USHOT_FIRST_FEED_BUILD="4"
+USHOT_SIGNED_FEED_VALIDATION_TRANSITION_VERSION="0.1.3"
+USHOT_SIGNED_FEED_VALIDATION_TRANSITION_BUILD="4"
+USHOT_FIRST_FEED_VERSION="0.1.4"
+USHOT_FIRST_FEED_BUILD="5"
 
 release_log() {
   printf 'release: %s\n' "$*"
@@ -48,6 +58,42 @@ release_die() {
 
 release_require_command() {
   command -v "$1" >/dev/null 2>&1 || release_die "Required command is unavailable: $1"
+}
+
+release_validate_openssl_salted_ciphertext() {
+  local encrypted_path="$1"
+  local header_hex
+
+  [[ -f "$encrypted_path" && ! -L "$encrypted_path" ]] \
+    || release_die "Encrypted backup must be a regular, non-symbolic-link file."
+  [[ -x /usr/bin/od && -x /usr/bin/tr ]] \
+    || release_die "Required system tools for encrypted-backup validation are unavailable."
+  if ! header_hex="$(
+    /usr/bin/od -An -tx1 -N8 "$encrypted_path" \
+      | /usr/bin/tr -d '[:space:]'
+  )"; then
+    release_die "Could not inspect the encrypted backup header."
+  fi
+  [[ "$header_hex" == "53616c7465645f5f" ]] \
+    || release_die "Encrypted backup is missing the OpenSSL Salted__ header."
+}
+
+release_validate_authenticated_appcast_runtime_policy() {
+  local appcast_path="$1"
+  local release_common_directory
+  local project_root
+
+  [[ -s "$appcast_path" ]] \
+    || release_die "Authenticated appcast is missing or empty: $appcast_path"
+  release_require_command swift
+  release_common_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  project_root="$(cd "$release_common_directory/.." && pwd -P)"
+  swift run \
+    --quiet \
+    --package-path "$project_root" \
+    --configuration release \
+    AuthenticatedAppcastValidator \
+    "$appcast_path"
 }
 
 release_validate_version() {
@@ -116,6 +162,8 @@ release_validate_update_rollout_constants() {
   release_validate_build_number "$USHOT_PUBLIC_UPDATE_BASELINE_BUILD"
   release_validate_version "$USHOT_UPDATE_TRANSITION_VERSION"
   release_validate_build_number "$USHOT_UPDATE_TRANSITION_BUILD"
+  release_validate_version "$USHOT_SIGNED_FEED_VALIDATION_TRANSITION_VERSION"
+  release_validate_build_number "$USHOT_SIGNED_FEED_VALIDATION_TRANSITION_BUILD"
   release_validate_version "$USHOT_FIRST_FEED_VERSION"
   release_validate_build_number "$USHOT_FIRST_FEED_BUILD"
 
@@ -128,13 +176,21 @@ release_validate_update_rollout_constants() {
     "$USHOT_PUBLIC_UPDATE_BASELINE_BUILD" \
     || release_die "Update transition build must be newer than the public baseline."
   release_version_is_strictly_greater \
-    "$USHOT_FIRST_FEED_VERSION" \
+    "$USHOT_SIGNED_FEED_VALIDATION_TRANSITION_VERSION" \
     "$USHOT_UPDATE_TRANSITION_VERSION" \
-    || release_die "First-feed version must be newer than the update transition."
+    || release_die "Signed-feed validation transition version must be newer than the update transition."
+  release_decimal_is_strictly_greater \
+    "$USHOT_SIGNED_FEED_VALIDATION_TRANSITION_BUILD" \
+    "$USHOT_UPDATE_TRANSITION_BUILD" \
+    || release_die "Signed-feed validation transition build must be newer than the update transition."
+  release_version_is_strictly_greater \
+    "$USHOT_FIRST_FEED_VERSION" \
+    "$USHOT_SIGNED_FEED_VALIDATION_TRANSITION_VERSION" \
+    || release_die "First-feed version must be newer than the signed-feed validation transition."
   release_decimal_is_strictly_greater \
     "$USHOT_FIRST_FEED_BUILD" \
-    "$USHOT_UPDATE_TRANSITION_BUILD" \
-    || release_die "First-feed build must be newer than the update transition."
+    "$USHOT_SIGNED_FEED_VALIDATION_TRANSITION_BUILD" \
+    || release_die "First-feed build must be newer than the signed-feed validation transition."
 }
 
 release_is_first_feed_identity() {
@@ -246,6 +302,7 @@ release_validate_source_settings() {
   local expected_version="${2:-}"
   local expected_build="${3:-}"
   local base_config="$project_root/Config/Base.xcconfig"
+  local product_identity_source="$project_root/UshotCore/Sources/UshotCore/Product/ProductIdentity.swift"
 
   [[ -f "$base_config" ]] || release_die "Missing source-of-truth configuration: $base_config"
   [[ "$(release_xcconfig_value PRODUCT_NAME "$base_config")" == "$USHOT_PRODUCT_NAME" ]] \
@@ -260,6 +317,17 @@ release_validate_source_settings() {
   sparkle_public_key="$(release_xcconfig_value SPARKLE_PUBLIC_ED_KEY "$base_config")"
   [[ "$sparkle_public_key" == "$USHOT_SPARKLE_PUBLIC_ED_KEY" ]] \
     || release_die "SPARKLE_PUBLIC_ED_KEY does not match Ushot's committed update key."
+  [[ -f "$product_identity_source" && ! -L "$product_identity_source" ]] \
+    || release_die "Missing or symbolic ProductIdentity source: $product_identity_source"
+  [[ "$(grep -c '^[[:space:]]*public static let sparklePublicEDKey[[:space:]]*=[[:space:]]*$' "$product_identity_source")" == "1" ]] \
+    || release_die "ProductIdentity must declare exactly one canonical sparklePublicEDKey constant."
+  local product_identity_public_key_line
+  product_identity_public_key_line="$({
+    sed -n '/^[[:space:]]*public static let sparklePublicEDKey[[:space:]]*=[[:space:]]*$/{n;p;}' \
+      "$product_identity_source"
+  })"
+  [[ "$product_identity_public_key_line" == "        \"$USHOT_SPARKLE_PUBLIC_ED_KEY\"" ]] \
+    || release_die "ProductIdentity sparklePublicEDKey does not match Ushot's committed update key."
 
   if [[ -n "$expected_version" ]]; then
     [[ "$(release_xcconfig_value MARKETING_VERSION "$base_config")" == "$expected_version" ]] \
@@ -343,8 +411,8 @@ release_validate_public_update_baseline_app_identity() {
     || release_die "Public update baseline build must be $USHOT_PUBLIC_UPDATE_BASELINE_BUILD."
   [[ "$(release_plist_value "$info_plist" SUFeedURL)" == "$USHOT_LEGACY_APPCAST_URL" ]] \
     || release_die "Public update baseline must retain the isolated legacy Sparkle feed URL."
-  [[ "$(release_plist_value "$info_plist" SUPublicEDKey)" == "$USHOT_SPARKLE_PUBLIC_ED_KEY" ]] \
-    || release_die "Public update baseline does not contain Ushot's expected Sparkle Ed25519 public key."
+  [[ "$(release_plist_value "$info_plist" SUPublicEDKey)" == "$USHOT_PRE_ROTATION_SPARKLE_PUBLIC_ED_KEY" ]] \
+    || release_die "Public update baseline does not contain Ushot's historical Sparkle Ed25519 public key."
   [[ "$(release_plist_value "$info_plist" SURequireSignedFeed)" == "true" ]] \
     || release_die "Public update baseline must require a signed Sparkle feed."
   [[ "$(release_plist_value "$info_plist" SUSignedFeedFailureExpirationInterval)" == "0" ]] \
@@ -362,7 +430,9 @@ release_validate_public_update_baseline_app_identity() {
 
   for absent_key in \
     SURequireExactUpdateVersionIdentity \
-    SURequireEdDSAUpdateArchiveSignature
+    SURequireEdDSAUpdateArchiveSignature \
+    SURequireHostSignedAppcastValidation \
+    SUMaximumSignedAppcastContentLength
   do
     if /usr/bin/plutil -type "$absent_key" "$info_plist" >/dev/null 2>&1; then
       release_die "Public update baseline unexpectedly contains post-baseline key $absent_key."
@@ -384,6 +454,14 @@ release_validate_public_update_baseline_app_identity() {
   if /usr/bin/plutil -type SUUpdateVersionIdentityHardeningVersion "$sparkle_info_plist" >/dev/null 2>&1; then
     release_die "Public update baseline unexpectedly contains the post-baseline Sparkle hardening marker."
   fi
+  for absent_key in \
+    SUHostSignedAppcastValidationVersion \
+    SUFeedDownloadSizeLimitVersion
+  do
+    if /usr/bin/plutil -type "$absent_key" "$sparkle_info_plist" >/dev/null 2>&1; then
+      release_die "Public update baseline unexpectedly contains post-baseline Sparkle marker $absent_key."
+    fi
+  done
 
   release_require_command otool
   otool -L "$executable" | awk '
@@ -425,6 +503,18 @@ release_validate_app_identity() {
   local executable="$app_path/Contents/MacOS/$USHOT_EXECUTABLE_NAME"
   local sparkle_binary="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
   local sparkle_info_plist="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist"
+  local requires_host_signed_appcast_validation=true
+  local expected_sparkle_version="$USHOT_SIGNED_FEED_VALIDATION_SPARKLE_VERSION"
+  local expected_sparkle_build="$USHOT_SIGNED_FEED_VALIDATION_SPARKLE_BUILD"
+  local expected_sparkle_public_key="$USHOT_SPARKLE_PUBLIC_ED_KEY"
+
+  if [[ "$expected_version" == "$USHOT_UPDATE_TRANSITION_VERSION" \
+      && "$expected_build" == "$USHOT_UPDATE_TRANSITION_BUILD" ]]; then
+    requires_host_signed_appcast_validation=false
+    expected_sparkle_version="$USHOT_UPDATE_TRANSITION_SPARKLE_VERSION"
+    expected_sparkle_build="$USHOT_UPDATE_TRANSITION_SPARKLE_BUILD"
+    expected_sparkle_public_key="$USHOT_PRE_ROTATION_SPARKLE_PUBLIC_ED_KEY"
+  fi
 
   [[ -d "$app_path" ]] || release_die "App bundle not found: $app_path"
   [[ "$(basename "$app_path")" == "$USHOT_APP_BUNDLE" ]] \
@@ -455,6 +545,20 @@ release_validate_app_identity() {
   do
     release_require_plist_type "$info_plist" "$boolean_key" bool
   done
+  if [[ "$requires_host_signed_appcast_validation" == "true" ]]; then
+    release_require_plist_type \
+      "$info_plist" \
+      SURequireHostSignedAppcastValidation \
+      bool
+    release_require_plist_type \
+      "$info_plist" \
+      SUMaximumSignedAppcastContentLength \
+      integer
+  elif /usr/bin/plutil -type SURequireHostSignedAppcastValidation "$info_plist" >/dev/null 2>&1; then
+    release_die "Historical update transition unexpectedly requires the later host signed-appcast validator."
+  elif /usr/bin/plutil -type SUMaximumSignedAppcastContentLength "$info_plist" >/dev/null 2>&1; then
+    release_die "Historical update transition unexpectedly contains the later signed-appcast size limit."
+  fi
   release_require_plist_type \
     "$info_plist" \
     SUSignedFeedFailureExpirationInterval \
@@ -477,6 +581,12 @@ release_validate_app_identity() {
     || release_die "Built app must require exact appcast/archive version identity."
   [[ "$(release_plist_value "$info_plist" SURequireEdDSAUpdateArchiveSignature)" == "true" ]] \
     || release_die "Built app must require an independent EdDSA archive signature."
+  if [[ "$requires_host_signed_appcast_validation" == "true" ]]; then
+    [[ "$(release_plist_value "$info_plist" SURequireHostSignedAppcastValidation)" == "true" ]] \
+      || release_die "Built app must require host validation of authenticated appcast XML."
+    [[ "$(release_plist_value "$info_plist" SUMaximumSignedAppcastContentLength)" == "$USHOT_MAX_AUTHENTICATED_APPCAST_BYTES" ]] \
+      || release_die "Built app must cap authenticated appcast XML at $USHOT_MAX_AUTHENTICATED_APPCAST_BYTES bytes."
+  fi
   [[ "$(release_plist_value "$info_plist" SUSignedFeedFailureExpirationInterval)" == "0" ]] \
     || release_die "Built app must permanently fail closed when signed-feed verification fails."
   [[ "$(release_plist_value "$info_plist" SUVerifyUpdateBeforeExtraction)" == "true" ]] \
@@ -491,7 +601,7 @@ release_validate_app_identity() {
     || release_die "Built app must keep Sparkle system profiling disabled."
   local sparkle_public_key
   sparkle_public_key="$(release_plist_value "$info_plist" SUPublicEDKey)"
-  [[ "$sparkle_public_key" == "$USHOT_SPARKLE_PUBLIC_ED_KEY" ]] \
+  [[ "$sparkle_public_key" == "$expected_sparkle_public_key" ]] \
     || release_die "Built app does not contain Ushot's expected Sparkle Ed25519 public key."
   [[ -x "$executable" ]] \
     || release_die "Built app executable is missing or is not executable."
@@ -501,10 +611,46 @@ release_validate_app_identity() {
     || release_die "Built app is missing Sparkle's embedded framework Info.plist."
   release_require_plist_type \
     "$sparkle_info_plist" \
+    CFBundleShortVersionString \
+    string
+  release_require_plist_type \
+    "$sparkle_info_plist" \
+    CFBundleVersion \
+    string
+  [[ "$(release_plist_value "$sparkle_info_plist" CFBundleShortVersionString)" == "$expected_sparkle_version" ]] \
+    || release_die "Embedded Sparkle framework version must equal $expected_sparkle_version."
+  [[ "$(release_plist_value "$sparkle_info_plist" CFBundleVersion)" == "$expected_sparkle_build" ]] \
+    || release_die "Embedded Sparkle framework build must equal $expected_sparkle_build."
+  release_require_plist_type \
+    "$sparkle_info_plist" \
     SUUpdateVersionIdentityHardeningVersion \
     integer
   [[ "$(release_plist_value "$sparkle_info_plist" SUUpdateVersionIdentityHardeningVersion)" == "1" ]] \
     || release_die "Embedded Sparkle framework is missing Ushot update hardening marker version 1."
+  if [[ "$requires_host_signed_appcast_validation" == "true" ]]; then
+    release_require_plist_type \
+      "$sparkle_info_plist" \
+      SUHostSignedAppcastValidationVersion \
+      integer
+    [[ "$(release_plist_value "$sparkle_info_plist" SUHostSignedAppcastValidationVersion)" == "1" ]] \
+      || release_die "Embedded Sparkle framework is missing host signed-appcast validation marker version 1."
+    release_require_plist_type \
+      "$sparkle_info_plist" \
+      SUFeedDownloadSizeLimitVersion \
+      integer
+    [[ "$(release_plist_value "$sparkle_info_plist" SUFeedDownloadSizeLimitVersion)" == "1" ]] \
+      || release_die "Embedded Sparkle framework is missing feed download-size limit marker version 1."
+  else
+    local post_transition_marker
+    for post_transition_marker in \
+      SUHostSignedAppcastValidationVersion \
+      SUFeedDownloadSizeLimitVersion
+    do
+      if /usr/bin/plutil -type "$post_transition_marker" "$sparkle_info_plist" >/dev/null 2>&1; then
+        release_die "Historical update transition unexpectedly contains later Sparkle marker $post_transition_marker."
+      fi
+    done
+  fi
   release_require_command otool
   otool -L "$executable" | awk '
     $1 == "@rpath/Sparkle.framework/Versions/B/Sparkle" { found = 1 }
