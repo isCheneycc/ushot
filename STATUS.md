@@ -177,4 +177,5 @@ Last updated: 2026-08-06
 
 ## Next Concrete Step
 
-- Run the recovered-key drill against the exact published 0.1.3 assets, then execute the clean-account 0.1.3 → 0.1.4 exact-production-URL/raw-XML/size/helper/replacement/tamper/exact-version/active-work matrix in `docs/MANUAL_TESTING.md`. Do not add a signing/Pages tag policy, deploy `/updates/v1/appcast.xml`, use `publish_update_feed=true`, or claim public self-update readiness until every result is recorded; the only permitted first feed identity is 0.1.4 (build 5).
+- Source identity and transition tooling for candidate 0.1.4 (build 5) are staged on `codex/v0.1.4-first-update` (restricted notes, zero-item seed, prepare/serve/verify scripts, and a local public-adhoc five-asset set whose digests match the script pins). This is **not** a published Release or self-update readiness claim.
+- Next: run the recovered-key drill against the exact published 0.1.3 assets, then execute the clean-account 0.1.3 → 0.1.4 exact-production-URL/raw-XML/size/helper/replacement/tamper/exact-version/active-work matrix in `docs/MANUAL_TESTING.md` using the transition tooling. Do not add a signing/Pages tag policy, deploy `/updates/v1/appcast.xml`, use `publish_update_feed=true`, or claim public self-update readiness until every result is recorded; the only permitted first feed identity is 0.1.4 (build 5).

@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Advance source identity to Ushot 0.1.4 (build 5), the first permitted production feed item, while the public release and update feed remain at the published 0.1.3 direct-download state until the evidence gate closes.
+- Add hash-bound 0.1.3 → 0.1.4 update-transition fixture, loopback HTTPS and operator evidence tooling for the clean-account matrix.
+- Harden release-asset ZIP extraction with write-confined `sandbox-exec` validation workspaces.
+
+### Security
+
+- Keep production self-update blocked until the recovered-key drill and complete 0.1.3 → 0.1.4 matrix are recorded; do not deploy `/updates/v1/appcast.xml` or use `publish_update_feed=true` before that evidence.
+
 ## [0.1.3] - 2026-08-06
 
 ### Changed
