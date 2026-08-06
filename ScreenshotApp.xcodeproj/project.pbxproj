@@ -590,7 +590,7 @@
 			repositoryURL = "https://github.com/isCheneycc/Sparkle";
 			requirement = {
 				kind = exactVersion;
-				version = 2.9.5-ushot.2;
+				version = 2.9.5-ushot.4;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

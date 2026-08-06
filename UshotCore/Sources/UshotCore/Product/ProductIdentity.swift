@@ -13,5 +13,5 @@ public enum ProductIdentity {
     public static let updateFeedURLString =
         "https://ischeneycc.github.io/ushot/updates/v1/appcast.xml"
     public static let sparklePublicEDKey =
-        "gdZAswkBeWYGYjpqCUmtrUEuyIc/RP5DO+c5I7h+h3Q="
+        "+zRL11/2yYePt5O+OetThnLGwyvAvFtPPXxiBBOTTjE="
 }

@@ -50,6 +50,10 @@ private struct SparkleUpdateConfiguration {
     static let feedURLString = ProductIdentity.updateFeedURLString
     static let publicEDKey = ProductIdentity.sparklePublicEDKey
     static let requiredHardeningVersion = 1
+    static let requiredSignedAppcastValidationVersion = 1
+    static let requiredFeedDownloadSizeLimitVersion = 1
+    static let requiredMaximumSignedAppcastContentLength =
+        SignedAppcastPolicy.maximumAuthenticatedXMLBytes
 
     let feedURL: URL
 
@@ -91,6 +95,16 @@ private struct SparkleUpdateConfiguration {
             expected: true,
             in: bundle
         )
+        try Self.requireBoolean(
+            "SURequireHostSignedAppcastValidation",
+            expected: true,
+            in: bundle
+        )
+        try Self.requireInteger(
+            "SUMaximumSignedAppcastContentLength",
+            expected: Self.requiredMaximumSignedAppcastContentLength,
+            in: bundle
+        )
         try Self.requireInteger(
             "SUSignedFeedFailureExpirationInterval",
             expected: 0,
@@ -99,6 +113,16 @@ private struct SparkleUpdateConfiguration {
         try Self.requireInteger(
             "SUUpdateVersionIdentityHardeningVersion",
             expected: Self.requiredHardeningVersion,
+            in: sparkleBundle
+        )
+        try Self.requireInteger(
+            "SUHostSignedAppcastValidationVersion",
+            expected: Self.requiredSignedAppcastValidationVersion,
+            in: sparkleBundle
+        )
+        try Self.requireInteger(
+            "SUFeedDownloadSizeLimitVersion",
+            expected: Self.requiredFeedDownloadSizeLimitVersion,
             in: sparkleBundle
         )
 
@@ -336,8 +360,29 @@ final class SparkleUpdateChecker:
         }
 
         AppLog.updates.notice(
-            "Update controller started: feedHost=\(self.configuration.feedURL.host ?? "unknown", privacy: .public), manualOnly=true, automaticDownloads=false, systemProfile=false, verifyBeforeExtraction=true, signedFeed=true, exactVersionIdentity=true, independentArchiveEdDSA=true, hardeningVersion=\(SparkleUpdateConfiguration.requiredHardeningVersion, privacy: .public), signedFeedFailureExpirationSeconds=0"
+            "Update controller started: feedHost=\(self.configuration.feedURL.host ?? "unknown", privacy: .public), manualOnly=true, automaticDownloads=false, systemProfile=false, verifyBeforeExtraction=true, signedFeed=true, hostAuthenticatedXMLValidation=true, maximumAuthenticatedAppcastBytes=\(SparkleUpdateConfiguration.requiredMaximumSignedAppcastContentLength, privacy: .public), feedDownloadSizeLimitVersion=\(SparkleUpdateConfiguration.requiredFeedDownloadSizeLimitVersion, privacy: .public), exactVersionIdentity=true, independentArchiveEdDSA=true, hardeningVersion=\(SparkleUpdateConfiguration.requiredHardeningVersion, privacy: .public), signedAppcastValidationVersion=\(SparkleUpdateConfiguration.requiredSignedAppcastValidationVersion, privacy: .public), signedFeedFailureExpirationSeconds=0"
         )
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        validateSignedAppcastData appcastData: Data
+    ) throws {
+        do {
+            try SignedAppcastPolicy.validate(authenticatedXML: appcastData)
+            AppLog.updates.notice(
+                "Accepted authenticated appcast XML structure: generation=\(self.activeCheck?.generation ?? 0, privacy: .public)"
+            )
+        } catch let violation as SignedAppcastPolicyViolation {
+            recordRawAppcastPolicyFailure(violation.rawValue)
+            throw Self.rawAppcastPolicyError()
+        } catch {
+            let nsError = error as NSError
+            AppLog.updates.fault(
+                "Authenticated appcast validator returned an unexpected error type: generation=\(self.activeCheck?.generation ?? 0, privacy: .public), domain=\(nsError.domain, privacy: .public), code=\(nsError.code, privacy: .public)"
+            )
+            throw Self.rawAppcastPolicyError()
+        }
     }
 
     func checkForUpdates(admission: @escaping UpdateCheckAdmission) throws {
@@ -732,6 +777,29 @@ final class SparkleUpdateChecker:
         }
         AppLog.updates.error(
             "Rejected update item metadata: generation=\(self.activeCheck?.generation ?? 0, privacy: .public), boundary=\(boundary, privacy: .public), diagnostic=\(failure.diagnostic, privacy: .public)"
+        )
+    }
+
+    private func recordRawAppcastPolicyFailure(_ diagnostic: String) {
+        let qualifiedDiagnostic = "raw-xml-\(diagnostic)"
+        if var activeCheck {
+            activeCheck.policyFailureDiagnostic = qualifiedDiagnostic
+            self.activeCheck = activeCheck
+        }
+        AppLog.updates.error(
+            "Rejected authenticated appcast XML structure: generation=\(self.activeCheck?.generation ?? 0, privacy: .public), diagnostic=\(qualifiedDiagnostic, privacy: .public)"
+        )
+    }
+
+    private static func rawAppcastPolicyError() -> NSError {
+        NSError(
+            domain: ProductIdentity.bundleIdentifier,
+            code: 6,
+            userInfo: [
+                NSLocalizedDescriptionKey: String(
+                    localized: "The update was rejected because the signed update feed violates Ushot's security policy."
+                )
+            ]
         )
     }
 

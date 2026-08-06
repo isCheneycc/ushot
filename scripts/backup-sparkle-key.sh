@@ -1,5 +1,8 @@
 #!/bin/bash
 set -euo pipefail
+set +x
+ulimit -c 0
+unset SPARKLE_ED25519_PRIVATE_KEY SPARKLE_PRIVATE_KEY PRIVATE_KEY RECOVERED_PRIVATE_KEY DERIVED_PUBLIC_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
@@ -29,6 +32,8 @@ OUTPUT_PARENT="$(dirname "$OUTPUT_PATH")"
   || release_die "Backup parent must be an existing real directory: $OUTPUT_PARENT"
 CANONICAL_PARENT="$(cd "$OUTPUT_PARENT" && pwd -P)"
 CANONICAL_OUTPUT="$CANONICAL_PARENT/$(basename "$OUTPUT_PATH")"
+[[ "$OUTPUT_PATH" == "$CANONICAL_OUTPUT" ]] \
+  || release_die "Backup output path must be absolute, canonical, and free of symbolic-link traversal."
 case "$CANONICAL_OUTPUT" in
   "$PROJECT_ROOT"|"$PROJECT_ROOT"/*)
     release_die "Refusing to place an encrypted signing-key backup inside the source repository."
@@ -38,60 +43,98 @@ esac
   || release_die "Backup output already exists; refusing to overwrite it: $CANONICAL_OUTPUT"
 
 release_require_command openssl
+release_require_command security
 release_require_command shasum
-SPARKLE_BIN="$($SCRIPT_DIR/download-sparkle-tools.sh | tail -n 1)"
-GENERATE_KEYS="$SPARKLE_BIN/generate_keys"
-[[ -x "$GENERATE_KEYS" ]] \
-  || release_die "Sparkle generate_keys is unavailable: $GENERATE_KEYS"
 [[ -x "$SCRIPT_DIR/derive-sparkle-public-key.swift" ]] \
   || release_die "Sparkle public-key derivation helper is unavailable."
+if ! { : < /dev/tty; } 2>/dev/null; then
+  release_die "A controlling terminal is required for OpenSSL's hidden password prompts."
+fi
 
 umask 077
-WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/ushot-sparkle-key-backup.XXXXXX")"
-PLAINTEXT_KEY="$WORKSPACE/private-key.txt"
+WORKSPACE="$(mktemp -d "$CANONICAL_PARENT/.ushot-sparkle-key-backup.XXXXXX")"
+chmod 700 "$WORKSPACE"
 ENCRYPTED_BACKUP="$WORKSPACE/private-key.backup.enc"
-RECOVERY_CHECK="$WORKSPACE/recovered-private-key.txt"
+PRIVATE_KEY=""
+RECOVERED_PRIVATE_KEY=""
 cleanup() {
-  rm -rf "$WORKSPACE"
+  local status=$?
+  trap - EXIT HUP INT TERM
+  set +e
+  unset PRIVATE_KEY RECOVERED_PRIVATE_KEY DERIVED_PUBLIC_KEY
+  if [[ -n "${WORKSPACE:-}" && -d "$WORKSPACE" && ! -L "$WORKSPACE" ]]; then
+    rm -rf -- "$WORKSPACE"
+  fi
+  return "$status"
 }
 trap cleanup EXIT
+signal_exit() {
+  local status="$1"
+  trap - HUP INT TERM
+  exit "$status"
+}
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
 
 release_log "Requesting access to the existing Sparkle key in the macOS login Keychain."
-"$GENERATE_KEYS" \
-  --account "$USHOT_SPARKLE_KEY_ACCOUNT" \
-  -x "$PLAINTEXT_KEY"
+if ! PRIVATE_KEY="$(
+  /usr/bin/security find-generic-password \
+    -a "$USHOT_SPARKLE_KEY_ACCOUNT" \
+    -s "https://sparkle-project.org" \
+    -w
+)"; then
+  release_die "Could not export the existing Sparkle key from the macOS login Keychain."
+fi
+[[ -n "$PRIVATE_KEY" ]] \
+  || release_die "The macOS login Keychain returned an empty Sparkle private key."
+export -n PRIVATE_KEY
 
-DERIVED_PUBLIC_KEY="$("$SCRIPT_DIR/derive-sparkle-public-key.swift" < "$PLAINTEXT_KEY")"
+DERIVED_PUBLIC_KEY="$(
+  printf '%s' "$PRIVATE_KEY" | "$SCRIPT_DIR/derive-sparkle-public-key.swift"
+)"
 [[ "$DERIVED_PUBLIC_KEY" == "$USHOT_SPARKLE_PUBLIC_ED_KEY" ]] \
   || release_die "The exported private key does not match Ushot's embedded Sparkle public key."
 unset DERIVED_PUBLIC_KEY
 
 release_log "Choose a strong backup password and store it separately from the encrypted file."
-/usr/bin/openssl enc \
-  -aes-256-cbc \
-  -salt \
-  -pbkdf2 \
-  -iter 600000 \
-  -md sha256 \
-  -in "$PLAINTEXT_KEY" \
-  -out "$ENCRYPTED_BACKUP"
+if ! printf '%s' "$PRIVATE_KEY" | \
+  /usr/bin/openssl enc \
+      -aes-256-cbc \
+      -salt \
+      -pbkdf2 \
+      -iter 600000 \
+      -md sha256 \
+      -out "$ENCRYPTED_BACKUP"; then
+  release_die "OpenSSL did not create an encrypted backup."
+fi
 [[ -s "$ENCRYPTED_BACKUP" ]] \
   || release_die "OpenSSL did not create an encrypted backup."
+release_validate_openssl_salted_ciphertext "$ENCRYPTED_BACKUP"
+chmod 600 "$ENCRYPTED_BACKUP"
 
 release_log "Re-enter the password once to prove the encrypted backup can be decrypted."
-/usr/bin/openssl enc \
-  -d \
-  -aes-256-cbc \
-  -pbkdf2 \
-  -iter 600000 \
-  -md sha256 \
-  -in "$ENCRYPTED_BACKUP" \
-  -out "$RECOVERY_CHECK"
-cmp "$PLAINTEXT_KEY" "$RECOVERY_CHECK" \
+if ! RECOVERED_PRIVATE_KEY="$(
+  /usr/bin/openssl enc \
+    -d \
+    -aes-256-cbc \
+    -pbkdf2 \
+    -iter 600000 \
+    -md sha256 \
+    -in "$ENCRYPTED_BACKUP" \
+    < /dev/tty
+)"; then
+  release_die "Encrypted backup recovery check failed."
+fi
+[[ "$PRIVATE_KEY" == "$RECOVERED_PRIVATE_KEY" ]] \
   || release_die "Encrypted backup recovery check did not reproduce the original key."
+unset PRIVATE_KEY RECOVERED_PRIVATE_KEY
 
-mv "$ENCRYPTED_BACKUP" "$CANONICAL_OUTPUT"
-chmod 600 "$CANONICAL_OUTPUT"
-BACKUP_SHA256="$(shasum -a 256 "$CANONICAL_OUTPUT" | awk '{print $1}')"
+BACKUP_SHA256="$(shasum -a 256 "$ENCRYPTED_BACKUP" | awk '{print $1}')"
+[[ "$BACKUP_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || release_die "Could not calculate the encrypted backup SHA-256."
+ln "$ENCRYPTED_BACKUP" "$CANONICAL_OUTPUT" \
+  || release_die "Backup output appeared during creation; refusing to overwrite it: $CANONICAL_OUTPUT"
+rm "$ENCRYPTED_BACKUP"
 release_log "Encrypted Sparkle key backup created and locally recovery-checked."
 printf 'backup=%s\nsha256=%s\n' "$CANONICAL_OUTPUT" "$BACKUP_SHA256"

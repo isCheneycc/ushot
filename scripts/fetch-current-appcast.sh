@@ -54,17 +54,22 @@ trap cleanup EXIT
 HTTP_STATUS="$(curl --silent --show-error \
   --proto '=https' \
   --tlsv1.2 \
+  --max-filesize "$USHOT_MAX_SIGNED_APPCAST_BYTES" \
   --user-agent 'UshotReleasePipeline/1' \
   --output "$DOWNLOAD_PATH" \
   --write-out '%{http_code}' \
-  "$USHOT_APPCAST_URL")"
+  "$USHOT_APPCAST_URL")" || \
+  release_die "Could not fetch the production appcast within the $USHOT_MAX_SIGNED_APPCAST_BYTES-byte limit."
 
 case "$HTTP_STATUS" in
   200)
-    xmllint --noout "$DOWNLOAD_PATH"
+    [[ -s "$DOWNLOAD_PATH" ]] \
+      || release_die "Production appcast returned HTTP 200 with an empty body."
+    [[ "$(release_file_size "$DOWNLOAD_PATH")" -le "$USHOT_MAX_SIGNED_APPCAST_BYTES" ]] \
+      || release_die "Production appcast exceeds the $USHOT_MAX_SIGNED_APPCAST_BYTES-byte limit."
     ditto "$DOWNLOAD_PATH" "$OUTPUT_PATH"
     printf 'signed' > "$KIND_OUTPUT_PATH"
-    release_log "Fetched production appcast; cryptographic verification is required before regeneration."
+    release_log "Fetched an opaque production appcast within the size limit; cryptographic verification is required before any XML parsing."
     ;;
   404)
     release_is_first_feed_identity "$VERSION" "$BUILD_NUMBER" \

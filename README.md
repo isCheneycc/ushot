@@ -19,7 +19,7 @@ Ushot is a native screenshot and annotation utility for Apple silicon Macs runni
 Screenshot pixels, annotations, clipboard exports, color samples, history, and encoded files are processed locally. Ushot has no account, telemetry, analytics, advertising SDK, crash-report upload, or system-profile submission.
 
 > [!IMPORTANT]
-> Ushot 0.1.2 (build 3) is the current direct-download release and the one-time manual-install transition to the hardened updater. Users of 0.1.1 must install it manually from the official GitHub Release. The production update feed remains intentionally absent until the separately gated 0.1.3 update is ready.
+> Ushot 0.1.2 (build 3) remains the current direct-download release. Users of 0.1.1 must install it manually from the official GitHub Release. A newly discovered pre-parse feed-validation gap makes the upcoming 0.1.3 (build 4) a second manual GitHub-only transition; it is not published yet. The production update feed remains intentionally absent, and the first online update is now gated for 0.1.4 (build 5).
 
 ## One capture, one continuous workflow
 
@@ -79,7 +79,7 @@ Read [PRIVACY.md](PRIVACY.md) for the complete data, permission, persistence, an
 
 ## Release status and installation
 
-Ushot 0.1.2 (build 3) is the current published direct-download release and the one-time hardened transition. It was published with the updater feed disabled, and the protected workflow anonymously re-downloaded and verified its DMG, ZIP, dSYM ZIP, release manifest, and checksums. Users of 0.1.1 must install it manually once. Builds taken directly from `main` remain development artifacts rather than a supported distribution channel.
+Ushot 0.1.2 (build 3) is the current published direct-download release and the first hardened transition. It was published with the updater feed disabled, and the protected workflow anonymously re-downloaded and verified its DMG, ZIP, dSYM ZIP, release manifest, and checksums. Users of 0.1.1 must install it manually once. Ushot 0.1.3 (build 4) is the planned second manual transition that adds authenticated raw-feed validation; it has not been published. Builds taken directly from `main` remain development artifacts rather than a supported distribution channel.
 
 Download [Ushot-0.1.2-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.2/Ushot-0.1.2-arm64.dmg) from the immutable [Ushot v0.1.2 Release](https://github.com/isCheneycc/ushot/releases/tag/v0.1.2) and install it manually. Public artifacts are intentionally ad-hoc signed, have no Developer ID signature or Apple notarization, and are not sandboxed.
 
@@ -99,14 +99,14 @@ The app bundle includes the applicable [third-party license notices](UshotApp/Re
 
 Update checks are manual only. Ushot does not check at launch or on a schedule, download automatically, or submit a system profile.
 
-The 0.1.1 client remains pinned to the legacy `/updates/appcast.xml` endpoint. That endpoint will stay permanently unavailable, so 0.1.1 can never self-update; install 0.1.2 manually once from its official GitHub Release. The 0.1.2 client moves to the new hardened feed, but **Check for Updates…** will still report a visible feed error until the separate 0.1.3 update gate passes.
+The 0.1.1 client remains pinned to the legacy `/updates/appcast.xml` endpoint. That endpoint will stay permanently unavailable, so 0.1.1 can never self-update; install 0.1.2 manually once from its official GitHub Release. The 0.1.2 client points at the new v1 endpoint, but parsed Sparkle items cannot prove that signed XML contained no duplicate or wrong-namespace metadata. The endpoint therefore stays absent, and 0.1.3 must also be installed manually after it is actually published. **Check for Updates…** continues to report a visible feed error during both transition stages.
 
 - Ushot 0.1.2 and later are pinned to `https://ischeneycc.github.io/ushot/updates/v1/appcast.xml`; the legacy endpoint remains HTTP 404.
 - Restricted-Markdown release notes are embedded in that signed feed, so showing them does not make a detached notes request.
 - Accepted archives may come only from the official GitHub Release download path.
-- The hardened runtime requires an exact match between the appcast and the extracted app's display/build versions, and requires every archive to pass EdDSA even if its application code signature matches. The complete appcast is signed separately. HTTPS or a matching checksum is not a substitute.
+- The hardened runtime requires an exact match between the appcast and the extracted app's display/build versions, and requires every archive to pass EdDSA even if its application code signature matches. Starting with 0.1.3, the exact authenticated XML is also validated before Sparkle parses items, rejecting duplicate, misplaced, wrong-namespace, DTD and entity input that parsed item objects could conceal. The complete appcast is signed separately. HTTPS or a matching checksum is not a substitute.
 
-The first permitted feed item is Ushot 0.1.3 (build 4). It will not be deployed until the 0.1.2 → 0.1.3 clean-account replacement, tamper rejection, exact-version-mismatch and EdDSA key-recovery matrix has recorded passing evidence. The hardened runtime source, a successful build, or a downloadable GitHub Release is not by itself proof that those gates passed. Apple Developer Program membership is not required for this ad-hoc GitHub distribution; Developer ID and notarization remain a separate future track.
+The first permitted feed item and online update is Ushot 0.1.4 (build 5). It will not be deployed until the 0.1.3 → 0.1.4 clean-account replacement, authenticated-XML rejection, tamper rejection, exact-version-mismatch and EdDSA key-recovery matrix has recorded passing evidence. Ushot 0.1.3 is not yet published, and the hardened runtime source, a successful build, or a downloadable GitHub Release is not by itself proof that those gates passed. Apple Developer Program membership is not required for this ad-hoc GitHub distribution; Developer ID and notarization remain a separate future track.
 
 See [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), and [the release guide](docs/RELEASING.md) for the complete trust model and release procedure.
 

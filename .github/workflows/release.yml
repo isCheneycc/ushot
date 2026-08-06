@@ -147,11 +147,13 @@ jobs:
           echo "tag_object_sha=$LOCAL_TAG_OBJECT" >> "$GITHUB_OUTPUT"
           echo "ci_run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
 
-  build-and-sign:
-    name: Build, sign and preserve immutable artifacts
+  build-artifacts:
+    name: Build and preserve immutable release artifacts
     needs: preflight
+    outputs:
+      release_assets_artifact_id: ${{ steps.preserve_release_assets.outputs.artifact-id }}
+      release_assets_artifact_digest: ${{ steps.preserve_release_assets.outputs.artifact-digest }}
     runs-on: macos-15
-    environment: release
     permissions:
       contents: read
     env:
@@ -161,9 +163,6 @@ jobs:
       RELEASE_COMMIT: ${{ needs.preflight.outputs.commit_sha }}
       RELEASE_TAG_OBJECT: ${{ needs.preflight.outputs.tag_object_sha }}
       ARTIFACTS_DIRECTORY: ${{ github.workspace }}/build/release/public-adhoc/artifacts
-      PAGES_DIRECTORY: ${{ github.workspace }}/build/pages
-      CURRENT_APPCAST: ${{ github.workspace }}/build/current-appcast.xml
-      CURRENT_APPCAST_KIND: ${{ github.workspace }}/build/current-appcast.kind
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -223,51 +222,6 @@ jobs:
             --build-number "$BUILD_NUMBER" \
             --tag "$RELEASE_TAG"
 
-      - name: Fetch checksum-pinned Sparkle tools and the current production feed
-        if: ${{ inputs.publish_update_feed }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          scripts/download-sparkle-tools.sh >/dev/null
-          scripts/fetch-current-appcast.sh \
-            --output "$CURRENT_APPCAST" \
-            --kind-output "$CURRENT_APPCAST_KIND" \
-            --version "$VERSION" \
-            --build-number "$BUILD_NUMBER"
-
-      - name: Sign and validate the update feed without a repository write token
-        if: ${{ inputs.publish_update_feed }}
-        shell: bash
-        env:
-          SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          source scripts/release-common.sh
-          DERIVED_SPARKLE_PUBLIC_KEY="$(
-            printf '%s' "$SPARKLE_ED25519_PRIVATE_KEY" | \
-              env -u SPARKLE_ED25519_PRIVATE_KEY scripts/derive-sparkle-public-key.swift
-          )"
-          [[ "$DERIVED_SPARKLE_PUBLIC_KEY" == "$USHOT_SPARKLE_PUBLIC_ED_KEY" ]] || {
-            echo 'error: protected release Sparkle private key does not match the public key embedded in Ushot.' >&2
-            exit 1
-          }
-          unset DERIVED_SPARKLE_PUBLIC_KEY
-          echo 'release: verified protected Sparkle private-key identity.'
-          SPARKLE_BIN="$(scripts/download-sparkle-tools.sh | tail -n 1)"
-          printf '%s' "$SPARKLE_ED25519_PRIVATE_KEY" | \
-            env -u SPARKLE_ED25519_PRIVATE_KEY scripts/generate-appcast.sh \
-              --version "$VERSION" \
-              --build-number "$BUILD_NUMBER" \
-              --tag "$RELEASE_TAG" \
-              --archive "$ARTIFACTS_DIRECTORY/Ushot-$VERSION-arm64.zip" \
-              --release-notes "updates/release-notes/$VERSION.md" \
-              --existing-appcast "$CURRENT_APPCAST" \
-              --existing-appcast-kind "$(<"$CURRENT_APPCAST_KIND")" \
-              --site-directory "$PAGES_DIRECTORY" \
-              --sparkle-bin "$SPARKLE_BIN" \
-              --key-source stdin
-          unset SPARKLE_ED25519_PRIVATE_KEY
-
       - name: Revalidate the exact release asset set
         shell: bash
         run: |
@@ -279,33 +233,11 @@ jobs:
             --build-number "$BUILD_NUMBER" \
             --tag "$RELEASE_TAG"
 
-      - name: Revalidate the signed Pages payload
-        if: ${{ inputs.publish_update_feed }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          source scripts/release-common.sh
-          [[ -s "$PAGES_DIRECTORY/$USHOT_APPCAST_RELATIVE_PATH" ]] || {
-            echo 'error: signed Pages appcast is missing.' >&2
-            exit 1
-          }
-          [[ ! -e "$PAGES_DIRECTORY/$USHOT_LEGACY_APPCAST_RELATIVE_PATH" ]] || {
-            echo 'error: legacy appcast path must remain absent from the Pages payload.' >&2
-            exit 1
-          }
-          [[ "$(find "$PAGES_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == "0" ]] || {
-            echo 'error: Pages payload must not contain symbolic links.' >&2
-            exit 1
-          }
-          [[ "$(find "$PAGES_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == "1" ]] || {
-            echo 'error: Pages payload must contain only the signed versioned appcast.' >&2
-            exit 1
-          }
-
-      - name: Preserve exact release assets for write-only publication
+      - id: preserve_release_assets
+        name: Preserve exact release assets for write-only publication
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ushot-release-assets
+          name: ushot-release-assets-${{ github.run_attempt }}
           path: |
             ${{ env.ARTIFACTS_DIRECTORY }}/Ushot-${{ env.VERSION }}-arm64.dmg
             ${{ env.ARTIFACTS_DIRECTORY }}/Ushot-${{ env.VERSION }}-arm64.zip
@@ -314,21 +246,1236 @@ jobs:
             ${{ env.ARTIFACTS_DIRECTORY }}/SHA256SUMS.txt
           if-no-files-found: error
           compression-level: 0
-          overwrite: true
           retention-days: 30
 
-      - name: Preserve the signed Pages payload for last-step deployment
+  prepare-signing-inputs:
+    name: Prepare opaque, bounded signing inputs
+    needs: preflight
+    outputs:
+      signing_inputs_artifact_id: ${{ steps.preserve_signing_inputs.outputs.artifact-id }}
+      signing_inputs_artifact_digest: ${{ steps.preserve_signing_inputs.outputs.artifact-digest }}
+    runs-on: macos-15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      BUILD_NUMBER: ${{ needs.preflight.outputs.build_number }}
+      RELEASE_COMMIT: ${{ needs.preflight.outputs.commit_sha }}
+      SIGNING_INPUTS_DIRECTORY: ${{ github.workspace }}/build/signing-inputs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fetch bounded opaque feed bytes and the official Sparkle archive
         if: ${{ inputs.publish_update_feed }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/release-common.sh
+          release_validate_feed_release_identity "$VERSION" "$BUILD_NUMBER"
+          EXPECTED_SPARKLE_VERSION='2.9.5'
+          EXPECTED_SPARKLE_ARCHIVE_SHA256='015336b601493e05c237964954bff6191370003d94edefe663724c88840d73cc'
+          EXPECTED_AUTHENTICATED_APPCAST_LIMIT_BYTES='1048576'
+          EXPECTED_SIGNED_APPCAST_TRAILER_ALLOWANCE_BYTES='512'
+          EXPECTED_SIGNED_APPCAST_LIMIT_BYTES='1049088'
+          [[ "$USHOT_SPARKLE_VERSION" == "$EXPECTED_SPARKLE_VERSION" ]] || {
+            echo 'error: repository Sparkle version no longer matches the reviewed signing-input version.' >&2
+            exit 1
+          }
+          [[ "$USHOT_SPARKLE_ARCHIVE_SHA256" == "$EXPECTED_SPARKLE_ARCHIVE_SHA256" ]] || {
+            echo 'error: repository Sparkle checksum no longer matches the reviewed signing-input checksum.' >&2
+            exit 1
+          }
+          [[ "$USHOT_MAX_AUTHENTICATED_APPCAST_BYTES" == "$EXPECTED_AUTHENTICATED_APPCAST_LIMIT_BYTES" \
+              && "$USHOT_SIGNED_APPCAST_TRAILER_ALLOWANCE_BYTES" == "$EXPECTED_SIGNED_APPCAST_TRAILER_ALLOWANCE_BYTES" \
+              && "$USHOT_MAX_SIGNED_APPCAST_BYTES" == "$EXPECTED_SIGNED_APPCAST_LIMIT_BYTES" \
+              && "$((USHOT_MAX_AUTHENTICATED_APPCAST_BYTES + USHOT_SIGNED_APPCAST_TRAILER_ALLOWANCE_BYTES))" == "$USHOT_MAX_SIGNED_APPCAST_BYTES" ]] || {
+            echo 'error: repository signed-appcast size constants no longer match the reviewed signing-input bounds.' >&2
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_COMMIT" ]] || {
+            echo 'error: signing-input checkout does not match the admitted release commit.' >&2
+            exit 1
+          }
+
+          CURRENT_APPCAST_LIMIT_BYTES="$EXPECTED_SIGNED_APPCAST_LIMIT_BYTES"
+          SPARKLE_ARCHIVE_LIMIT_BYTES=67108864
+          CURRENT_APPCAST="$SIGNING_INPUTS_DIRECTORY/current-appcast.xml"
+          CURRENT_APPCAST_KIND="$SIGNING_INPUTS_DIRECTORY/current-appcast.kind"
+          SPARKLE_ARCHIVE="$SIGNING_INPUTS_DIRECTORY/Sparkle-$EXPECTED_SPARKLE_VERSION.tar.xz"
+          APPCAST_RESPONSE="$(mktemp "$RUNNER_TEMP/ushot-current-appcast.XXXXXX")"
+          cleanup_signing_input_fetch() {
+            if [[ -n "$APPCAST_RESPONSE" ]]; then
+              rm -f -- "$APPCAST_RESPONSE"
+            fi
+          }
+          trap cleanup_signing_input_fetch EXIT
+          [[ ! -e "$SIGNING_INPUTS_DIRECTORY" \
+              && ! -L "$SIGNING_INPUTS_DIRECTORY" ]] || {
+            echo 'error: signing-input staging path was not fresh.' >&2
+            exit 1
+          }
+          mkdir -p "$SIGNING_INPUTS_DIRECTORY"
+
+          HTTP_STATUS="$(curl --silent --show-error \
+            --proto '=https' \
+            --tlsv1.2 \
+            --connect-timeout 15 \
+            --max-time 60 \
+            --max-filesize "$CURRENT_APPCAST_LIMIT_BYTES" \
+            --user-agent 'UshotReleasePipeline/1' \
+            --output "$APPCAST_RESPONSE" \
+            --write-out '%{http_code}' \
+            "$USHOT_APPCAST_URL")"
+          case "$HTTP_STATUS" in
+            200)
+              [[ -s "$APPCAST_RESPONSE" ]] || {
+                echo 'error: production appcast returned an empty HTTP 200 response.' >&2
+                exit 1
+              }
+              [[ "$(stat -f '%z' "$APPCAST_RESPONSE")" -le "$CURRENT_APPCAST_LIMIT_BYTES" ]] || {
+                echo 'error: production appcast exceeded the bounded signing-input size.' >&2
+                exit 1
+              }
+              mv "$APPCAST_RESPONSE" "$CURRENT_APPCAST"
+              APPCAST_RESPONSE=''
+              printf 'signed\n' > "$CURRENT_APPCAST_KIND"
+              echo 'release: preserved bounded opaque production-appcast bytes for authenticated validation on the signing runner.'
+              ;;
+            404)
+              release_is_first_feed_identity "$VERSION" "$BUILD_NUMBER" || {
+                echo "error: production appcast returned HTTP 404 for $VERSION (build $BUILD_NUMBER); refusing to reset signed history." >&2
+                exit 1
+              }
+              [[ -s "$USHOT_APPCAST_RELATIVE_PATH" ]] || {
+                echo 'error: trusted zero-item seed appcast is missing.' >&2
+                exit 1
+              }
+              ditto "$USHOT_APPCAST_RELATIVE_PATH" "$CURRENT_APPCAST"
+              cmp "$USHOT_APPCAST_RELATIVE_PATH" "$CURRENT_APPCAST" || {
+                echo 'error: copied first-feed seed differs from its trusted repository source.' >&2
+                exit 1
+              }
+              printf 'seed\n' > "$CURRENT_APPCAST_KIND"
+              echo 'release: production appcast is absent for the exact first-feed identity; preserved the byte-identical trusted seed.'
+              ;;
+            *)
+              echo "error: could not fetch the production appcast: HTTP $HTTP_STATUS" >&2
+              exit 1
+              ;;
+          esac
+
+          curl --fail --silent --show-error --location \
+            --proto '=https' \
+            --proto-redir '=https' \
+            --tlsv1.2 \
+            --connect-timeout 15 \
+            --max-time 180 \
+            --max-filesize "$SPARKLE_ARCHIVE_LIMIT_BYTES" \
+            "https://github.com/sparkle-project/Sparkle/releases/download/$EXPECTED_SPARKLE_VERSION/Sparkle-$EXPECTED_SPARKLE_VERSION.tar.xz" \
+            --output "$SPARKLE_ARCHIVE"
+          [[ -s "$SPARKLE_ARCHIVE" ]] || {
+            echo 'error: official Sparkle archive is missing or empty.' >&2
+            exit 1
+          }
+          [[ "$(stat -f '%z' "$SPARKLE_ARCHIVE")" -le "$SPARKLE_ARCHIVE_LIMIT_BYTES" ]] || {
+            echo 'error: official Sparkle archive exceeded the bounded signing-input size.' >&2
+            exit 1
+          }
+          [[ "$(release_sha256 "$SPARKLE_ARCHIVE")" == "$EXPECTED_SPARKLE_ARCHIVE_SHA256" ]] || {
+            echo 'error: official Sparkle archive checksum mismatch while preparing signing inputs.' >&2
+            exit 1
+          }
+
+      - name: Create the feed-disabled signing sentinel
+        if: ${{ ! inputs.publish_update_feed }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ ! -e "$SIGNING_INPUTS_DIRECTORY" \
+              && ! -L "$SIGNING_INPUTS_DIRECTORY" ]] || {
+            echo 'error: feed-disabled signing-input staging path was not fresh.' >&2
+            exit 1
+          }
+          mkdir -p "$SIGNING_INPUTS_DIRECTORY"
+          printf 'update-feed-publication-disabled\n' \
+            > "$SIGNING_INPUTS_DIRECTORY/publication-disabled.sentinel"
+
+      - name: Validate the exact credential-free signing-input allow-list
+        shell: bash
+        env:
+          PUBLISH_UPDATE_FEED: ${{ inputs.publish_update_feed }}
+        run: |
+          set -euo pipefail
+          [[ -d "$SIGNING_INPUTS_DIRECTORY" \
+              && ! -L "$SIGNING_INPUTS_DIRECTORY" ]] || {
+            echo 'error: signing-input artifact root is missing or symbolic.' >&2
+            exit 1
+          }
+          shopt -s nullglob dotglob
+          SIGNING_INPUT_ENTRIES=("$SIGNING_INPUTS_DIRECTORY"/*)
+          if [[ "$PUBLISH_UPDATE_FEED" == 'true' ]]; then
+            [[ "${#SIGNING_INPUT_ENTRIES[@]}" == '3' ]] || {
+              echo 'error: feed-enabled signing inputs must contain exactly three files.' >&2
+              exit 1
+            }
+            for expected_signing_input in \
+              current-appcast.xml \
+              current-appcast.kind \
+              Sparkle-2.9.5.tar.xz
+            do
+              expected_signing_input="$SIGNING_INPUTS_DIRECTORY/$expected_signing_input"
+              [[ -f "$expected_signing_input" \
+                  && ! -L "$expected_signing_input" \
+                  && -s "$expected_signing_input" ]] || {
+                echo "error: allow-listed signing input is missing, empty or symbolic: $expected_signing_input" >&2
+                exit 1
+              }
+            done
+          else
+            SENTINEL_VALUE='update-feed-publication-disabled'
+            SENTINEL_PATH="$SIGNING_INPUTS_DIRECTORY/publication-disabled.sentinel"
+            [[ "${#SIGNING_INPUT_ENTRIES[@]}" == '1' \
+                && -f "$SENTINEL_PATH" \
+                && ! -L "$SENTINEL_PATH" \
+                && "$(<"$SENTINEL_PATH")" == "$SENTINEL_VALUE" \
+                && "$(stat -f '%z' "$SENTINEL_PATH")" == "$(( ${#SENTINEL_VALUE} + 1 ))" ]] || {
+              echo 'error: feed-disabled signing inputs must contain only the canonical safe sentinel.' >&2
+              exit 1
+            }
+          fi
+
+      - id: preserve_signing_inputs
+        name: Preserve signing inputs without credentials
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ushot-signing-inputs-${{ github.run_attempt }}
+          path: ${{ env.SIGNING_INPUTS_DIRECTORY }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  approve-release:
+    name: Approve release publication without secret access
+    needs:
+      - preflight
+      - build-artifacts
+      - prepare-signing-inputs
+    runs-on: macos-15
+    environment: release
+    permissions: {}
+    steps:
+      - name: Record protected publication approval without repository or secret access
+        shell: bash
+        env:
+          PUBLICATION_MODE: ${{ inputs.publish_update_feed }}
+        run: |
+          set -euo pipefail
+          case "$PUBLICATION_MODE" in
+            true|false) ;;
+            *)
+              echo 'error: protected publication approval received an invalid mode.' >&2
+              exit 1
+              ;;
+          esac
+          echo "release: protected publication approved for publish_update_feed=$PUBLICATION_MODE without checking out repository code or referencing a secret."
+
+  build-authenticated-appcast-validator:
+    name: Build reviewed signing helpers without credentials
+    if: ${{ inputs.publish_update_feed }}
+    needs: preflight
+    outputs:
+      validator_artifact_id: ${{ steps.preserve_validator.outputs.artifact-id }}
+      validator_artifact_digest: ${{ steps.preserve_validator.outputs.artifact-digest }}
+      validator_artifact_name: ${{ steps.build_validator.outputs.artifact_name }}
+      validator_binary_sha256: ${{ steps.build_validator.outputs.binary_sha256 }}
+      public_key_deriver_binary_sha256: ${{ steps.build_validator.outputs.public_key_deriver_binary_sha256 }}
+    runs-on: macos-15
+    permissions:
+      contents: read
+    env:
+      RELEASE_COMMIT: ${{ needs.preflight.outputs.commit_sha }}
+      VALIDATOR_DIRECTORY: ${{ github.workspace }}/build/authenticated-appcast-validator
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - id: build_validator
+        name: Compile and bind the app-identical authenticated XML policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_COMMIT" ]] || {
+            echo 'error: validator checkout does not match the admitted release commit.' >&2
+            exit 1
+          }
+          PRODUCT_IDENTITY_SOURCE='UshotCore/Sources/UshotCore/Product/ProductIdentity.swift'
+          UPDATE_CHECKING_SOURCE='UshotCore/Sources/UshotCore/Update/UpdateChecking.swift'
+          SIGNED_APPCAST_POLICY_SOURCE='UshotCore/Sources/UshotCore/Update/SignedAppcastPolicy.swift'
+          VALIDATOR_MAIN_SOURCE='Tools/AuthenticatedAppcastValidator/main.swift'
+          PUBLIC_KEY_DERIVER_SOURCE='scripts/derive-sparkle-public-key.swift'
+          EXPECTED_PRODUCT_IDENTITY_SOURCE_SHA256='08d194b45558315eac33ee62c2852de9ca9f10236ce4c1ac792aa8ca78065389'
+          EXPECTED_UPDATE_CHECKING_SOURCE_SHA256='512a3167383eb0e2834557516a71a04454b1c8f124796ebd1058716e968069ba'
+          EXPECTED_SIGNED_APPCAST_POLICY_SOURCE_SHA256='e51074a3314b696fb9acac25182e3c08f2d5509e6e79974bc1813f311105f3ed'
+          EXPECTED_VALIDATOR_MAIN_SOURCE_SHA256='8268ea1712b5cba7cd6907c8f2743b3c19e1b0455b60b2ea4e5f830ba966d6b8'
+          EXPECTED_PUBLIC_KEY_DERIVER_SOURCE_SHA256='41200c69b9ae40a1a4ae4fae66b376060fdaecad0fccb51a1c0e861b5591e2dd'
+          verify_reviewed_helper_source() {
+            local source_path="$1"
+            local expected_sha256="$2"
+            local digest_output
+            local actual_sha256
+
+            [[ -f "$source_path" && ! -L "$source_path" ]] || {
+              echo "error: reviewed signing-helper source is missing or symbolic: $source_path" >&2
+              exit 1
+            }
+            digest_output="$(/usr/bin/shasum -a 256 "$source_path")"
+            actual_sha256="${digest_output%% *}"
+            [[ "$actual_sha256" == "$expected_sha256" ]] || {
+              echo "error: signing-helper source differs from its reviewed implementation: $source_path" >&2
+              exit 1
+            }
+          }
+          verify_reviewed_helper_source \
+            "$PRODUCT_IDENTITY_SOURCE" \
+            "$EXPECTED_PRODUCT_IDENTITY_SOURCE_SHA256"
+          verify_reviewed_helper_source \
+            "$UPDATE_CHECKING_SOURCE" \
+            "$EXPECTED_UPDATE_CHECKING_SOURCE_SHA256"
+          verify_reviewed_helper_source \
+            "$SIGNED_APPCAST_POLICY_SOURCE" \
+            "$EXPECTED_SIGNED_APPCAST_POLICY_SOURCE_SHA256"
+          verify_reviewed_helper_source \
+            "$VALIDATOR_MAIN_SOURCE" \
+            "$EXPECTED_VALIDATOR_MAIN_SOURCE_SHA256"
+          verify_reviewed_helper_source \
+            "$PUBLIC_KEY_DERIVER_SOURCE" \
+            "$EXPECTED_PUBLIC_KEY_DERIVER_SOURCE_SHA256"
+
+          [[ ! -e "$VALIDATOR_DIRECTORY" && ! -L "$VALIDATOR_DIRECTORY" ]] || {
+            echo 'error: authenticated-appcast validator staging directory was not fresh.' >&2
+            exit 1
+          }
+          mkdir -p "$VALIDATOR_DIRECTORY"
+          VALIDATOR_DIRECTORY="$(cd "$VALIDATOR_DIRECTORY" && pwd -P)"
+          AUTHENTICATED_APPCAST_VALIDATOR="$VALIDATOR_DIRECTORY/AuthenticatedAppcastValidator"
+          PUBLIC_KEY_DERIVER="$VALIDATOR_DIRECTORY/SparklePublicKeyDeriver"
+          /usr/bin/xcrun swiftc \
+            -parse-as-library \
+            -swift-version 5 \
+            -O \
+            "$PRODUCT_IDENTITY_SOURCE" \
+            "$UPDATE_CHECKING_SOURCE" \
+            "$SIGNED_APPCAST_POLICY_SOURCE" \
+            "$VALIDATOR_MAIN_SOURCE" \
+            -o "$AUTHENTICATED_APPCAST_VALIDATOR"
+          /usr/bin/xcrun swiftc \
+            -swift-version 5 \
+            -O \
+            "$PUBLIC_KEY_DERIVER_SOURCE" \
+            -o "$PUBLIC_KEY_DERIVER"
+          [[ -f "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              && ! -L "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              && -x "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              && -f "$PUBLIC_KEY_DERIVER" \
+              && ! -L "$PUBLIC_KEY_DERIVER" \
+              && -x "$PUBLIC_KEY_DERIVER" \
+              && "$(find "$VALIDATOR_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == '0' \
+              && "$(find "$VALIDATOR_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == '2' ]] || {
+            echo 'error: Swift did not produce the exact two-file reviewed signing-helper payload.' >&2
+            exit 1
+          }
+          /usr/bin/codesign --force --sign - "$AUTHENTICATED_APPCAST_VALIDATOR"
+          /usr/bin/codesign --force --sign - "$PUBLIC_KEY_DERIVER"
+          /usr/bin/codesign --verify --strict --verbose=2 "$AUTHENTICATED_APPCAST_VALIDATOR"
+          /usr/bin/codesign --verify --strict --verbose=2 "$PUBLIC_KEY_DERIVER"
+          VALIDATOR_DIGEST_OUTPUT="$(/usr/bin/shasum -a 256 "$AUTHENTICATED_APPCAST_VALIDATOR")"
+          AUTHENTICATED_APPCAST_VALIDATOR_SHA256="${VALIDATOR_DIGEST_OUTPUT%% *}"
+          PUBLIC_KEY_DERIVER_DIGEST_OUTPUT="$(/usr/bin/shasum -a 256 "$PUBLIC_KEY_DERIVER")"
+          PUBLIC_KEY_DERIVER_SHA256="${PUBLIC_KEY_DERIVER_DIGEST_OUTPUT%% *}"
+          VALIDATOR_ARTIFACT_NAME="ushot-reviewed-signing-helpers-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          [[ "$AUTHENTICATED_APPCAST_VALIDATOR_SHA256" =~ ^[0-9a-f]{64}$ \
+              && "$PUBLIC_KEY_DERIVER_SHA256" =~ ^[0-9a-f]{64}$ \
+              && "$VALIDATOR_ARTIFACT_NAME" =~ ^ushot-reviewed-signing-helpers-[1-9][0-9]*-[1-9][0-9]*$ ]] || {
+            echo 'error: could not independently bind both reviewed signing-helper executables.' >&2
+            exit 1
+          }
+          printf 'binary_sha256=%s\n' "$AUTHENTICATED_APPCAST_VALIDATOR_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'public_key_deriver_binary_sha256=%s\n' "$PUBLIC_KEY_DERIVER_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=%s\n' "$VALIDATOR_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo 'release: built, signed and independently checksum-bound both reviewed signing helpers on a credential-free runner.'
+
+      - id: preserve_validator
+        name: Preserve the reviewed signing helpers for the signing boundary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.build_validator.outputs.artifact_name }}
+          path: ${{ env.VALIDATOR_DIRECTORY }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  sign-update-feed:
+    name: Approve and sign update-feed publication
+    if: ${{ inputs.publish_update_feed }}
+    needs:
+      - preflight
+      - build-artifacts
+      - prepare-signing-inputs
+      - approve-release
+      - build-authenticated-appcast-validator
+    outputs:
+      signed_appcast_artifact_id: ${{ steps.preserve_signed_appcast.outputs.artifact-id }}
+      signed_appcast_artifact_digest: ${{ steps.preserve_signed_appcast.outputs.artifact-digest }}
+      signed_appcast_artifact_name: ${{ steps.sign_feed.outputs.signed_appcast_artifact_name }}
+      signed_appcast_sha256: ${{ steps.sign_feed.outputs.signed_appcast_sha256 }}
+      signed_appcast_size: ${{ steps.sign_feed.outputs.signed_appcast_size }}
+    runs-on: macos-15
+    environment: update-feed-signing
+    permissions:
+      actions: read
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      BUILD_NUMBER: ${{ needs.preflight.outputs.build_number }}
+      RELEASE_COMMIT: ${{ needs.preflight.outputs.commit_sha }}
+      ARTIFACTS_DIRECTORY: ${{ github.workspace }}/build/signing-release-assets
+      SIGNING_INPUTS_DIRECTORY: ${{ github.workspace }}/build/signing-inputs
+      VALIDATOR_DIRECTORY: ${{ github.workspace }}/build/authenticated-appcast-validator
+      PAGES_DIRECTORY: ${{ github.workspace }}/build/pages
+      EXPECTED_RELEASE_ASSETS_ARTIFACT_ID: ${{ needs.build-artifacts.outputs.release_assets_artifact_id }}
+      EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST: ${{ needs.build-artifacts.outputs.release_assets_artifact_digest }}
+      EXPECTED_SIGNING_INPUTS_ARTIFACT_ID: ${{ needs.prepare-signing-inputs.outputs.signing_inputs_artifact_id }}
+      EXPECTED_SIGNING_INPUTS_ARTIFACT_DIGEST: ${{ needs.prepare-signing-inputs.outputs.signing_inputs_artifact_digest }}
+      EXPECTED_VALIDATOR_ARTIFACT_ID: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_id }}
+      EXPECTED_VALIDATOR_ARTIFACT_DIGEST: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_digest }}
+      EXPECTED_VALIDATOR_ARTIFACT_NAME: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_name }}
+      AUTHENTICATED_APPCAST_VALIDATOR_SHA256: ${{ needs.build-authenticated-appcast-validator.outputs.validator_binary_sha256 }}
+      AUTHENTICATED_APPCAST_VALIDATOR: ${{ github.workspace }}/build/authenticated-appcast-validator/AuthenticatedAppcastValidator
+      PUBLIC_KEY_DERIVER_SHA256: ${{ needs.build-authenticated-appcast-validator.outputs.public_key_deriver_binary_sha256 }}
+      PUBLIC_KEY_DERIVER: ${{ github.workspace }}/build/authenticated-appcast-validator/SparklePublicKeyDeriver
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Recover opaque signing inputs on the fresh signing runner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare-signing-inputs.outputs.signing_inputs_artifact_id }}
+          path: ${{ env.SIGNING_INPUTS_DIRECTORY }}
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Recover release assets on the fresh signing runner
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-artifacts.outputs.release_assets_artifact_id }}
+          path: ${{ env.ARTIFACTS_DIRECTORY }}
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Recover the exact reviewed signing helpers built without credentials
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_id }}
+          path: ${{ env.VALIDATOR_DIRECTORY }}
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Bind immutable producer artifacts without the signing key
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_RELEASE_ASSETS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_SIGNING_INPUTS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_SIGNING_INPUTS_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_VALIDATOR_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_VALIDATOR_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_VALIDATOR_ARTIFACT_NAME" =~ ^ushot-reviewed-signing-helpers-[1-9][0-9]*-[1-9][0-9]*$ \
+              && "$AUTHENTICATED_APPCAST_VALIDATOR_SHA256" =~ ^[0-9a-f]{64}$ \
+              && "$PUBLIC_KEY_DERIVER_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo 'error: credential-free producers did not expose canonical immutable-artifact identities.' >&2
+            exit 1
+          }
+          verify_current_run_artifact() {
+            local artifact_id="$1"
+            local artifact_digest="$2"
+            local artifact_name="$3"
+            local label="$4"
+            local artifact_json="$RUNNER_TEMP/$label-artifact.json"
+            local rest_digest="sha256:${artifact_digest#sha256:}"
+
+            gh api \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" \
+              > "$artifact_json"
+            jq -e \
+              --argjson artifact_id "$artifact_id" \
+              --argjson run_id "$GITHUB_RUN_ID" \
+              --arg artifact_digest "$rest_digest" \
+              --arg artifact_name "$artifact_name" \
+              '.id == $artifact_id and .name == $artifact_name and .digest == $artifact_digest and .expired == false and .workflow_run.id == $run_id' \
+              "$artifact_json" >/dev/null || {
+                echo "error: $label artifact metadata does not match its credential-free producer." >&2
+                exit 1
+              }
+          }
+          verify_current_run_artifact \
+            "$EXPECTED_RELEASE_ASSETS_ARTIFACT_ID" \
+            "$EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST" \
+            "ushot-release-assets-$GITHUB_RUN_ATTEMPT" \
+            release-assets
+          verify_current_run_artifact \
+            "$EXPECTED_SIGNING_INPUTS_ARTIFACT_ID" \
+            "$EXPECTED_SIGNING_INPUTS_ARTIFACT_DIGEST" \
+            "ushot-signing-inputs-$GITHUB_RUN_ATTEMPT" \
+            signing-inputs
+          verify_current_run_artifact \
+            "$EXPECTED_VALIDATOR_ARTIFACT_ID" \
+            "$EXPECTED_VALIDATOR_ARTIFACT_DIGEST" \
+            "$EXPECTED_VALIDATOR_ARTIFACT_NAME" \
+            authenticated-appcast-validator
+
+          [[ -d "$VALIDATOR_DIRECTORY" \
+              && ! -L "$VALIDATOR_DIRECTORY" \
+              && "$AUTHENTICATED_APPCAST_VALIDATOR" == "$VALIDATOR_DIRECTORY/AuthenticatedAppcastValidator" \
+              && "$PUBLIC_KEY_DERIVER" == "$VALIDATOR_DIRECTORY/SparklePublicKeyDeriver" \
+              && -f "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              && ! -L "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              && -f "$PUBLIC_KEY_DERIVER" \
+              && ! -L "$PUBLIC_KEY_DERIVER" \
+              && "$(find "$VALIDATOR_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == '0' \
+              && "$(find "$VALIDATOR_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == '2' ]] || {
+            echo 'error: recovered reviewed signing-helper artifact has an unexpected layout.' >&2
+            exit 1
+          }
+          VALIDATOR_DIGEST_OUTPUT="$(/usr/bin/shasum -a 256 "$AUTHENTICATED_APPCAST_VALIDATOR")"
+          ACTUAL_VALIDATOR_SHA256="${VALIDATOR_DIGEST_OUTPUT%% *}"
+          unset VALIDATOR_DIGEST_OUTPUT
+          [[ "$ACTUAL_VALIDATOR_SHA256" == "$AUTHENTICATED_APPCAST_VALIDATOR_SHA256" ]] || {
+            echo 'error: recovered authenticated-appcast validator failed its independent binary checksum.' >&2
+            exit 1
+          }
+          unset ACTUAL_VALIDATOR_SHA256
+          PUBLIC_KEY_DERIVER_DIGEST_OUTPUT="$(/usr/bin/shasum -a 256 "$PUBLIC_KEY_DERIVER")"
+          ACTUAL_PUBLIC_KEY_DERIVER_SHA256="${PUBLIC_KEY_DERIVER_DIGEST_OUTPUT%% *}"
+          unset PUBLIC_KEY_DERIVER_DIGEST_OUTPUT
+          [[ "$ACTUAL_PUBLIC_KEY_DERIVER_SHA256" == "$PUBLIC_KEY_DERIVER_SHA256" ]] || {
+            echo 'error: recovered public-key deriver failed its independent binary checksum.' >&2
+            exit 1
+          }
+          unset ACTUAL_PUBLIC_KEY_DERIVER_SHA256
+          /usr/bin/codesign --verify --strict --verbose=2 "$AUTHENTICATED_APPCAST_VALIDATOR" || {
+            echo 'error: recovered authenticated-appcast validator failed code-signature validation.' >&2
+            exit 1
+          }
+          /usr/bin/codesign --verify --strict --verbose=2 "$PUBLIC_KEY_DERIVER" || {
+            echo 'error: recovered public-key deriver failed code-signature validation.' >&2
+            exit 1
+          }
+          /bin/chmod 500 "$AUTHENTICATED_APPCAST_VALIDATOR"
+          /bin/chmod 500 "$PUBLIC_KEY_DERIVER"
+          [[ -x "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              && -x "$PUBLIC_KEY_DERIVER" ]] || {
+            echo 'error: recovered reviewed signing helpers could not be made executable.' >&2
+            exit 1
+          }
+
+          DMG_NAME="Ushot-$VERSION-arm64.dmg"
+          ZIP_NAME="Ushot-$VERSION-arm64.zip"
+          DSYM_NAME="Ushot-$VERSION-arm64.dSYM.zip"
+          MANIFEST_NAME="Ushot-$VERSION-arm64.release-manifest.json"
+          CHECKSUMS_NAME='SHA256SUMS.txt'
+          for release_asset_name in \
+            "$DMG_NAME" \
+            "$ZIP_NAME" \
+            "$DSYM_NAME" \
+            "$MANIFEST_NAME" \
+            "$CHECKSUMS_NAME"
+          do
+            [[ -f "$ARTIFACTS_DIRECTORY/$release_asset_name" \
+                && ! -L "$ARTIFACTS_DIRECTORY/$release_asset_name" \
+                && -s "$ARTIFACTS_DIRECTORY/$release_asset_name" ]] || {
+              echo "error: immutable release artifact is missing, empty or symbolic: $release_asset_name" >&2
+              exit 1
+            }
+          done
+          [[ "$(find "$ARTIFACTS_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == '0' \
+              && "$(find "$ARTIFACTS_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == '5' ]] || {
+            echo 'error: immutable release artifact has an unexpected layout.' >&2
+            exit 1
+          }
+          EXPECTED_CHECKSUM_NAMES="$(printf '%s\n' "$DMG_NAME" "$ZIP_NAME" "$DSYM_NAME" "$MANIFEST_NAME" | sort)"
+          ACTUAL_CHECKSUM_NAMES="$(awk '{print $2}' "$ARTIFACTS_DIRECTORY/$CHECKSUMS_NAME" | sort)"
+          [[ "$ACTUAL_CHECKSUM_NAMES" == "$EXPECTED_CHECKSUM_NAMES" ]] || {
+            echo 'error: immutable release checksum manifest does not name the exact expected assets.' >&2
+            exit 1
+          }
+          while read -r checksum_digest checksum_name checksum_extra; do
+            [[ "$checksum_digest" =~ ^[0-9a-f]{64}$ \
+                && -n "$checksum_name" \
+                && -z "${checksum_extra:-}" ]] || {
+              echo 'error: immutable release checksum manifest contains a malformed line.' >&2
+              exit 1
+            }
+          done < "$ARTIFACTS_DIRECTORY/$CHECKSUMS_NAME"
+          (
+            cd "$ARTIFACTS_DIRECTORY"
+            /usr/bin/shasum -a 256 -c "$CHECKSUMS_NAME"
+          )
+          echo 'release: bound exact producer artifact IDs, fail-closed artifact digests, both signing-helper identities and release-asset checksums before key access.'
+
+      - id: sign_feed
+        name: Verify signing-key identity and generate the signed feed
+        shell: bash
+        env:
+          SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          SPARKLE_PRIVATE_KEY="${SPARKLE_ED25519_PRIVATE_KEY:?missing protected Sparkle private key}"
+          export -n SPARKLE_PRIVATE_KEY
+          unset SPARKLE_ED25519_PRIVATE_KEY
+          ulimit -c 0
+
+          SPARKLE_EXTRACT_ROOT=''
+          cleanup_signing_state() {
+            local status=$?
+            trap - EXIT HUP INT TERM
+            unset SPARKLE_PRIVATE_KEY DERIVED_SPARKLE_PUBLIC_KEY
+            if [[ -n "$SPARKLE_EXTRACT_ROOT" \
+                  && -d "$SPARKLE_EXTRACT_ROOT" \
+                  && ! -L "$SPARKLE_EXTRACT_ROOT" ]]; then
+              /bin/rm -rf -- "$SPARKLE_EXTRACT_ROOT"
+            fi
+            exit "$status"
+          }
+          trap cleanup_signing_state EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          RELEASE_COMMON_SCRIPT='scripts/release-common.sh'
+          GENERATE_APPCAST_SCRIPT='scripts/generate-appcast.sh'
+          EXPECTED_RELEASE_COMMON_SCRIPT_SHA256='608280e518bd010f842da932b10b050e002e9553aa21473c1c9338e8e1035684'
+          EXPECTED_GENERATE_APPCAST_SCRIPT_SHA256='36325f7edbfb3dc5b3eebf9e8aea23aa2b38dadd7c665085c125d56c0f63d3df'
+          verify_reviewed_signing_script() {
+            local script_path="$1"
+            local expected_sha256="$2"
+            local digest_output
+            local actual_sha256
+
+            [[ -f "$script_path" && ! -L "$script_path" ]] || {
+              echo "error: reviewed signing script is missing or symbolic: $script_path" >&2
+              exit 1
+            }
+            digest_output="$(/usr/bin/shasum -a 256 "$script_path")"
+            actual_sha256="${digest_output%% *}"
+            unset digest_output
+            [[ "$actual_sha256" == "$expected_sha256" ]] || {
+              echo "error: signing script differs from the reviewed implementation: $script_path" >&2
+              exit 1
+            }
+            unset actual_sha256
+          }
+          verify_reviewed_signing_script \
+            "$RELEASE_COMMON_SCRIPT" \
+            "$EXPECTED_RELEASE_COMMON_SCRIPT_SHA256"
+          verify_reviewed_signing_script \
+            "$GENERATE_APPCAST_SCRIPT" \
+            "$EXPECTED_GENERATE_APPCAST_SCRIPT_SHA256"
+
+          source "$RELEASE_COMMON_SCRIPT"
+          EXPECTED_SPARKLE_VERSION='2.9.5'
+          EXPECTED_SPARKLE_ARCHIVE_SHA256='015336b601493e05c237964954bff6191370003d94edefe663724c88840d73cc'
+          EXPECTED_AUTHENTICATED_APPCAST_LIMIT_BYTES='1048576'
+          EXPECTED_SIGNED_APPCAST_TRAILER_ALLOWANCE_BYTES='512'
+          EXPECTED_SIGNED_APPCAST_LIMIT_BYTES='1049088'
+          [[ "$EXPECTED_RELEASE_ASSETS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_SIGNING_INPUTS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_SIGNING_INPUTS_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]] || {
+            echo 'error: credential-free producers did not expose canonical immutable-artifact identities.' >&2
+            exit 1
+          }
+          [[ "$AUTHENTICATED_APPCAST_VALIDATOR" == "$VALIDATOR_DIRECTORY/AuthenticatedAppcastValidator" ]] || {
+            echo 'error: reviewed authenticated-appcast validator path does not match its isolated artifact directory.' >&2
+            exit 1
+          }
+          [[ "$PUBLIC_KEY_DERIVER" == "$VALIDATOR_DIRECTORY/SparklePublicKeyDeriver" ]] || {
+            echo 'error: reviewed public-key deriver path does not match its isolated artifact directory.' >&2
+            exit 1
+          }
+          [[ "$AUTHENTICATED_APPCAST_VALIDATOR_SHA256" =~ ^[0-9a-f]{64}$ \
+              && -f "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              && ! -L "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              && -x "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              && "$PUBLIC_KEY_DERIVER_SHA256" =~ ^[0-9a-f]{64}$ \
+              && -f "$PUBLIC_KEY_DERIVER" \
+              && ! -L "$PUBLIC_KEY_DERIVER" \
+              && -x "$PUBLIC_KEY_DERIVER" \
+              && "$(find "$VALIDATOR_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == '0' \
+              && "$(find "$VALIDATOR_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == '2' ]] || {
+            echo 'error: reviewed signing-helper identities or exact artifact layout are missing or invalid.' >&2
+            exit 1
+          }
+          CANONICAL_VALIDATOR_PATH="$(cd "$(dirname "$AUTHENTICATED_APPCAST_VALIDATOR")" && printf '%s/%s' "$(pwd -P)" "$(basename "$AUTHENTICATED_APPCAST_VALIDATOR")")"
+          CANONICAL_PUBLIC_KEY_DERIVER_PATH="$(cd "$(dirname "$PUBLIC_KEY_DERIVER")" && printf '%s/%s' "$(pwd -P)" "$(basename "$PUBLIC_KEY_DERIVER")")"
+          [[ "$CANONICAL_VALIDATOR_PATH" == "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              && "$CANONICAL_PUBLIC_KEY_DERIVER_PATH" == "$PUBLIC_KEY_DERIVER" ]] || {
+            echo 'error: reviewed signing-helper paths are not canonical.' >&2
+            exit 1
+          }
+          VALIDATOR_DIGEST_OUTPUT="$(/usr/bin/shasum -a 256 "$AUTHENTICATED_APPCAST_VALIDATOR")"
+          ACTUAL_VALIDATOR_SHA256="${VALIDATOR_DIGEST_OUTPUT%% *}"
+          PUBLIC_KEY_DERIVER_DIGEST_OUTPUT="$(/usr/bin/shasum -a 256 "$PUBLIC_KEY_DERIVER")"
+          ACTUAL_PUBLIC_KEY_DERIVER_SHA256="${PUBLIC_KEY_DERIVER_DIGEST_OUTPUT%% *}"
+          unset VALIDATOR_DIGEST_OUTPUT PUBLIC_KEY_DERIVER_DIGEST_OUTPUT \
+            CANONICAL_VALIDATOR_PATH CANONICAL_PUBLIC_KEY_DERIVER_PATH
+          [[ "$ACTUAL_VALIDATOR_SHA256" == "$AUTHENTICATED_APPCAST_VALIDATOR_SHA256" ]] || {
+            echo 'error: reviewed authenticated-appcast validator changed before key access.' >&2
+            exit 1
+          }
+          unset ACTUAL_VALIDATOR_SHA256
+          [[ "$ACTUAL_PUBLIC_KEY_DERIVER_SHA256" == "$PUBLIC_KEY_DERIVER_SHA256" ]] || {
+            echo 'error: reviewed public-key deriver changed before key access.' >&2
+            exit 1
+          }
+          unset ACTUAL_PUBLIC_KEY_DERIVER_SHA256
+          /usr/bin/codesign --verify --strict --verbose=2 "$AUTHENTICATED_APPCAST_VALIDATOR" || {
+            echo 'error: reviewed authenticated-appcast validator failed code-signature validation.' >&2
+            exit 1
+          }
+          /usr/bin/codesign --verify --strict --verbose=2 "$PUBLIC_KEY_DERIVER" || {
+            echo 'error: reviewed public-key deriver failed code-signature validation.' >&2
+            exit 1
+          }
+          [[ "$USHOT_SPARKLE_VERSION" == "$EXPECTED_SPARKLE_VERSION" ]] || {
+            echo 'error: repository Sparkle version no longer matches the reviewed signing-runner version.' >&2
+            exit 1
+          }
+          [[ "$USHOT_SPARKLE_ARCHIVE_SHA256" == "$EXPECTED_SPARKLE_ARCHIVE_SHA256" ]] || {
+            echo 'error: repository Sparkle checksum no longer matches the reviewed signing-runner checksum.' >&2
+            exit 1
+          }
+          [[ "$USHOT_MAX_AUTHENTICATED_APPCAST_BYTES" == "$EXPECTED_AUTHENTICATED_APPCAST_LIMIT_BYTES" \
+              && "$USHOT_SIGNED_APPCAST_TRAILER_ALLOWANCE_BYTES" == "$EXPECTED_SIGNED_APPCAST_TRAILER_ALLOWANCE_BYTES" \
+              && "$USHOT_MAX_SIGNED_APPCAST_BYTES" == "$EXPECTED_SIGNED_APPCAST_LIMIT_BYTES" \
+              && "$((USHOT_MAX_AUTHENTICATED_APPCAST_BYTES + USHOT_SIGNED_APPCAST_TRAILER_ALLOWANCE_BYTES))" == "$USHOT_MAX_SIGNED_APPCAST_BYTES" ]] || {
+            echo 'error: repository signed-appcast size constants no longer match the reviewed signing-runner bounds.' >&2
+            exit 1
+          }
+
+          CURRENT_APPCAST="$SIGNING_INPUTS_DIRECTORY/current-appcast.xml"
+          CURRENT_APPCAST_KIND="$SIGNING_INPUTS_DIRECTORY/current-appcast.kind"
+          SPARKLE_ARCHIVE="$SIGNING_INPUTS_DIRECTORY/Sparkle-$EXPECTED_SPARKLE_VERSION.tar.xz"
+          RELEASE_ARCHIVE="$ARTIFACTS_DIRECTORY/Ushot-$VERSION-arm64.zip"
+          [[ -d "$SIGNING_INPUTS_DIRECTORY" \
+              && ! -L "$SIGNING_INPUTS_DIRECTORY" \
+              && -d "$ARTIFACTS_DIRECTORY" \
+              && ! -L "$ARTIFACTS_DIRECTORY" ]] || {
+            echo 'error: recovered signing-input or release-asset root is missing or symbolic.' >&2
+            exit 1
+          }
+          shopt -s nullglob dotglob
+          RECOVERED_SIGNING_INPUT_ENTRIES=("$SIGNING_INPUTS_DIRECTORY"/*)
+          [[ "${#RECOVERED_SIGNING_INPUT_ENTRIES[@]}" == '3' ]] || {
+            echo 'error: recovered feed-enabled signing inputs must contain exactly three files.' >&2
+            exit 1
+          }
+          for recovered_signing_input in "${RECOVERED_SIGNING_INPUT_ENTRIES[@]}"; do
+            [[ -f "$recovered_signing_input" && ! -L "$recovered_signing_input" ]] || {
+              echo "error: recovered signing input is not a regular non-symbolic file: $recovered_signing_input" >&2
+              exit 1
+            }
+            case "${recovered_signing_input##*/}" in
+              current-appcast.xml|current-appcast.kind|Sparkle-2.9.5.tar.xz) ;;
+              *)
+                echo "error: recovered signing input is not allow-listed: $recovered_signing_input" >&2
+                exit 1
+                ;;
+            esac
+          done
+          for signing_input in \
+            "$CURRENT_APPCAST" \
+            "$CURRENT_APPCAST_KIND" \
+            "$SPARKLE_ARCHIVE" \
+            "$RELEASE_ARCHIVE"
+          do
+            [[ -f "$signing_input" && ! -L "$signing_input" && -s "$signing_input" ]] || {
+              echo "error: required signing input is missing, empty or symbolic: $signing_input" >&2
+              exit 1
+            }
+          done
+          [[ "$(/usr/bin/stat -f '%z' "$CURRENT_APPCAST")" -le "$EXPECTED_SIGNED_APPCAST_LIMIT_BYTES" ]] || {
+            echo 'error: recovered production appcast exceeds the signing-input size bound.' >&2
+            exit 1
+          }
+          [[ "$(/usr/bin/stat -f '%z' "$SPARKLE_ARCHIVE")" -le 67108864 ]] || {
+            echo 'error: recovered official Sparkle archive exceeds the signing-input size bound.' >&2
+            exit 1
+          }
+          IFS= read -r CURRENT_APPCAST_KIND_VALUE < "$CURRENT_APPCAST_KIND"
+          [[ "$CURRENT_APPCAST_KIND_VALUE" == 'signed' \
+              || "$CURRENT_APPCAST_KIND_VALUE" == 'seed' ]] || {
+            echo 'error: recovered appcast kind is invalid.' >&2
+            exit 1
+          }
+          EXPECTED_APPCAST_KIND_SIZE=5
+          if [[ "$CURRENT_APPCAST_KIND_VALUE" == 'signed' ]]; then
+            EXPECTED_APPCAST_KIND_SIZE=7
+          fi
+          [[ "$(/usr/bin/stat -f '%z' "$CURRENT_APPCAST_KIND")" == "$EXPECTED_APPCAST_KIND_SIZE" ]] || {
+            echo 'error: recovered appcast kind has noncanonical bytes.' >&2
+            exit 1
+          }
+          unset EXPECTED_APPCAST_KIND_SIZE
+
+          SPARKLE_ARCHIVE_DIGEST_OUTPUT="$(/usr/bin/shasum -a 256 "$SPARKLE_ARCHIVE")"
+          ACTUAL_SPARKLE_ARCHIVE_SHA256="${SPARKLE_ARCHIVE_DIGEST_OUTPUT%% *}"
+          unset SPARKLE_ARCHIVE_DIGEST_OUTPUT
+          [[ "$ACTUAL_SPARKLE_ARCHIVE_SHA256" == "$EXPECTED_SPARKLE_ARCHIVE_SHA256" ]] || {
+            echo 'error: recovered official Sparkle archive failed the signing-runner checksum gate.' >&2
+            exit 1
+          }
+          unset ACTUAL_SPARKLE_ARCHIVE_SHA256
+
+          SPARKLE_EXTRACT_ROOT="$(/usr/bin/mktemp -d "$RUNNER_TEMP/ushot-sparkle-signing.XXXXXX")"
+          [[ -d "$SPARKLE_EXTRACT_ROOT" && ! -L "$SPARKLE_EXTRACT_ROOT" ]] || {
+            echo 'error: could not create a fresh Sparkle extraction directory.' >&2
+            exit 1
+          }
+          /usr/bin/tar -xf "$SPARKLE_ARCHIVE" -C "$SPARKLE_EXTRACT_ROOT"
+          SPARKLE_BIN="$SPARKLE_EXTRACT_ROOT/bin"
+          for sparkle_tool in generate_appcast generate_keys sign_update; do
+            [[ -x "$SPARKLE_BIN/$sparkle_tool" && ! -L "$SPARKLE_BIN/$sparkle_tool" ]] || {
+              echo "error: checksum-pinned Sparkle archive is missing executable bin/$sparkle_tool." >&2
+              exit 1
+            }
+            /usr/bin/codesign --verify --strict --verbose=2 "$SPARKLE_BIN/$sparkle_tool" || {
+              echo "error: checksum-pinned Sparkle tool failed code-signature validation: bin/$sparkle_tool." >&2
+              exit 1
+            }
+          done
+
+          DERIVED_SPARKLE_PUBLIC_KEY="$(
+            printf '%s' "$SPARKLE_PRIVATE_KEY" | \
+              "$PUBLIC_KEY_DERIVER"
+          )"
+          [[ "$DERIVED_SPARKLE_PUBLIC_KEY" == "$USHOT_SPARKLE_PUBLIC_ED_KEY" ]] || {
+            echo 'error: protected release Sparkle private key does not match the public key embedded in Ushot.' >&2
+            exit 1
+          }
+          unset DERIVED_SPARKLE_PUBLIC_KEY
+          echo 'release: verified protected Sparkle private-key identity.'
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | \
+            "$GENERATE_APPCAST_SCRIPT" \
+              --version "$VERSION" \
+              --build-number "$BUILD_NUMBER" \
+              --tag "$RELEASE_TAG" \
+              --archive "$RELEASE_ARCHIVE" \
+              --release-notes "updates/release-notes/$VERSION.md" \
+              --existing-appcast "$CURRENT_APPCAST" \
+              --existing-appcast-kind "$CURRENT_APPCAST_KIND_VALUE" \
+              --site-directory "$PAGES_DIRECTORY" \
+              --sparkle-bin "$SPARKLE_BIN" \
+              --key-source stdin \
+              --public-key-deriver "$PUBLIC_KEY_DERIVER" \
+              --public-key-deriver-sha256 "$PUBLIC_KEY_DERIVER_SHA256" \
+              --authenticated-appcast-validator "$AUTHENTICATED_APPCAST_VALIDATOR" \
+              --authenticated-appcast-validator-sha256 "$AUTHENTICATED_APPCAST_VALIDATOR_SHA256" \
+              --signing-boundary-output-only
+          unset SPARKLE_PRIVATE_KEY
+          /bin/rm -rf -- "$SPARKLE_EXTRACT_ROOT"
+          SPARKLE_EXTRACT_ROOT=''
+
+          SIGNED_APPCAST="$PAGES_DIRECTORY/$USHOT_APPCAST_RELATIVE_PATH"
+          [[ -d "$PAGES_DIRECTORY" \
+              && ! -L "$PAGES_DIRECTORY" \
+              && -f "$SIGNED_APPCAST" \
+              && ! -L "$SIGNED_APPCAST" \
+              && -s "$SIGNED_APPCAST" ]] || {
+            echo 'error: authenticated Pages staging output is missing, empty or symbolic.' >&2
+            exit 1
+          }
+          [[ ! -e "$PAGES_DIRECTORY/$USHOT_LEGACY_APPCAST_RELATIVE_PATH" ]] || {
+            echo 'error: legacy appcast path must remain absent from the Pages payload.' >&2
+            exit 1
+          }
+          [[ "$(find "$PAGES_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == '0' \
+              && "$(find "$PAGES_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == '1' \
+              && "$(/usr/bin/stat -f '%z' "$SIGNED_APPCAST")" -le "$EXPECTED_SIGNED_APPCAST_LIMIT_BYTES" ]] || {
+            echo 'error: authenticated Pages staging output violates its exact layout or size bound.' >&2
+            exit 1
+          }
+          SIGNED_APPCAST_DIGEST_OUTPUT="$(/usr/bin/shasum -a 256 "$SIGNED_APPCAST")"
+          SIGNED_APPCAST_SHA256="${SIGNED_APPCAST_DIGEST_OUTPUT%% *}"
+          unset SIGNED_APPCAST_DIGEST_OUTPUT
+          SIGNED_APPCAST_SIZE="$(/usr/bin/stat -f '%z' "$SIGNED_APPCAST")"
+          SIGNED_APPCAST_ARTIFACT_NAME="ushot-authenticated-appcast-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$SIGNED_APPCAST_SHA256"
+          [[ "$SIGNED_APPCAST_SHA256" =~ ^[0-9a-f]{64}$ \
+              && "$SIGNED_APPCAST_SIZE" =~ ^[1-9][0-9]*$ \
+              && "$SIGNED_APPCAST_ARTIFACT_NAME" =~ ^ushot-authenticated-appcast-[1-9][0-9]*-[1-9][0-9]*-[0-9a-f]{64}$ ]] || {
+            echo 'error: could not bind the authenticated Pages appcast identity.' >&2
+            exit 1
+          }
+          printf 'signed_appcast_sha256=%s\n' "$SIGNED_APPCAST_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'signed_appcast_size=%s\n' "$SIGNED_APPCAST_SIZE" >> "$GITHUB_OUTPUT"
+          printf 'signed_appcast_artifact_name=%s\n' "$SIGNED_APPCAST_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          unset SIGNED_APPCAST_SHA256 SIGNED_APPCAST_SIZE SIGNED_APPCAST_ARTIFACT_NAME
+          trap - EXIT HUP INT TERM
+
+      - id: preserve_signed_appcast
+        name: Preserve the authenticated feed before mutable repository validation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.sign_feed.outputs.signed_appcast_artifact_name }}
+          path: ${{ env.PAGES_DIRECTORY }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  validate-signed-appcast:
+    name: Validate the immutable signed appcast without credentials
+    if: ${{ inputs.publish_update_feed }}
+    needs:
+      - preflight
+      - build-artifacts
+      - build-authenticated-appcast-validator
+      - sign-update-feed
+    runs-on: macos-15
+    permissions:
+      actions: read
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      BUILD_NUMBER: ${{ needs.preflight.outputs.build_number }}
+      RELEASE_COMMIT: ${{ needs.preflight.outputs.commit_sha }}
+      ARTIFACTS_DIRECTORY: ${{ github.workspace }}/build/appcast-validation-assets
+      PAGES_DIRECTORY: ${{ github.workspace }}/build/authenticated-appcast
+      VALIDATOR_DIRECTORY: ${{ github.workspace }}/build/runtime-appcast-validator
+      EXPECTED_RELEASE_ASSETS_ARTIFACT_ID: ${{ needs.build-artifacts.outputs.release_assets_artifact_id }}
+      EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST: ${{ needs.build-artifacts.outputs.release_assets_artifact_digest }}
+      EXPECTED_VALIDATOR_ARTIFACT_ID: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_id }}
+      EXPECTED_VALIDATOR_ARTIFACT_DIGEST: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_digest }}
+      EXPECTED_VALIDATOR_ARTIFACT_NAME: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_name }}
+      USHOT_AUTHENTICATED_APPCAST_VALIDATOR: ${{ github.workspace }}/build/runtime-appcast-validator/AuthenticatedAppcastValidator
+      USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256: ${{ needs.build-authenticated-appcast-validator.outputs.validator_binary_sha256 }}
+      REVIEWED_PUBLIC_KEY_DERIVER: ${{ github.workspace }}/build/runtime-appcast-validator/SparklePublicKeyDeriver
+      EXPECTED_PUBLIC_KEY_DERIVER_SHA256: ${{ needs.build-authenticated-appcast-validator.outputs.public_key_deriver_binary_sha256 }}
+      EXPECTED_SIGNED_APPCAST_ARTIFACT_ID: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_id }}
+      EXPECTED_SIGNED_APPCAST_ARTIFACT_DIGEST: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_digest }}
+      EXPECTED_SIGNED_APPCAST_ARTIFACT_NAME: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_name }}
+      EXPECTED_SIGNED_APPCAST_SHA256: ${{ needs.sign-update-feed.outputs.signed_appcast_sha256 }}
+      EXPECTED_SIGNED_APPCAST_SIZE: ${{ needs.sign-update-feed.outputs.signed_appcast_size }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Recover the exact immutable authenticated-feed artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_id }}
+          path: ${{ env.PAGES_DIRECTORY }}
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Recover the exact release assets bound into the feed
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-artifacts.outputs.release_assets_artifact_id }}
+          path: ${{ env.ARTIFACTS_DIRECTORY }}
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Recover the exact reviewed runtime-policy validator
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_id }}
+          path: ${{ env.VALIDATOR_DIRECTORY }}
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Bind immutable bytes and run runtime-policy validation without the key
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_COMMIT" ]] || {
+            echo 'error: appcast-validation checkout does not match the admitted release commit.' >&2
+            exit 1
+          }
+          [[ "$EXPECTED_RELEASE_ASSETS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_VALIDATOR_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_VALIDATOR_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_VALIDATOR_ARTIFACT_NAME" =~ ^ushot-reviewed-signing-helpers-[1-9][0-9]*-[1-9][0-9]*$ \
+              && "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256" =~ ^[0-9a-f]{64}$ \
+              && "$EXPECTED_PUBLIC_KEY_DERIVER_SHA256" =~ ^[0-9a-f]{64}$ \
+              && "$EXPECTED_SIGNED_APPCAST_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_SIGNED_APPCAST_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_SIGNED_APPCAST_ARTIFACT_NAME" =~ ^ushot-authenticated-appcast-[1-9][0-9]*-[1-9][0-9]*-[0-9a-f]{64}$ \
+              && "$EXPECTED_SIGNED_APPCAST_SHA256" =~ ^[0-9a-f]{64}$ \
+              && "$EXPECTED_SIGNED_APPCAST_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+            echo 'error: signing job did not expose canonical immutable-artifact identities.' >&2
+            exit 1
+          }
+          AUTHENTICATED_APPCAST_ARTIFACT_JSON="$RUNNER_TEMP/authenticated-appcast-artifact.json"
+          EXPECTED_SIGNED_APPCAST_REST_DIGEST="sha256:${EXPECTED_SIGNED_APPCAST_ARTIFACT_DIGEST#sha256:}"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$EXPECTED_SIGNED_APPCAST_ARTIFACT_ID" \
+            > "$AUTHENTICATED_APPCAST_ARTIFACT_JSON"
+          jq -e \
+            --argjson artifact_id "$EXPECTED_SIGNED_APPCAST_ARTIFACT_ID" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg artifact_name "$EXPECTED_SIGNED_APPCAST_ARTIFACT_NAME" \
+            --arg artifact_digest "$EXPECTED_SIGNED_APPCAST_REST_DIGEST" \
+            '.id == $artifact_id and .name == $artifact_name and .digest == $artifact_digest and .expired == false and .workflow_run.id == $run_id' \
+            "$AUTHENTICATED_APPCAST_ARTIFACT_JSON" >/dev/null || {
+              echo 'error: authenticated appcast artifact metadata does not match the signing job.' >&2
+              exit 1
+            }
+          VALIDATOR_ARTIFACT_JSON="$RUNNER_TEMP/runtime-validator-artifact.json"
+          EXPECTED_VALIDATOR_REST_DIGEST="sha256:${EXPECTED_VALIDATOR_ARTIFACT_DIGEST#sha256:}"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$EXPECTED_VALIDATOR_ARTIFACT_ID" \
+            > "$VALIDATOR_ARTIFACT_JSON"
+          jq -e \
+            --argjson artifact_id "$EXPECTED_VALIDATOR_ARTIFACT_ID" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg artifact_name "$EXPECTED_VALIDATOR_ARTIFACT_NAME" \
+            --arg artifact_digest "$EXPECTED_VALIDATOR_REST_DIGEST" \
+            '.id == $artifact_id and .name == $artifact_name and .digest == $artifact_digest and .expired == false and .workflow_run.id == $run_id' \
+            "$VALIDATOR_ARTIFACT_JSON" >/dev/null || {
+              echo 'error: runtime validator artifact metadata does not match its credential-free producer.' >&2
+              exit 1
+            }
+          [[ -d "$VALIDATOR_DIRECTORY" \
+              && ! -L "$VALIDATOR_DIRECTORY" \
+              && "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" == "$VALIDATOR_DIRECTORY/AuthenticatedAppcastValidator" \
+              && "$REVIEWED_PUBLIC_KEY_DERIVER" == "$VALIDATOR_DIRECTORY/SparklePublicKeyDeriver" \
+              && -f "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" \
+              && ! -L "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" \
+              && -f "$REVIEWED_PUBLIC_KEY_DERIVER" \
+              && ! -L "$REVIEWED_PUBLIC_KEY_DERIVER" \
+              && "$(find "$VALIDATOR_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == '0' \
+              && "$(find "$VALIDATOR_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == '2' \
+              && "$(/usr/bin/shasum -a 256 "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" | /usr/bin/awk '{print $1}')" == "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256" \
+              && "$(/usr/bin/shasum -a 256 "$REVIEWED_PUBLIC_KEY_DERIVER" | /usr/bin/awk '{print $1}')" == "$EXPECTED_PUBLIC_KEY_DERIVER_SHA256" ]] || {
+            echo 'error: recovered runtime validator artifact failed exact-layout or independent-checksum validation.' >&2
+            exit 1
+          }
+          /usr/bin/codesign --verify --strict --verbose=2 "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" || {
+            echo 'error: recovered runtime appcast validator failed code-signature validation.' >&2
+            exit 1
+          }
+          /usr/bin/codesign --verify --strict --verbose=2 "$REVIEWED_PUBLIC_KEY_DERIVER" || {
+            echo 'error: recovered runtime public-key deriver failed code-signature validation.' >&2
+            exit 1
+          }
+          /bin/chmod 500 "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" "$REVIEWED_PUBLIC_KEY_DERIVER"
+          SIGNED_APPCAST="$PAGES_DIRECTORY/updates/v1/appcast.xml"
+          [[ -d "$PAGES_DIRECTORY" \
+              && ! -L "$PAGES_DIRECTORY" \
+              && -f "$SIGNED_APPCAST" \
+              && ! -L "$SIGNED_APPCAST" \
+              && -s "$SIGNED_APPCAST" \
+              && "$(find "$PAGES_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == '0' \
+              && "$(find "$PAGES_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == '1' \
+              && "$(/usr/bin/stat -f '%z' "$SIGNED_APPCAST")" == "$EXPECTED_SIGNED_APPCAST_SIZE" \
+              && "$EXPECTED_SIGNED_APPCAST_SIZE" -le 1049088 \
+              && "$(/usr/bin/shasum -a 256 "$SIGNED_APPCAST" | /usr/bin/awk '{print $1}')" == "$EXPECTED_SIGNED_APPCAST_SHA256" ]] || {
+            echo 'error: recovered authenticated appcast does not match the immutable signing output.' >&2
+            exit 1
+          }
+          scripts/validate-release-assets.sh \
+            --directory "$ARTIFACTS_DIRECTORY" \
+            --mode public-adhoc \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --tag "$RELEASE_TAG"
+          scripts/validate-appcast.sh \
+            --appcast "$SIGNED_APPCAST" \
+            --archive "$ARTIFACTS_DIRECTORY/Ushot-$VERSION-arm64.zip" \
+            --release-notes "updates/release-notes/$VERSION.md" \
+            --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --tag "$RELEASE_TAG"
+          [[ "$(/usr/bin/stat -f '%z' "$SIGNED_APPCAST")" == "$EXPECTED_SIGNED_APPCAST_SIZE" \
+              && "$(/usr/bin/shasum -a 256 "$SIGNED_APPCAST" | /usr/bin/awk '{print $1}')" == "$EXPECTED_SIGNED_APPCAST_SHA256" ]] || {
+            echo 'error: credential-free validators mutated their disposable authenticated-appcast copy.' >&2
+            exit 1
+          }
+          echo 'release: independently validated the immutable authenticated-feed bytes without private-key access.'
+
+  stage-pages-artifact:
+    name: Package the validated immutable appcast for Pages
+    if: ${{ inputs.publish_update_feed }}
+    needs:
+      - sign-update-feed
+      - validate-signed-appcast
+    outputs:
+      pages_artifact_id: ${{ steps.upload_pages.outputs.artifact_id }}
+      pages_artifact_digest: ${{ steps.bind_uploaded_pages.outputs.pages_artifact_digest }}
+      pages_artifact_name: ${{ steps.bind_pages.outputs.pages_artifact_name }}
+    runs-on: macos-15
+    permissions:
+      actions: read
+    env:
+      PAGES_DIRECTORY: ${{ github.workspace }}/build/pages-payload
+      EXPECTED_SIGNED_APPCAST_ARTIFACT_ID: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_id }}
+      EXPECTED_SIGNED_APPCAST_ARTIFACT_DIGEST: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_digest }}
+      EXPECTED_SIGNED_APPCAST_ARTIFACT_NAME: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_name }}
+      EXPECTED_SIGNED_APPCAST_SHA256: ${{ needs.sign-update-feed.outputs.signed_appcast_sha256 }}
+      EXPECTED_SIGNED_APPCAST_SIZE: ${{ needs.sign-update-feed.outputs.signed_appcast_size }}
+    steps:
+      - name: Recover only the exact validated signing output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_id }}
+          path: ${{ env.PAGES_DIRECTORY }}
+          merge-multiple: true
+          digest-mismatch: error
+
+      - id: bind_pages
+        name: Rebind the immutable bytes without checking out repository code
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SIGNED_APPCAST_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_SIGNED_APPCAST_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_SIGNED_APPCAST_ARTIFACT_NAME" =~ ^ushot-authenticated-appcast-[1-9][0-9]*-[1-9][0-9]*-[0-9a-f]{64}$ \
+              && "$EXPECTED_SIGNED_APPCAST_SHA256" =~ ^[0-9a-f]{64}$ \
+              && "$EXPECTED_SIGNED_APPCAST_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+            echo 'error: validated signing outputs are not canonical immutable-artifact identities.' >&2
+            exit 1
+          }
+          AUTHENTICATED_APPCAST_ARTIFACT_JSON="$RUNNER_TEMP/authenticated-appcast-artifact.json"
+          EXPECTED_SIGNED_APPCAST_REST_DIGEST="sha256:${EXPECTED_SIGNED_APPCAST_ARTIFACT_DIGEST#sha256:}"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$EXPECTED_SIGNED_APPCAST_ARTIFACT_ID" \
+            > "$AUTHENTICATED_APPCAST_ARTIFACT_JSON"
+          jq -e \
+            --argjson artifact_id "$EXPECTED_SIGNED_APPCAST_ARTIFACT_ID" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg artifact_name "$EXPECTED_SIGNED_APPCAST_ARTIFACT_NAME" \
+            --arg artifact_digest "$EXPECTED_SIGNED_APPCAST_REST_DIGEST" \
+            '.id == $artifact_id and .name == $artifact_name and .digest == $artifact_digest and .expired == false and .workflow_run.id == $run_id' \
+            "$AUTHENTICATED_APPCAST_ARTIFACT_JSON" >/dev/null || {
+              echo 'error: immutable signing artifact metadata changed before Pages packaging.' >&2
+              exit 1
+            }
+          SIGNED_APPCAST="$PAGES_DIRECTORY/updates/v1/appcast.xml"
+          [[ -d "$PAGES_DIRECTORY" \
+              && ! -L "$PAGES_DIRECTORY" \
+              && -f "$SIGNED_APPCAST" \
+              && ! -L "$SIGNED_APPCAST" \
+              && -s "$SIGNED_APPCAST" \
+              && "$(find "$PAGES_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == '0' \
+              && "$(find "$PAGES_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == '1' \
+              && "$(/usr/bin/stat -f '%z' "$SIGNED_APPCAST")" == "$EXPECTED_SIGNED_APPCAST_SIZE" \
+              && "$EXPECTED_SIGNED_APPCAST_SIZE" -le 1049088 \
+              && "$(/usr/bin/shasum -a 256 "$SIGNED_APPCAST" | /usr/bin/awk '{print $1}')" == "$EXPECTED_SIGNED_APPCAST_SHA256" ]] || {
+            echo 'error: Pages staging bytes differ from the validated immutable signing output.' >&2
+            exit 1
+          }
+          PAGES_ARTIFACT_NAME="ushot-github-pages-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$EXPECTED_SIGNED_APPCAST_SHA256"
+          [[ "$PAGES_ARTIFACT_NAME" =~ ^ushot-github-pages-[1-9][0-9]*-[1-9][0-9]*-[0-9a-f]{64}$ ]] || {
+            echo 'error: could not derive the attempt-qualified Pages artifact name.' >&2
+            exit 1
+          }
+          printf 'pages_artifact_name=%s\n' "$PAGES_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+
+      - id: upload_pages
+        name: Preserve the validated Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
+          name: ${{ steps.bind_pages.outputs.pages_artifact_name }}
           path: ${{ env.PAGES_DIRECTORY }}
           retention-days: 30
+
+      - id: bind_uploaded_pages
+        name: Bind the exact immutable Pages artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_ARTIFACT_ID: ${{ steps.upload_pages.outputs.artifact_id }}
+          PAGES_ARTIFACT_NAME: ${{ steps.bind_pages.outputs.pages_artifact_name }}
+        run: |
+          set -euo pipefail
+          [[ "$PAGES_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$PAGES_ARTIFACT_NAME" =~ ^ushot-github-pages-[1-9][0-9]*-[1-9][0-9]*-[0-9a-f]{64}$ ]] || {
+            echo 'error: Pages uploader did not expose a canonical immutable-artifact identity.' >&2
+            exit 1
+          }
+          PAGES_ARTIFACT_JSON="$RUNNER_TEMP/pages-artifact.json"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$PAGES_ARTIFACT_ID" \
+            > "$PAGES_ARTIFACT_JSON"
+          jq -e \
+            --argjson artifact_id "$PAGES_ARTIFACT_ID" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg artifact_name "$PAGES_ARTIFACT_NAME" \
+            '.id == $artifact_id and .name == $artifact_name and (.digest | test("^sha256:[0-9a-f]{64}$")) and .expired == false and .workflow_run.id == $run_id' \
+            "$PAGES_ARTIFACT_JSON" >/dev/null || {
+              echo 'error: uploaded Pages artifact metadata does not match this workflow attempt.' >&2
+              exit 1
+            }
+          PAGES_ARTIFACT_DIGEST="$(jq -r '.digest' "$PAGES_ARTIFACT_JSON")"
+          printf 'pages_artifact_digest=%s\n' "$PAGES_ARTIFACT_DIGEST" >> "$GITHUB_OUTPUT"
 
   publish-release:
     name: Resume, verify and publish the GitHub Release
     needs:
       - preflight
-      - build-and-sign
+      - build-artifacts
+      - prepare-signing-inputs
+      - approve-release
+      - sign-update-feed
+      - validate-signed-appcast
+      - stage-pages-artifact
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.preflight.result == 'success' &&
+        needs.build-artifacts.result == 'success' &&
+        needs.prepare-signing-inputs.result == 'success' &&
+        needs.approve-release.result == 'success' &&
+        (
+          (
+            !inputs.publish_update_feed &&
+            needs.sign-update-feed.result == 'skipped' &&
+            needs.validate-signed-appcast.result == 'skipped' &&
+            needs.stage-pages-artifact.result == 'skipped'
+          ) ||
+          (
+            inputs.publish_update_feed &&
+            needs.sign-update-feed.result == 'success' &&
+            needs.validate-signed-appcast.result == 'success' &&
+            needs.stage-pages-artifact.result == 'success'
+          )
+        )
+      }}
     runs-on: macos-15
     permissions:
       actions: read
@@ -341,6 +1488,8 @@ jobs:
       RELEASE_TAG_OBJECT: ${{ needs.preflight.outputs.tag_object_sha }}
       CI_RUN_ID: ${{ needs.preflight.outputs.ci_run_id }}
       ARTIFACTS_DIRECTORY: ${{ github.workspace }}/build/publish-assets
+      EXPECTED_RELEASE_ASSETS_ARTIFACT_ID: ${{ needs.build-artifacts.outputs.release_assets_artifact_id }}
+      EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST: ${{ needs.build-artifacts.outputs.release_assets_artifact_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -367,15 +1516,22 @@ jobs:
           }
 
       - name: Recover the exact artifacts produced by this workflow run
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ushot-release-assets
+          artifact-ids: ${{ needs.build-artifacts.outputs.release_assets_artifact_id }}
           path: ${{ env.ARTIFACTS_DIRECTORY }}
+          merge-multiple: true
+          digest-mismatch: error
 
       - name: Validate recovered assets without network credentials
         shell: bash
         run: |
           set -euo pipefail
+          [[ "$EXPECTED_RELEASE_ASSETS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]] || {
+            echo 'error: release builder did not expose a canonical immutable-artifact identity.' >&2
+            exit 1
+          }
           scripts/validate-release-assets.sh \
             --directory "$ARTIFACTS_DIRECTORY" \
             --mode public-adhoc \
@@ -704,19 +1860,30 @@ jobs:
             }
           done
 
-  deploy-appcast:
-    name: Deploy the signed appcast after immutable assets exist
-    if: ${{ inputs.publish_update_feed }}
+  admit-appcast-deployment:
+    name: Revalidate immutable release and Pages artifacts without deployment access
     needs:
       - preflight
-      - build-and-sign
+      - build-artifacts
+      - sign-update-feed
+      - validate-signed-appcast
+      - stage-pages-artifact
       - publish-release
+    if: >-
+      ${{
+        !cancelled() &&
+        inputs.publish_update_feed &&
+        needs.preflight.result == 'success' &&
+        needs.build-artifacts.result == 'success' &&
+        needs.sign-update-feed.result == 'success' &&
+        needs.validate-signed-appcast.result == 'success' &&
+        needs.stage-pages-artifact.result == 'success' &&
+        needs.publish-release.result == 'success'
+      }}
     runs-on: macos-15
     permissions:
       actions: read
       contents: read
-      pages: write
-      id-token: write
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
@@ -725,9 +1892,11 @@ jobs:
       RELEASE_TAG_OBJECT: ${{ needs.preflight.outputs.tag_object_sha }}
       CI_RUN_ID: ${{ needs.preflight.outputs.ci_run_id }}
       ARTIFACTS_DIRECTORY: ${{ github.workspace }}/build/pages-release-assets
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      EXPECTED_RELEASE_ASSETS_ARTIFACT_ID: ${{ needs.build-artifacts.outputs.release_assets_artifact_id }}
+      EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST: ${{ needs.build-artifacts.outputs.release_assets_artifact_digest }}
+      EXPECTED_PAGES_ARTIFACT_ID: ${{ needs.stage-pages-artifact.outputs.pages_artifact_id }}
+      EXPECTED_PAGES_ARTIFACT_DIGEST: ${{ needs.stage-pages-artifact.outputs.pages_artifact_digest }}
+      EXPECTED_PAGES_ARTIFACT_NAME: ${{ needs.stage-pages-artifact.outputs.pages_artifact_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -754,10 +1923,12 @@ jobs:
           }
 
       - name: Recover the original release assets for deployment admission
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ushot-release-assets
+          artifact-ids: ${{ needs.build-artifacts.outputs.release_assets_artifact_id }}
           path: ${{ env.ARTIFACTS_DIRECTORY }}
+          merge-multiple: true
+          digest-mismatch: error
 
       - name: Recheck the immutable tag and published asset bytes
         shell: bash
@@ -765,6 +1936,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          [[ "$EXPECTED_RELEASE_ASSETS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_PAGES_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_PAGES_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ \
+              && "$EXPECTED_PAGES_ARTIFACT_NAME" =~ ^ushot-github-pages-[1-9][0-9]*-[1-9][0-9]*-[0-9a-f]{64}$ ]] || {
+            echo 'error: deployment admission received noncanonical immutable-artifact identities.' >&2
+            exit 1
+          }
+          PAGES_ARTIFACT_JSON="$RUNNER_TEMP/pages-artifact.json"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$EXPECTED_PAGES_ARTIFACT_ID" \
+            > "$PAGES_ARTIFACT_JSON"
+          jq -e \
+            --argjson artifact_id "$EXPECTED_PAGES_ARTIFACT_ID" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg artifact_name "$EXPECTED_PAGES_ARTIFACT_NAME" \
+            --arg artifact_digest "$EXPECTED_PAGES_ARTIFACT_DIGEST" \
+            '.id == $artifact_id and .name == $artifact_name and .digest == $artifact_digest and .expired == false and .workflow_run.id == $run_id' \
+            "$PAGES_ARTIFACT_JSON" >/dev/null || {
+              echo 'error: preserved Pages artifact metadata changed before deployment admission.' >&2
+              exit 1
+            }
           REMOTE_REFS="$(git ls-remote --exit-code \
             "https://github.com/$GITHUB_REPOSITORY.git" \
             "refs/tags/$RELEASE_TAG" \
@@ -810,6 +2003,31 @@ jobs:
             --directory "$ARTIFACTS_DIRECTORY" \
             --expected-state published
 
+  deploy-appcast:
+    name: Deploy the admitted immutable Pages artifact
+    needs:
+      - stage-pages-artifact
+      - publish-release
+      - admit-appcast-deployment
+    if: >-
+      ${{
+        !cancelled() &&
+        inputs.publish_update_feed &&
+        needs.stage-pages-artifact.result == 'success' &&
+        needs.publish-release.result == 'success' &&
+        needs.admit-appcast-deployment.result == 'success'
+      }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         name: Deploy the preserved signed Pages artifact
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+        with:
+          artifact_name: ${{ needs.stage-pages-artifact.outputs.pages_artifact_name }}
