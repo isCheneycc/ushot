@@ -855,7 +855,13 @@ def admin_trust_present?(fingerprint)
     return false if combined.include?("No Trust Settings were found.")
     fail_safely("admin-trust-inspection-failed")
   end
-  combined.lines.any? { |line| line.strip == "SHA-256 hash: #{fingerprint}" }
+  # Older macOS printed "SHA-256 hash: <FINGERPRINT>". Newer dump-trust-settings -d
+  # often only lists the certificate common name and trust-setting counts. Accept either
+  # the fingerprint line or an exact certificate-present check against System.keychain
+  # once dump lists any trusted cert entry (non-empty trust table).
+  return true if combined.lines.any? { |line| line.strip == "SHA-256 hash: #{fingerprint}" }
+  return false unless certificate_present?(fingerprint)
+  combined.include?("Number of trusted certs =") && !combined.include?("Number of trusted certs = 0")
 end
 
 def parse_exact_ca!(bytes, expected_fingerprint)
