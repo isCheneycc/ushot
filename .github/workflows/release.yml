@@ -869,7 +869,7 @@ jobs:
 
           RELEASE_COMMON_SCRIPT='scripts/release-common.sh'
           GENERATE_APPCAST_SCRIPT='scripts/generate-appcast.sh'
-          EXPECTED_RELEASE_COMMON_SCRIPT_SHA256='b1f7a7eabe700cd909030d1be58e29db28d791a6cb7f0936c5a9120a56d4aa98'
+          EXPECTED_RELEASE_COMMON_SCRIPT_SHA256='608280e518bd010f842da932b10b050e002e9553aa21473c1c9338e8e1035684'
           EXPECTED_GENERATE_APPCAST_SCRIPT_SHA256='36325f7edbfb3dc5b3eebf9e8aea23aa2b38dadd7c665085c125d56c0f63d3df'
           verify_reviewed_signing_script() {
             local script_path="$1"
@@ -1154,6 +1154,7 @@ jobs:
     needs:
       - preflight
       - build-artifacts
+      - build-authenticated-appcast-validator
       - sign-update-feed
     runs-on: macos-15
     permissions:
@@ -1166,8 +1167,16 @@ jobs:
       RELEASE_COMMIT: ${{ needs.preflight.outputs.commit_sha }}
       ARTIFACTS_DIRECTORY: ${{ github.workspace }}/build/appcast-validation-assets
       PAGES_DIRECTORY: ${{ github.workspace }}/build/authenticated-appcast
+      VALIDATOR_DIRECTORY: ${{ github.workspace }}/build/runtime-appcast-validator
       EXPECTED_RELEASE_ASSETS_ARTIFACT_ID: ${{ needs.build-artifacts.outputs.release_assets_artifact_id }}
       EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST: ${{ needs.build-artifacts.outputs.release_assets_artifact_digest }}
+      EXPECTED_VALIDATOR_ARTIFACT_ID: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_id }}
+      EXPECTED_VALIDATOR_ARTIFACT_DIGEST: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_digest }}
+      EXPECTED_VALIDATOR_ARTIFACT_NAME: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_name }}
+      USHOT_AUTHENTICATED_APPCAST_VALIDATOR: ${{ github.workspace }}/build/runtime-appcast-validator/AuthenticatedAppcastValidator
+      USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256: ${{ needs.build-authenticated-appcast-validator.outputs.validator_binary_sha256 }}
+      REVIEWED_PUBLIC_KEY_DERIVER: ${{ github.workspace }}/build/runtime-appcast-validator/SparklePublicKeyDeriver
+      EXPECTED_PUBLIC_KEY_DERIVER_SHA256: ${{ needs.build-authenticated-appcast-validator.outputs.public_key_deriver_binary_sha256 }}
       EXPECTED_SIGNED_APPCAST_ARTIFACT_ID: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_id }}
       EXPECTED_SIGNED_APPCAST_ARTIFACT_DIGEST: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_digest }}
       EXPECTED_SIGNED_APPCAST_ARTIFACT_NAME: ${{ needs.sign-update-feed.outputs.signed_appcast_artifact_name }}
@@ -1196,6 +1205,14 @@ jobs:
           merge-multiple: true
           digest-mismatch: error
 
+      - name: Recover the exact reviewed runtime-policy validator
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-authenticated-appcast-validator.outputs.validator_artifact_id }}
+          path: ${{ env.VALIDATOR_DIRECTORY }}
+          merge-multiple: true
+          digest-mismatch: error
+
       - name: Bind immutable bytes and run runtime-policy validation without the key
         shell: bash
         env:
@@ -1208,6 +1225,11 @@ jobs:
           }
           [[ "$EXPECTED_RELEASE_ASSETS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
               && "$EXPECTED_RELEASE_ASSETS_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_VALIDATOR_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_VALIDATOR_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_VALIDATOR_ARTIFACT_NAME" =~ ^ushot-reviewed-signing-helpers-[1-9][0-9]*-[1-9][0-9]*$ \
+              && "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256" =~ ^[0-9a-f]{64}$ \
+              && "$EXPECTED_PUBLIC_KEY_DERIVER_SHA256" =~ ^[0-9a-f]{64}$ \
               && "$EXPECTED_SIGNED_APPCAST_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
               && "$EXPECTED_SIGNED_APPCAST_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
               && "$EXPECTED_SIGNED_APPCAST_ARTIFACT_NAME" =~ ^ushot-authenticated-appcast-[1-9][0-9]*-[1-9][0-9]*-[0-9a-f]{64}$ \
@@ -1231,6 +1253,45 @@ jobs:
               echo 'error: authenticated appcast artifact metadata does not match the signing job.' >&2
               exit 1
             }
+          VALIDATOR_ARTIFACT_JSON="$RUNNER_TEMP/runtime-validator-artifact.json"
+          EXPECTED_VALIDATOR_REST_DIGEST="sha256:${EXPECTED_VALIDATOR_ARTIFACT_DIGEST#sha256:}"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$EXPECTED_VALIDATOR_ARTIFACT_ID" \
+            > "$VALIDATOR_ARTIFACT_JSON"
+          jq -e \
+            --argjson artifact_id "$EXPECTED_VALIDATOR_ARTIFACT_ID" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg artifact_name "$EXPECTED_VALIDATOR_ARTIFACT_NAME" \
+            --arg artifact_digest "$EXPECTED_VALIDATOR_REST_DIGEST" \
+            '.id == $artifact_id and .name == $artifact_name and .digest == $artifact_digest and .expired == false and .workflow_run.id == $run_id' \
+            "$VALIDATOR_ARTIFACT_JSON" >/dev/null || {
+              echo 'error: runtime validator artifact metadata does not match its credential-free producer.' >&2
+              exit 1
+            }
+          [[ -d "$VALIDATOR_DIRECTORY" \
+              && ! -L "$VALIDATOR_DIRECTORY" \
+              && "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" == "$VALIDATOR_DIRECTORY/AuthenticatedAppcastValidator" \
+              && "$REVIEWED_PUBLIC_KEY_DERIVER" == "$VALIDATOR_DIRECTORY/SparklePublicKeyDeriver" \
+              && -f "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" \
+              && ! -L "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" \
+              && -f "$REVIEWED_PUBLIC_KEY_DERIVER" \
+              && ! -L "$REVIEWED_PUBLIC_KEY_DERIVER" \
+              && "$(find "$VALIDATOR_DIRECTORY" -type l -print | wc -l | tr -d ' ')" == '0' \
+              && "$(find "$VALIDATOR_DIRECTORY" -type f -print | wc -l | tr -d ' ')" == '2' \
+              && "$(/usr/bin/shasum -a 256 "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" | /usr/bin/awk '{print $1}')" == "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256" \
+              && "$(/usr/bin/shasum -a 256 "$REVIEWED_PUBLIC_KEY_DERIVER" | /usr/bin/awk '{print $1}')" == "$EXPECTED_PUBLIC_KEY_DERIVER_SHA256" ]] || {
+            echo 'error: recovered runtime validator artifact failed exact-layout or independent-checksum validation.' >&2
+            exit 1
+          }
+          /usr/bin/codesign --verify --strict --verbose=2 "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" || {
+            echo 'error: recovered runtime appcast validator failed code-signature validation.' >&2
+            exit 1
+          }
+          /usr/bin/codesign --verify --strict --verbose=2 "$REVIEWED_PUBLIC_KEY_DERIVER" || {
+            echo 'error: recovered runtime public-key deriver failed code-signature validation.' >&2
+            exit 1
+          }
+          /bin/chmod 500 "$USHOT_AUTHENTICATED_APPCAST_VALIDATOR" "$REVIEWED_PUBLIC_KEY_DERIVER"
           SIGNED_APPCAST="$PAGES_DIRECTORY/updates/v1/appcast.xml"
           [[ -d "$PAGES_DIRECTORY" \
               && ! -L "$PAGES_DIRECTORY" \

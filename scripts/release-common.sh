@@ -80,20 +80,38 @@ release_validate_openssl_salted_ciphertext() {
 
 release_validate_authenticated_appcast_runtime_policy() {
   local appcast_path="$1"
-  local release_common_directory
-  local project_root
+  local validator_path="${USHOT_AUTHENTICATED_APPCAST_VALIDATOR:-}"
+  local validator_sha256="${USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256:-}"
+  local canonical_validator_path
 
   [[ -s "$appcast_path" ]] \
     || release_die "Authenticated appcast is missing or empty: $appcast_path"
-  release_require_command swift
-  release_common_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-  project_root="$(cd "$release_common_directory/.." && pwd -P)"
-  swift run \
-    --quiet \
-    --package-path "$project_root" \
-    --configuration release \
-    AuthenticatedAppcastValidator \
-    "$appcast_path"
+  [[ -n "$validator_path" && -n "$validator_sha256" ]] \
+    || release_die "Authenticated appcast runtime validation requires a prebuilt validator path and SHA-256."
+  case "$validator_path" in
+    /*) ;;
+    *) release_die "Authenticated appcast runtime validator path must be absolute." ;;
+  esac
+  [[ "$(basename "$validator_path")" == "AuthenticatedAppcastValidator" ]] \
+    || release_die "Authenticated appcast runtime validator has an unexpected executable name."
+  [[ "$validator_sha256" =~ ^[0-9a-f]{64}$ ]] \
+    || release_die "Authenticated appcast runtime validator SHA-256 must be 64 lowercase hexadecimal characters."
+  [[ -f "$validator_path" \
+      && ! -L "$validator_path" \
+      && -x "$validator_path" ]] \
+    || release_die "Authenticated appcast runtime validator must be an executable regular non-symbolic file: $validator_path"
+  canonical_validator_path="$({
+    cd "$(dirname "$validator_path")" && \
+      printf '%s/%s' "$(pwd -P)" "$(basename "$validator_path")"
+  })"
+  [[ "$canonical_validator_path" == "$validator_path" ]] \
+    || release_die "Authenticated appcast runtime validator path must be canonical."
+  [[ "$(release_sha256 "$validator_path")" == "$validator_sha256" ]] \
+    || release_die "Authenticated appcast runtime validator checksum does not match the reviewed executable."
+  /usr/bin/codesign --verify --strict "$validator_path" \
+    || release_die "Authenticated appcast runtime validator failed code-signature validation."
+  "$validator_path" "$appcast_path" \
+    || release_die "Authenticated appcast failed the reviewed runtime XML policy."
 }
 
 release_validate_version() {

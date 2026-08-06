@@ -17,10 +17,32 @@ source "$SCRIPT_DIR/install-local.sh"
 mkdir -p "$PROJECT_ROOT/build"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ushot-feed-gates.XXXXXX")"
 SITE_DIRECTORY="$(mktemp -d "$PROJECT_ROOT/build/test-release-feed-gates.XXXXXX")"
+TEST_ROOT="$(cd "$TEST_ROOT" && pwd -P)"
+SITE_DIRECTORY="$(cd "$SITE_DIRECTORY" && pwd -P)"
+AUTHENTICATED_VALIDATOR_ROOT="$TEST_ROOT/authenticated-appcast-validator"
+AUTHENTICATED_APPCAST_VALIDATOR="$AUTHENTICATED_VALIDATOR_ROOT/AuthenticatedAppcastValidator"
 cleanup() {
   rm -rf "$TEST_ROOT" "$SITE_DIRECTORY"
 }
 trap cleanup EXIT
+
+mkdir -p "$AUTHENTICATED_VALIDATOR_ROOT"
+/usr/bin/xcrun swiftc \
+  -parse-as-library \
+  -swift-version 5 \
+  -O \
+  "$PROJECT_ROOT/UshotCore/Sources/UshotCore/Product/ProductIdentity.swift" \
+  "$PROJECT_ROOT/UshotCore/Sources/UshotCore/Update/UpdateChecking.swift" \
+  "$PROJECT_ROOT/UshotCore/Sources/UshotCore/Update/SignedAppcastPolicy.swift" \
+  "$PROJECT_ROOT/Tools/AuthenticatedAppcastValidator/main.swift" \
+  -o "$AUTHENTICATED_APPCAST_VALIDATOR"
+/usr/bin/codesign --force --sign - "$AUTHENTICATED_APPCAST_VALIDATOR" >/dev/null 2>&1
+/usr/bin/codesign --verify --strict "$AUTHENTICATED_APPCAST_VALIDATOR"
+AUTHENTICATED_APPCAST_VALIDATOR_SHA256="$(release_sha256 "$AUTHENTICATED_APPCAST_VALIDATOR")"
+[[ "$AUTHENTICATED_APPCAST_VALIDATOR_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || release_die "Could not bind the standalone authenticated-appcast validator."
+export USHOT_AUTHENTICATED_APPCAST_VALIDATOR="$AUTHENTICATED_APPCAST_VALIDATOR"
+export USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256="$AUTHENTICATED_APPCAST_VALIDATOR_SHA256"
 
 PASS_COUNT=0
 
@@ -84,6 +106,61 @@ expect_failure_containing() {
   esac
   pass "$name"
 }
+
+assert_runtime_policy_requires_prebuilt_execution() {
+  local function_body
+
+  function_body="$(awk '
+    /^release_validate_authenticated_appcast_runtime_policy\(\)/ { in_function = 1 }
+    in_function { print }
+    in_function && /^}/ { exit }
+  ' "$SCRIPT_DIR/release-common.sh")"
+  [[ -n "$function_body" ]]
+  grep -Fq 'USHOT_AUTHENTICATED_APPCAST_VALIDATOR' <<< "$function_body"
+  grep -Fq 'USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256' <<< "$function_body"
+  ! grep -Eq '(^|[[:space:];|&])(swift|swiftc|xcrun)([[:space:];|&]|$)' \
+    <<< "$function_body"
+}
+
+expect_success \
+  "runtime appcast policy requires a prebuilt validator without implicit Swift compilation" \
+  assert_runtime_policy_requires_prebuilt_execution
+
+run_runtime_policy_without_prebuilt_validator() {
+  env \
+    -u USHOT_AUTHENTICATED_APPCAST_VALIDATOR \
+    -u USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256 \
+    /bin/bash -c '
+      set -euo pipefail
+      source "$1"
+      release_validate_authenticated_appcast_runtime_policy "$2"
+    ' runtime-policy-missing-validator \
+      "$SCRIPT_DIR/release-common.sh" \
+      "$PROJECT_ROOT/$USHOT_APPCAST_RELATIVE_PATH"
+}
+
+expect_failure_containing \
+  "runtime appcast policy rejects a missing prebuilt validator" \
+  "requires a prebuilt validator path and SHA-256" \
+  run_runtime_policy_without_prebuilt_validator
+
+run_runtime_policy_with_wrong_validator_digest() {
+  env \
+    USHOT_AUTHENTICATED_APPCAST_VALIDATOR="$AUTHENTICATED_APPCAST_VALIDATOR" \
+    USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256="0000000000000000000000000000000000000000000000000000000000000000" \
+    /bin/bash -c '
+      set -euo pipefail
+      source "$1"
+      release_validate_authenticated_appcast_runtime_policy "$2"
+    ' runtime-policy-wrong-validator-digest \
+      "$SCRIPT_DIR/release-common.sh" \
+      "$PROJECT_ROOT/$USHOT_APPCAST_RELATIVE_PATH"
+}
+
+expect_failure_containing \
+  "runtime appcast policy rejects a changed prebuilt validator" \
+  "checksum does not match the reviewed executable" \
+  run_runtime_policy_with_wrong_validator_digest
 
 assert_rollout_constants() {
   [[ "$USHOT_PUBLIC_UPDATE_BASELINE_VERSION" == "0.1.1" ]]
@@ -1105,9 +1182,7 @@ pass "generated versioned appcast independently validates"
 SIGNING_BOUNDARY_BIN="$TEST_ROOT/signing-boundary-bin"
 SIGNING_BOUNDARY_RUNTIME_MARKER="$TEST_ROOT/signing-boundary-runtime-validator"
 SIGNING_BOUNDARY_GENERATOR_MARKER="$TEST_ROOT/signing-boundary-generate-appcast"
-AUTHENTICATED_VALIDATOR_ROOT="$TEST_ROOT/authenticated-appcast-validator"
 mkdir -p "$SIGNING_BOUNDARY_BIN"
-mkdir -p "$AUTHENTICATED_VALIDATOR_ROOT"
 cat > "$SIGNING_BOUNDARY_BIN/swift" <<'MOCK_SIGNING_BOUNDARY_SWIFT'
 #!/bin/bash
 set -euo pipefail
@@ -1116,26 +1191,13 @@ exit 97
 MOCK_SIGNING_BOUNDARY_SWIFT
 chmod +x "$SIGNING_BOUNDARY_BIN/swift"
 
-AUTHENTICATED_APPCAST_VALIDATOR="$AUTHENTICATED_VALIDATOR_ROOT/AuthenticatedAppcastValidator"
 PUBLIC_KEY_DERIVER="$AUTHENTICATED_VALIDATOR_ROOT/SparklePublicKeyDeriver"
-/usr/bin/xcrun swiftc \
-  -parse-as-library \
-  -swift-version 5 \
-  -O \
-  "$PROJECT_ROOT/UshotCore/Sources/UshotCore/Product/ProductIdentity.swift" \
-  "$PROJECT_ROOT/UshotCore/Sources/UshotCore/Update/UpdateChecking.swift" \
-  "$PROJECT_ROOT/UshotCore/Sources/UshotCore/Update/SignedAppcastPolicy.swift" \
-  "$PROJECT_ROOT/Tools/AuthenticatedAppcastValidator/main.swift" \
-  -o "$AUTHENTICATED_APPCAST_VALIDATOR"
 /usr/bin/xcrun swiftc \
   -swift-version 5 \
   -O \
   "$DERIVE_KEY_SCRIPT" \
   -o "$PUBLIC_KEY_DERIVER"
-AUTHENTICATED_APPCAST_VALIDATOR_SHA256="$(release_sha256 "$AUTHENTICATED_APPCAST_VALIDATOR")"
 PUBLIC_KEY_DERIVER_SHA256="$(release_sha256 "$PUBLIC_KEY_DERIVER")"
-[[ "$AUTHENTICATED_APPCAST_VALIDATOR_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-  || fail "could not bind the standalone authenticated-appcast validator"
 [[ "$PUBLIC_KEY_DERIVER_SHA256" =~ ^[0-9a-f]{64}$ ]] \
   || fail "could not bind the standalone public-key deriver"
 
@@ -1410,6 +1472,30 @@ assert_signing_job_has_no_swift_toolchain_execution() {
 expect_success \
   "secret-bearing sign-update-feed job cannot execute the Swift toolchain or derive source" \
   assert_signing_job_has_no_swift_toolchain_execution
+
+assert_runtime_validation_reuses_reviewed_helper_artifact() {
+  local validation_job
+
+  validation_job="$(awk '
+    /^  validate-signed-appcast:$/ { in_job = 1 }
+    in_job && /^  [A-Za-z0-9_-]+:$/ && $0 != "  validate-signed-appcast:" { exit }
+    in_job { print }
+  ' "$RELEASE_WORKFLOW")"
+  [[ -n "$validation_job" ]] || return 1
+  grep -Fq -- '- build-authenticated-appcast-validator' <<< "$validation_job"
+  grep -Fq 'needs.build-authenticated-appcast-validator.outputs.validator_artifact_id' \
+    <<< "$validation_job"
+  grep -Fq 'USHOT_AUTHENTICATED_APPCAST_VALIDATOR_SHA256' <<< "$validation_job"
+  grep -Fq 'digest-mismatch: error' <<< "$validation_job"
+  if grep -Eq '(^|[[:space:];|&])(/usr/bin/)?(swift|swiftc|xcrun)([[:space:];|&]|$)' \
+      <<< "$validation_job"; then
+    return 1
+  fi
+}
+
+expect_success \
+  "credential-free runtime validation reuses the immutable reviewed helper without compilation" \
+  assert_runtime_validation_reuses_reviewed_helper_artifact
 
 run_future_with_seed() {
   printf '%s' "$TEST_PRIVATE_KEY_SEED" | \
