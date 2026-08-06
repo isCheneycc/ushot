@@ -1823,6 +1823,13 @@ def configure_response(server, state, evidence, session_id, fatal_state)
       response.status = 404
       response["Content-Type"] = "text/plain"
       response.body = "Not Found\n"
+      # Privacy-safe diagnostics: host + path only (no query bodies). Helps catch
+      # Host/SNI or path mismatches when production hostnames are loopbacked.
+      $stdout.puts(
+        "loopback: unmatched host=#{host} path=#{request.path} method=#{method} " \
+        "actor=#{actor} generation=#{generation} case=#{label}"
+      )
+      $stdout.flush
       evidence.event(
         generation: generation, case_label: label, feed_mode: feed_mode,
         actor: actor, route: route, method: method, status: 404,

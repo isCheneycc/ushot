@@ -37,8 +37,8 @@ readonly REQUEST_EVIDENCE_SCHEMA="ushot-update-transition-loopback-corroborating
 readonly OPERATOR_ATTESTATION_SCHEMA="ushot-update-transition-operator-attestation-v1"
 # Independently reviewed immutable loopback implementation. Admission fails
 # closed if its complete bytes or executable mode differ from this sentinel.
-readonly LOOPBACK_SERVER_SHA256="39066a61329e5b10f5413285ecb74c66f4df3925e647716ad079fcc35f2d9ab0"
-readonly LOOPBACK_SERVER_SIZE="100717"
+readonly LOOPBACK_SERVER_SHA256="a6a6406b2aad62f77608a036aedc7b137b90a3c0dcd775123d6d8fa66d82db71"
+readonly LOOPBACK_SERVER_SIZE="101073"
 readonly EVIDENCE_SCHEMA="3"
 readonly ARCHIVE_NAME="Ushot-0.1.4-arm64.zip"
 readonly EXPECTED_FIXTURE_SCRIPT_SHA256="7a486638f663bb84273b94fdfd29881a0eadcf8efd0e9c4c2069629ea4b6a1ea"
