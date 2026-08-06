@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
-- Keep production self-update blocked until the recovered-key drill and complete 0.1.3 → 0.1.4 matrix are recorded; do not deploy `/updates/v1/appcast.xml` or use `publish_update_feed=true` before that evidence.
+- Record a PASS for the operator recovered-key drill against exact published 0.1.3 assets (`backup_sha256=f308c694…155d0`, published ZIP `91b4fbe2…efc8`, helper `appcast_sha256=965b1971…1a7d6`). Keep production self-update blocked until the complete 0.1.3 → 0.1.4 client matrix is also recorded; do not deploy `/updates/v1/appcast.xml` or use `publish_update_feed=true` before that evidence.
 
 ## [0.1.3] - 2026-08-06
 
