@@ -19,7 +19,7 @@ Ushot is a native screenshot and annotation utility for Apple silicon Macs runni
 Screenshot pixels, annotations, clipboard exports, color samples, history, and encoded files are processed locally. Ushot has no account, telemetry, analytics, advertising SDK, crash-report upload, or system-profile submission.
 
 > [!IMPORTANT]
-> Ushot 0.1.2 (build 3) is the planned one-time manual-install transition to the hardened updater. It is still pending and is not a real release until `v0.1.2` and its assets appear on the official GitHub Releases page. The production update feed remains intentionally absent.
+> Ushot 0.1.2 (build 3) is the current direct-download release and the one-time manual-install transition to the hardened updater. Users of 0.1.1 must install it manually from the official GitHub Release. The production update feed remains intentionally absent until the separately gated 0.1.3 update is ready.
 
 ## One capture, one continuous workflow
 
@@ -79,9 +79,9 @@ Read [PRIVACY.md](PRIVACY.md) for the complete data, permission, persistence, an
 
 ## Release status and installation
 
-Ushot 0.1.1 is the currently published direct-download preview. Ushot 0.1.2 (build 3) is the pending hardened transition: it will also be published with the updater feed disabled and must be installed manually once. The protected workflow builds, validates, publishes, then anonymously re-downloads and verifies its DMG, ZIP, dSYM ZIP, release manifest, and checksums. Builds taken directly from `main` remain development artifacts rather than a supported distribution channel.
+Ushot 0.1.2 (build 3) is the current published direct-download release and the one-time hardened transition. It was published with the updater feed disabled, and the protected workflow anonymously re-downloaded and verified its DMG, ZIP, dSYM ZIP, release manifest, and checksums. Users of 0.1.1 must install it manually once. Builds taken directly from `main` remain development artifacts rather than a supported distribution channel.
 
-Once the official Releases page actually lists `v0.1.2`, download [Ushot-0.1.2-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.2/Ushot-0.1.2-arm64.dmg) from that page and install it manually. Until then, that link is intentionally pending and [Ushot 0.1.1](https://github.com/isCheneycc/ushot/releases/tag/v0.1.1) remains the latest published preview. Public artifacts are intentionally ad-hoc signed, have no Developer ID signature or Apple notarization, and are not sandboxed.
+Download [Ushot-0.1.2-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.2/Ushot-0.1.2-arm64.dmg) from the immutable [Ushot v0.1.2 Release](https://github.com/isCheneycc/ushot/releases/tag/v0.1.2) and install it manually. Public artifacts are intentionally ad-hoc signed, have no Developer ID signature or Apple notarization, and are not sandboxed.
 
 1. Open the DMG and drag `Ushot.app` into **Applications**.
 2. Remove only the downloaded-file quarantine attribute, then open Ushot:
@@ -91,7 +91,7 @@ Once the official Releases page actually lists `v0.1.2`, download [Ushot-0.1.2-a
    open "/Applications/Ushot.app"
    ```
 
-Use this procedure only for a versioned Ushot DMG that is actually published on the official [Ushot Releases](https://github.com/isCheneycc/ushot/releases) page. Do not use the pending 0.1.2 link as release evidence, replace the command with `xattr -cr`, run it against a broader directory, or apply it to third-party downloads. A later install or update may require Screen Recording or Accessibility permission to be granted again.
+Use this procedure only for a versioned Ushot DMG that is actually published on the official [Ushot Releases](https://github.com/isCheneycc/ushot/releases) page. Do not use an unversioned or third-party download as release evidence, replace the command with `xattr -cr`, or run it against a broader directory. A later install or update may require Screen Recording or Accessibility permission to be granted again.
 
 The app bundle includes the applicable [third-party license notices](UshotApp/Resources/ThirdPartyNotices.txt), including Sparkle and its bundled components.
 
@@ -99,7 +99,7 @@ The app bundle includes the applicable [third-party license notices](UshotApp/Re
 
 Update checks are manual only. Ushot does not check at launch or on a schedule, download automatically, or submit a system profile.
 
-The 0.1.1 client remains pinned to the legacy `/updates/appcast.xml` endpoint. That endpoint will stay permanently unavailable, so 0.1.1 can never self-update; install 0.1.2 manually once after its real GitHub Release is published. The 0.1.2 client moves to the new hardened feed, but **Check for Updates…** will still report a visible feed error until the separate 0.1.3 update gate passes.
+The 0.1.1 client remains pinned to the legacy `/updates/appcast.xml` endpoint. That endpoint will stay permanently unavailable, so 0.1.1 can never self-update; install 0.1.2 manually once from its official GitHub Release. The 0.1.2 client moves to the new hardened feed, but **Check for Updates…** will still report a visible feed error until the separate 0.1.3 update gate passes.
 
 - Ushot 0.1.2 and later are pinned to `https://ischeneycc.github.io/ushot/updates/v1/appcast.xml`; the legacy endpoint remains HTTP 404.
 - Restricted-Markdown release notes are embedded in that signed feed, so showing them does not make a detached notes request.
