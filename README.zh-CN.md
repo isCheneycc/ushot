@@ -19,7 +19,7 @@ Ushot 是一款面向 macOS 14 及以上版本 Apple 芯片 Mac 的原生截图�
 截图像素、标注、剪贴板输出、颜色采样、历史记录与图像编码均在本机处理。Ushot 不包含账户、遥测、分析、广告 SDK、崩溃报告上传或系统信息提交。
 
 > [!IMPORTANT]
-> Ushot 0.1.2（build 3）是计划中的加固更新器一次性手动过渡版。它仍待发布；只有当官方 GitHub Releases 页面实际出现 `v0.1.2` 及其产物时，它才是真正的发布版。生产更新源仍按设计保持未发布。
+> Ushot 0.1.2（build 3）是当前公开下载版本，也是进入加固更新器的一次性手动安装过渡版。0.1.1 用户需要从官方 GitHub Release 手动安装一次。生产更新源仍按设计保持未发布，直至独立门禁下的 0.1.3 更新准备完成。
 
 ## 一次截图，一条连续工作流
 
@@ -79,9 +79,9 @@ open ScreenshotApp.xcodeproj
 
 ## 发布状态与安装
 
-Ushot 0.1.1 是当前已发布的直装预览版。Ushot 0.1.2（build 3）是待发布的加固过渡版：它仍会在禁用更新源的情况下发布，并需要用户手动安装一次。受保护的工作流会构建、验证、发布，再通过匿名重新下载验证它的 DMG、ZIP、dSYM ZIP、发行清单与校验和。直接从 `main` 构建的版本仍属于开发产物，而不是受支持的分发渠道。
+Ushot 0.1.2（build 3）是当前已发布的直装版本，也是一次性的加固过渡版。它在禁用更新源的情况下发布，受保护的工作流已通过匿名重新下载验证其 DMG、ZIP、dSYM ZIP、发行清单与校验和。0.1.1 用户需要手动安装一次。直接从 `main` 构建的版本仍属于开发产物，而不是受支持的分发渠道。
 
-当官方 Releases 页面实际列出 `v0.1.2` 后，请从该页面下载 [Ushot-0.1.2-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.2/Ushot-0.1.2-arm64.dmg) 并手动安装。在此之前，该链接刻意处于待发布状态，[Ushot 0.1.1](https://github.com/isCheneycc/ushot/releases/tag/v0.1.1) 仍是最新已发布预览版。公开产物会刻意采用 ad-hoc 签名，不包含 Developer ID 签名或 Apple 公证，并且不会启用 App Sandbox。
+请从不可变的 [Ushot v0.1.2 Release](https://github.com/isCheneycc/ushot/releases/tag/v0.1.2) 下载 [Ushot-0.1.2-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.2/Ushot-0.1.2-arm64.dmg) 并手动安装。公开产物会刻意采用 ad-hoc 签名，不包含 Developer ID 签名或 Apple 公证，并且不会启用 App Sandbox。
 
 1. 打开 DMG，将 `Ushot.app` 拖入**应用程序**。
 2. 只移除下载文件的隔离属性，然后打开 Ushot：
@@ -91,7 +91,7 @@ Ushot 0.1.1 是当前已发布的直装预览版。Ushot 0.1.2（build 3）是�
    open "/Applications/Ushot.app"
    ```
 
-此流程仅适用于官方 [Ushot Releases](https://github.com/isCheneycc/ushot/releases) 页面实际已发布的 Ushot 版本化 DMG。不要把待发布的 0.1.2 链接当作发布证据，不要将命令替换为 `xattr -cr`，不要对更宽泛的目录执行，也不要用于第三方下载。后续安装或更新可能需要重新授予屏幕录制或辅助功能权限。
+此流程仅适用于官方 [Ushot Releases](https://github.com/isCheneycc/ushot/releases) 页面实际已发布的 Ushot 版本化 DMG。不要把无版本或第三方下载当作发布证据，不要将命令替换为 `xattr -cr`，也不要对更宽泛的目录执行。后续安装或更新可能需要重新授予屏幕录制或辅助功能权限。
 
 应用包内包含适用的[第三方许可证声明](UshotApp/Resources/ThirdPartyNotices.txt)，其中包括 Sparkle 及其捆绑组件。
 
@@ -99,7 +99,7 @@ Ushot 0.1.1 是当前已发布的直装预览版。Ushot 0.1.2（build 3）是�
 
 更新检查只能由用户手动触发。Ushot 不会在启动时或定时检查，不会自动下载，也不会提交系统信息。
 
-0.1.1 客户端仍固定使用旧 `/updates/appcast.xml` 端点。该端点将永久保持不可用，因此 0.1.1 永远不会自动升级；当 0.1.2 真正发布后，用户需要手动安装一次。0.1.2 客户端会切换到新的加固更新源，但在独立的 0.1.3 更新门禁通过之前，**检查更新…** 仍会显示明确的更新源错误。
+0.1.1 客户端仍固定使用旧 `/updates/appcast.xml` 端点。该端点将永久保持不可用，因此 0.1.1 永远不会自动升级；用户需要从官方 GitHub Release 手动安装一次 0.1.2。0.1.2 客户端会切换到新的加固更新源，但在独立的 0.1.3 更新门禁通过之前，**检查更新…** 仍会显示明确的更新源错误。
 
 - Ushot 0.1.2 及以后版本固定使用 `https://ischeneycc.github.io/ushot/updates/v1/appcast.xml`；旧端点永久保持 HTTP 404。
 - 受限 Markdown 格式的发行说明直接嵌入签名更新源，因此显示说明不会发起独立请求。

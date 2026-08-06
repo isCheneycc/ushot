@@ -8,7 +8,7 @@ The fixed hardened update feed, currently absent pending its evidence gate, is:
 https://ischeneycc.github.io/ushot/updates/v1/appcast.xml
 ```
 
-The first public installation requires the user to remove quarantine explicitly. Direct-download GitHub Releases and production Sparkle updates have separate readiness gates. Ushot 0.1.1 is the published direct-download preview and remains on the legacy `/updates/appcast.xml`, which must stay permanently absent. Ushot 0.1.2 (build 3) is the pending one-time manual-install hardened transition; publish it with `publish_update_feed=false` and do not call it released until the immutable GitHub Release exists. Only 0.1.2 and later use the v1 feed. Its first permitted item is 0.1.3 (build 4), and that appcast may be deployed only after the complete 0.1.2 → 0.1.3 matrix passes.
+The first public installation requires the user to remove quarantine explicitly. Direct-download GitHub Releases and production Sparkle updates have separate readiness gates. Ushot 0.1.1 is the first direct-download preview and remains on the legacy `/updates/appcast.xml`, which must stay permanently absent. Ushot 0.1.2 (build 3) is the published one-time manual-install hardened transition; its immutable five-asset Release used `publish_update_feed=false`, and the v1 endpoint remains absent. Only 0.1.2 and later use the v1 feed. Its first permitted item is 0.1.3 (build 4), and that appcast may be deployed only after the complete 0.1.2 → 0.1.3 matrix passes.
 
 ## Security invariants
 
@@ -69,6 +69,8 @@ scripts/backup-sparkle-key.sh \
 
 The helper exports only into a mode-0700 temporary directory, proves that the key derives Ushot's committed public key, encrypts it with AES-256-CBC plus PBKDF2, asks for the password again to decrypt and byte-compare a recovery copy, and removes all plaintext temporary material. Keep the printed encrypted-file SHA-256 with the recovery record, but store the password separately from the file. Never commit, log, paste into an issue, or pass the key or backup password as a command-line argument. CI injects the GitHub secret through standard input using `--ed-key-file -`; it never writes the key into the repository or an artifact. Losing this key while Ushot has no Developer ID fallback can strand every existing installation on its current update trust chain.
 
+The encrypted-backup portion was completed on 2026-08-06 at `~/Documents/Ushot-Sparkle-Ed25519-Backup.enc`: OpenSSL salted format, mode `0600`, 64 bytes, SHA-256 `da3f8fdd48a2906e48a7847ce252af472c11d865950673f7fb05375736d3f379`. The helper's public-key derivation and decrypt/byte-compare recovery check passed without exposing the password or plaintext key. This does not by itself complete the first-feed recovery gate: the recovered key must still sign a disposable update that the 0.1.2 hardened runtime accepts only for the valid archive and exact version identity.
+
 ## Local stable build and installation
 
 Create an Apple Development certificate in Xcode → Settings → Accounts → Manage Certificates. Copy `Config/Local.xcconfig.example` to the ignored `Config/Local.xcconfig` and set the correct Team ID.
@@ -108,7 +110,7 @@ Never install a `public-adhoc` build over the local signed `/Applications/Ushot.
 
 7. Approve the protected `release` environment only after comparing the run ref, requested tag, bound commit SHA and successful CI run.
 
-For 0.1.2, keep `publish_update_feed=false`. This publishes the five immutable direct-download assets, verifies every remote byte, and downloads all five again through the anonymous public boundary. It skips Sparkle tool download, current-feed access, private-key signing, Pages artifact creation and `deploy-appcast`. Users must install this transition manually once. **Check for Updates…** remains visible and reports a feed failure at the new v1 endpoint until the separately gated 0.1.3 feed is deployed.
+The completed 0.1.2 run used `publish_update_feed=false`. It published five immutable direct-download assets, verified every remote byte, and downloaded all five again through the anonymous public boundary. It skipped Sparkle tool download, current-feed access, private-key signing, Pages artifact creation and `deploy-appcast`. Users must install this transition manually once. **Check for Updates…** remains visible and reports a feed failure at the new v1 endpoint until the separately gated 0.1.3 feed is deployed.
 
 Only after the independent encrypted key recovery drill and complete clean-account 0.1.2 → 0.1.3 helper/replacement/tamper/exact-version/active-work matrix pass may an operator dispatch the first feed path:
 
@@ -143,7 +145,7 @@ scripts/package-release.sh \
 
 ## Exact release assets
 
-When version `0.1.2` is actually published, its GitHub Release must contain exactly the following. Before that Release exists, this is a required asset plan rather than a publication claim:
+The immutable published `v0.1.2` GitHub Release contains exactly the following:
 
 ```text
 Ushot-0.1.2-arm64.dmg
@@ -152,6 +154,8 @@ Ushot-0.1.2-arm64.dSYM.zip
 Ushot-0.1.2-arm64.release-manifest.json
 SHA256SUMS.txt
 ```
+
+Protected workflow run [`31019244714`](https://github.com/isCheneycc/ushot/actions/runs/31019244714) published this exact set on 2026-08-06 and verified all five assets through the anonymous public boundary. A separate no-credential download matched the GitHub digests and passed the complete local asset validator. The SHA-256 values are DMG `19972a5b7b27f5f0a10bad5ff0839807cf1f339a6537fac4b3fffb1207444fdd`, app ZIP `c9dd0d376362d5a0f38a540553c134d5f6ddddaf1b341bc9084cd7325e6c411d`, dSYM ZIP `29e008d2c2f27023b4574ee59db057e46b18897efc01d157043d458ddfa39776`, manifest `f47f180e566a6bd69fd026c17b4fd7675f4786ad9c349f10604b2901104cff20`, and checksums `7e51853ef899118bfe4e0fbc8d1b855925eafa4f7d0ddfeb8179958f5cab116a`. Both feed endpoints still returned HTTP 404 after publication, so this evidence does not claim updater readiness.
 
 - DMG: first installation only; it contains `Ushot.app` and an `/Applications` link.
 - ZIP: contains the app bundle and becomes the only full Sparkle enclosure only when a feed-enabled run signs it into the appcast. In the direct-download preview it is simply a validated Release asset and is not evidence of updater readiness.
