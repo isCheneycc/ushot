@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Advance source identity to Ushot 0.1.4 (build 5), the first permitted production feed item, while the public release and update feed remain at the published 0.1.3 direct-download state until the evidence gate closes.
 - Add hash-bound 0.1.3 → 0.1.4 update-transition fixture, loopback HTTPS and operator evidence tooling for the clean-account matrix.
+- Fix transition-fixture signing so a freeze-mode seed appcast remains owner-writable for official `generate_appcast` after mode-0444 ditto.
 - Harden release-asset ZIP extraction with write-confined `sandbox-exec` validation workspaces.
 
 ### Security

@@ -5094,6 +5094,13 @@ NORMAL_GENERATED_FEED="$NORMAL_GENERATION_WORKSPACE/appcast.xml"
 /usr/bin/ditto "$NORMAL_ARCHIVE_SOURCE" "$NORMAL_GENERATION_ARCHIVE"
 /usr/bin/ditto "$RELEASE_NOTES_SOURCE" "$NORMAL_GENERATION_NOTES"
 /usr/bin/ditto "$CURRENT_APPCAST" "$NORMAL_GENERATED_FEED"
+# Freeze snapshots seed inputs as mode 0444; ditto preserves that mode. Official
+# generate_appcast must overwrite the staged seed path as -o, so restore owner write
+# before signing without weakening the frozen source identity.
+/bin/chmod u+w "$NORMAL_GENERATED_FEED" \
+  || release_die "Could not make the staged seed appcast writable for generate_appcast."
+[[ "$(/usr/bin/stat -f '%Lp' "$NORMAL_GENERATED_FEED")" =~ ^[2367][0-7]{2}$ ]] \
+  || release_die "Staged seed appcast is not owner-writable after chmod."
 
 generate_normal_signed_feed() {
   local child
