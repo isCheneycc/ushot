@@ -37,8 +37,8 @@ readonly REQUEST_EVIDENCE_SCHEMA="ushot-update-transition-loopback-corroborating
 readonly OPERATOR_ATTESTATION_SCHEMA="ushot-update-transition-operator-attestation-v1"
 # Independently reviewed immutable loopback implementation. Admission fails
 # closed if its complete bytes or executable mode differ from this sentinel.
-readonly LOOPBACK_SERVER_SHA256="088278769ffb57be95879134622517eb6d3230daf0c31aaa9ae0b639871b5800"
-readonly LOOPBACK_SERVER_SIZE="99284"
+readonly LOOPBACK_SERVER_SHA256="27122d29b1a0a26696bc4f5d73970276aae7135bfc4b254729c971827648d9dd"
+readonly LOOPBACK_SERVER_SIZE="99402"
 readonly EVIDENCE_SCHEMA="3"
 readonly ARCHIVE_NAME="Ushot-0.1.4-arm64.zip"
 readonly EXPECTED_FIXTURE_SCRIPT_SHA256="7a486638f663bb84273b94fdfd29881a0eadcf8efd0e9c4c2069629ea4b6a1ea"
@@ -953,7 +953,11 @@ validate_fixture_manifest_case() {
           .maximumAuthenticatedPrefixBytes == $maximumAuthenticatedPrefixBytes and
           .authenticatedPrefixBytes > .maximumAuthenticatedPrefixBytes and
           (.signedFeedBytes | type == "number" and floor == .) and
-          .signedFeedBytes == (.authenticatedPrefixBytes + 512) and
+          # Official Sparkle signed-feed trailers are variable-length HTML comment
+          # blocks (often far under 512). The 512-byte figure is the host wire
+          # allowance above the authenticated prefix, not a fixed trailer size.
+          (.signedFeedBytes > .authenticatedPrefixBytes) and
+          ((.signedFeedBytes - .authenticatedPrefixBytes) <= 512) and
           .maximumSignedFeedWireBytes == $maximumSignedFeedWireBytes and
           .signedFeedBytes > .maximumSignedFeedWireBytes and
           .loopbackMaximumFeedBytes == $loopbackMaximumFeedBytes and
@@ -3279,18 +3283,20 @@ abort("runtime request session binding is not unique") \
   unless runtime_lines.count("session_id\t#{expected_session}") == 1
 abort("runtime request CA binding is not unique") \
   unless runtime_lines.count("test_ca_sha256\t#{expected_ca}") == 1
-events = lines.filter_map do |line|
+# macOS /usr/bin/ruby is 2.6 (no Enumerable#filter_map). Keep the protocol
+# parser compatible with the system Ruby the rest of this script already requires.
+events = lines.map do |line|
   fields = line.split("\t", -1)
   next unless fields[0] == "event"
   abort("malformed final event") unless fields.length == 12
   fields
-end
-runtime_events = runtime_lines.filter_map do |line|
+end.compact
+runtime_events = runtime_lines.map do |line|
   fields = line.split("\t", -1)
   next unless fields[0] == "event"
   abort("malformed runtime event") unless fields.length == 12
   fields
-end
+end.compact
 abort("runtime snapshot contains no events") if runtime_events.empty?
 abort("runtime snapshot already contains a service-ended or cleanup event") \
   if runtime_events.any? { |event| event[6] == "service" && %w[service-ended cleanup].include?(event[7]) }
@@ -3463,9 +3469,13 @@ verify_final_request_session_cleanup() {
   session_id="$(evidence_value_from_file "$runtime_phase/evidence.tsv" request_session_id)"
   ca_sha="$(evidence_value_from_file "$runtime_phase/evidence.tsv" request_test_ca_sha256)"
   completion_sequence="$(evidence_value_from_file "$runtime_phase/evidence.tsv" request_generation_complete_sequence)"
+  # Runtime negatives/success seal one generation; cleanup may only append the
+  # terminal service-ended/cleanup pair (exact_cleanup_only).
   validate_request_session_cleanup_tail \
     "$runtime_snapshot" "$final_snapshot" "$summary" \
     "$session_id" "$ca_sha" "$completion_sequence" \
+    exact_cleanup_only \
+    "$(evidence_value_from_file "$runtime_phase/evidence.tsv" request_generation)" \
     || release_die "Final request evidence is not a valid append-only protocol extension ending in exact cleanup events."
 
   hosts_marker_count="$(/usr/bin/awk -v marker="USHOT_UPDATE_TRANSITION_$session_id" \
@@ -3907,31 +3917,34 @@ LSOF_MISMATCH
     cleanup_truncated="$self_test_root/cleanup-truncated.tsv"
     cleanup_flipped="$self_test_root/cleanup-flipped.tsv"
     cleanup_inserted="$self_test_root/cleanup-inserted.tsv"
+    # Use ANSI-C quoting so \t becomes a real TAB for the TSV protocol.
     printf '%s\n' \
-      'session_id\t0123456789abcdef' \
-      'test_ca_sha256\tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' \
-      'event\t1\t2026-08-06T00:00:00Z\t1\tnormal\tnormal\toperator\tgeneration-complete\t-\t0\t0\tPASS' \
+      $'session_id\t0123456789abcdef' \
+      $'test_ca_sha256\tAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' \
+      $'event\t1\t2026-08-06T00:00:00Z\t1\tnormal\tnormal\toperator\tgeneration-complete\t-\t0\t0\tPASS' \
       > "$cleanup_runtime"
     /bin/cp "$cleanup_runtime" "$cleanup_final"
     printf '%s\n' \
-      'event\t2\t2026-08-06T00:00:01Z\t0\t-\t-\tservice\tservice-ended\t-\t0\t0\tPASS' \
-      'event\t3\t2026-08-06T00:00:02Z\t0\t-\t-\tservice\tcleanup\t-\t0\t0\tPASS' \
+      $'event\t2\t2026-08-06T00:00:01Z\t0\t-\t-\tservice\tservice-ended\t-\t0\t0\tPASS' \
+      $'event\t3\t2026-08-06T00:00:02Z\t0\t-\t-\tservice\tcleanup\t-\t0\t0\tPASS' \
       >> "$cleanup_final"
     validate_request_session_cleanup_tail \
       "$cleanup_runtime" "$cleanup_final" "$cleanup_summary" \
       0123456789abcdef AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 1 \
+      exact_cleanup_only 1 \
       || release_die "Exact synthetic two-event cleanup append was rejected."
 
     /bin/cp "$cleanup_final" "$cleanup_runtime_with_tail"
     /bin/cp "$cleanup_runtime_with_tail" "$cleanup_final_after_tail"
     printf '%s\n' \
-      'event\t4\t2026-08-06T00:00:03Z\t0\t-\t-\tservice\tservice-ended\t-\t0\t0\tPASS' \
-      'event\t5\t2026-08-06T00:00:04Z\t0\t-\t-\tservice\tcleanup\t-\t0\t0\tPASS' \
+      $'event\t4\t2026-08-06T00:00:03Z\t0\t-\t-\tservice\tservice-ended\t-\t0\t0\tPASS' \
+      $'event\t5\t2026-08-06T00:00:04Z\t0\t-\t-\tservice\tcleanup\t-\t0\t0\tPASS' \
       >> "$cleanup_final_after_tail"
     if validate_request_session_cleanup_tail \
       "$cleanup_runtime_with_tail" "$cleanup_final_after_tail" \
       "$self_test_root/unexpected-pre-tailed-summary.tsv" \
       0123456789abcdef AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 1 \
+      exact_cleanup_only 1 \
       >/dev/null 2>&1; then
       release_die "Synthetic runtime snapshot with a pre-existing cleanup tail was accepted."
     fi
@@ -3940,6 +3953,7 @@ LSOF_MISMATCH
     if validate_request_session_cleanup_tail \
       "$cleanup_runtime" "$cleanup_equal" "$self_test_root/unexpected-equal-summary.tsv" \
       0123456789abcdef AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 1 \
+      exact_cleanup_only 1 \
       >/dev/null 2>&1; then
       release_die "Synthetic equal runtime/final request evidence was accepted."
     fi
@@ -3949,6 +3963,7 @@ LSOF_MISMATCH
     if validate_request_session_cleanup_tail \
       "$cleanup_runtime" "$cleanup_truncated" "$self_test_root/unexpected-truncated-summary.tsv" \
       0123456789abcdef AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 1 \
+      exact_cleanup_only 1 \
       >/dev/null 2>&1; then
       release_die "Synthetic truncated cleanup append was accepted."
     fi
@@ -3958,19 +3973,21 @@ LSOF_MISMATCH
     if validate_request_session_cleanup_tail \
       "$cleanup_runtime" "$cleanup_flipped" "$self_test_root/unexpected-flipped-summary.tsv" \
       0123456789abcdef AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 1 \
+      exact_cleanup_only 1 \
       >/dev/null 2>&1; then
       release_die "Synthetic byte-flipped cleanup evidence was accepted."
     fi
 
     /bin/cp "$cleanup_runtime" "$cleanup_inserted"
     printf '%s\n' \
-      'event\t2\t2026-08-06T00:00:01Z\t1\tnormal\tnormal\toperator\tgeneration-complete\t-\t0\t0\tPASS' \
-      'event\t3\t2026-08-06T00:00:02Z\t0\t-\t-\tservice\tservice-ended\t-\t0\t0\tPASS' \
-      'event\t4\t2026-08-06T00:00:03Z\t0\t-\t-\tservice\tcleanup\t-\t0\t0\tPASS' \
+      $'event\t2\t2026-08-06T00:00:01Z\t1\tnormal\tnormal\toperator\tgeneration-complete\t-\t0\t0\tPASS' \
+      $'event\t3\t2026-08-06T00:00:02Z\t0\t-\t-\tservice\tservice-ended\t-\t0\t0\tPASS' \
+      $'event\t4\t2026-08-06T00:00:03Z\t0\t-\t-\tservice\tcleanup\t-\t0\t0\tPASS' \
       >> "$cleanup_inserted"
     if validate_request_session_cleanup_tail \
       "$cleanup_runtime" "$cleanup_inserted" "$self_test_root/unexpected-inserted-summary.tsv" \
       0123456789abcdef AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 1 \
+      exact_cleanup_only 1 \
       >/dev/null 2>&1; then
       release_die "Synthetic cleanup evidence with an inserted event was accepted."
     fi

@@ -1365,7 +1365,10 @@ def snapshot_cases(fixtures_directory, cases_directory, initial_case, feed_name,
         && oversized_feed["authenticatedPrefixBytes"] > MAX_AUTHENTICATED_PREFIX_BYTES \
         && oversized_feed["signedFeedBytes"].is_a?(Integer) \
         && oversized_feed["signedFeedBytes"] \
-          == oversized_feed["authenticatedPrefixBytes"] + SIGNED_FEED_TRAILER_BYTES \
+          > oversized_feed["authenticatedPrefixBytes"] \
+        && (oversized_feed["signedFeedBytes"] \
+          - oversized_feed["authenticatedPrefixBytes"]) \
+          <= SIGNED_FEED_TRAILER_BYTES \
         && oversized_feed["signedFeedBytes"] == oversized_item.feed.bytesize \
         && oversized_feed["maximumSignedFeedWireBytes"] == SIGNED_FEED_WIRE_CEILING_BYTES \
         && oversized_item.feed.bytesize > SIGNED_FEED_WIRE_CEILING_BYTES \
