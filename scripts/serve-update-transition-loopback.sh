@@ -1035,13 +1035,31 @@ def self_test_cleanup_primitives!(listener)
 end
 
 def drop_root_privileges!(uid, gid)
-  Process.groups = []
+  fail_safely("privilege-drop-requires-root") unless Process.euid.zero?
+  # While still root, prefer a primary-group-only vector for the post-drop
+  # process. macOS may repopulate directory membership after setuid, so empty
+  # Process.groups is not a portable success criterion.
+  begin
+    Process.groups = [gid]
+  rescue StandardError
+    begin
+      Process.groups = []
+    rescue StandardError
+      # Fall through; identity checks below remain mandatory.
+    end
+  end
   Process::GID.change_privilege(gid)
   Process::UID.change_privilege(uid)
   fail_safely("privilege-drop-id-mismatch") \
     unless Process.uid == uid && Process.euid == uid \
       && Process.gid == gid && Process.egid == gid
-  fail_safely("privilege-drop-supplementary-groups-remain") unless Process.groups.empty?
+  fail_safely("privilege-drop-root-residual") \
+    if [Process.uid, Process.euid, Process.gid, Process.egid].any?(&:zero?)
+  remaining = Process.groups.map(&:to_i).uniq
+  # Never keep gid 0 after drop. Non-empty operator membership (staff/admin/...)
+  # is normal on macOS for the interactive SUDO_USER identity and matches the
+  # non-root high-port serve path.
+  fail_safely("privilege-drop-supplementary-groups-remain") if remaining.include?(0)
 end
 
 def canonical_owned_directory!(path, uid, required_mode: nil)
