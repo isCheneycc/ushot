@@ -6,14 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-06
+
 ### Changed
 
-- Reserve Ushot 0.1.3 (build 4) as a second manual GitHub-only transition with `publish_update_feed=false`; the first production feed item and online update moves to 0.1.4 (build 5).
-- Pin the 0.1.3 candidate to the published Sparkle hardening fork `2.9.5-ushot.4` at immutable revision `3d81360ff115ffb80222c2723d72cb4cfa802774` and SwiftPM ZIP SHA-256 `d8d36e5b5ee9e97b17babc1beeb26795b96558cafe5450130aafa5b169d5c829`; `.3` remains the historical authenticated-XML-hook predecessor.
+- Publish Ushot 0.1.3 (build 4) as the second manual GitHub-only transition with `publish_update_feed=false`; its five immutable assets passed anonymous download verification while both appcast endpoints remained HTTP 404, and the first production feed item and online update moves to 0.1.4 (build 5).
+- Pin published Ushot 0.1.3 to the Sparkle hardening fork `2.9.5-ushot.4` at immutable revision `3d81360ff115ffb80222c2723d72cb4cfa802774` and SwiftPM ZIP SHA-256 `d8d36e5b5ee9e97b17babc1beeb26795b96558cafe5450130aafa5b169d5c829`; `.3` remains the historical authenticated-XML-hook predecessor.
 - Keep Sparkle private-key plaintext in process memory and standard input in the backup, recovery-drill and protected-signing paths instead of creating plaintext key files.
 - Validate encrypted-backup headers through one shared fixed-path hexadecimal probe. The previous backup helper called nonexistent macOS path `/usr/bin/dd`, hid that command failure and misreported a valid LibreSSL ciphertext as missing `Salted__`; the corrected path distinguishes tool failure from malformed ciphertext and is covered with real nonsecret LibreSSL output.
 - Split release building, opaque signing-input preparation, secret-free approval, feed-only signing, immutable-feed validation, clean Pages packaging, GitHub publication, deployment admission and pure Pages deployment into separate capability boundaries. The no-feed path still requires approval without starting the signing environment or reading the update key.
-- Rotate the still-unpublished update trust root at the 0.1.3 manual-install boundary, using the dedicated Sparkle Keychain account `io.github.ischeneycc.ushot.20260806`; published 0.1.1/0.1.2 artifact gates retain their historical public-key identity.
+- Rotate the then-unpublished update trust root at the 0.1.3 manual-install boundary, using the dedicated Sparkle Keychain account `io.github.ischeneycc.ushot.20260806`; published 0.1.1/0.1.2 artifact gates retain their historical public-key identity.
 
 ### Security
 
@@ -54,6 +56,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Limited the manual Gatekeeper workaround to removing `com.apple.quarantine` from an official Ushot release instead of clearing every extended attribute.
 - Defined the Sparkle EdDSA private key as release-critical secret material requiring protected storage, an independent encrypted backup and an exercised recovery process.
 
-[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.3
 [0.1.2]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.2
 [0.1.1]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.1
