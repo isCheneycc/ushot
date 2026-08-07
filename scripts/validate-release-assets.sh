@@ -23,6 +23,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -d "$DIRECTORY" ]] || release_die "Asset directory not found: $DIRECTORY"
+DIRECTORY="$(cd "$DIRECTORY" && pwd -P)" \
+  || release_die "Could not canonicalize the release asset directory."
 [[ "$MODE" == "public-adhoc" || "$MODE" == "developer-id" ]] \
   || release_die "Asset validation mode must be public-adhoc or developer-id."
 release_validate_version "$VERSION"
@@ -36,9 +38,12 @@ release_require_command file
 release_require_command find
 release_require_command hdiutil
 release_require_command jq
+release_require_command od
 release_require_command readlink
+release_require_command sandbox-exec
 release_require_command sort
 release_require_command stat
+release_require_command tr
 release_require_command zipinfo
 
 DMG_NAME="$USHOT_PRODUCT_NAME-$VERSION-$USHOT_ARCHITECTURE.dmg"
@@ -136,6 +141,12 @@ done
 if ! VALIDATION_WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/ushot-assets.XXXXXX")"; then
   release_die "Could not create the release-validation workspace."
 fi
+VALIDATION_WORKSPACE="$(cd "$VALIDATION_WORKSPACE" && pwd -P)" \
+  || release_die "Could not canonicalize the release-validation workspace."
+chmod 700 "$VALIDATION_WORKSPACE" \
+  || release_die "Could not make the release-validation workspace private."
+[[ "$(stat -f '%Lp' "$VALIDATION_WORKSPACE")" == "700" ]] \
+  || release_die "Release-validation workspace permissions are not private."
 ZIP_EXTRACT_ROOT="$VALIDATION_WORKSPACE/zip"
 DSYM_EXTRACT_ROOT="$VALIDATION_WORKSPACE/dsym"
 DMG_MOUNT_ROOT="$VALIDATION_WORKSPACE/dmg"
@@ -151,8 +162,98 @@ cleanup() {
   rm -rf "$VALIDATION_WORKSPACE"
 }
 trap cleanup EXIT
-mkdir -p "$ZIP_EXTRACT_ROOT" "$DSYM_EXTRACT_ROOT" "$DMG_MOUNT_ROOT" \
+mkdir "$DMG_MOUNT_ROOT" \
   || release_die "Could not prepare the release-validation workspace."
+chmod 700 "$DMG_MOUNT_ROOT" \
+  || release_die "Could not make the DMG mount root private."
+
+extract_zip_write_confined() {
+  local archive_path="$1"
+  local extraction_root="$2"
+  local archive_label="$3"
+  local archive_parent
+  local extraction_parent
+  local extraction_basename
+  local sandbox_profile
+
+  [[ "$archive_label" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || { release_warn "Archive extraction label is invalid."; return 1; }
+  [[ "$archive_path" == /* \
+      && -f "$archive_path" \
+      && ! -L "$archive_path" \
+      && -s "$archive_path" ]] \
+    || { release_warn "$archive_label archive must be a nonempty, absolute regular file."; return 1; }
+  archive_parent="$(cd "$(dirname "$archive_path")" && pwd -P)" \
+    || { release_warn "$archive_label archive parent could not be canonicalized."; return 1; }
+  [[ "$archive_path" == "$archive_parent/$(basename "$archive_path")" ]] \
+    || { release_warn "$archive_label archive path is noncanonical."; return 1; }
+
+  [[ "$extraction_root" == /* ]] \
+    || { release_warn "$archive_label extraction root must be absolute."; return 1; }
+  extraction_parent="$(dirname "$extraction_root")"
+  extraction_basename="$(basename "$extraction_root")"
+  [[ "$extraction_basename" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ \
+      && "$extraction_basename" != "." \
+      && "$extraction_basename" != ".." \
+      && -d "$extraction_parent" \
+      && ! -L "$extraction_parent" \
+      && "$(cd "$extraction_parent" && pwd -P)" == "$extraction_parent" \
+      && ! -e "$extraction_root" \
+      && ! -L "$extraction_root" ]] \
+    || { release_warn "$archive_label extraction root must be a fresh child of a canonical real directory."; return 1; }
+
+  sandbox_profile="$extraction_parent/.$extraction_basename.archive-extraction.sb"
+  [[ ! -e "$sandbox_profile" && ! -L "$sandbox_profile" ]] \
+    || { release_warn "$archive_label sandbox profile path already exists."; return 1; }
+  if ! printf '%s\n' \
+    '(version 1)' \
+    '(deny default)' \
+    '(allow process-exec (literal "/usr/bin/ditto"))' \
+    '(allow file-read*)' \
+    '(allow file-write* (subpath (param "EXTRACTION_ROOT")))' \
+    > "$sandbox_profile"; then
+    release_warn "$archive_label sandbox profile could not be written."
+    return 1
+  fi
+  chmod 600 "$sandbox_profile" \
+    || { release_warn "$archive_label sandbox profile could not be made private."; return 1; }
+  if ! (
+    umask 077
+    mkdir "$extraction_root"
+  ); then
+    release_warn "$archive_label extraction root could not be created."
+    return 1
+  fi
+  chmod 700 "$extraction_root" \
+    || { release_warn "$archive_label extraction root could not be made private."; return 1; }
+  [[ -d "$extraction_root" \
+      && ! -L "$extraction_root" \
+      && "$(cd "$extraction_root" && pwd -P)" == "$extraction_root" \
+      && "$(stat -f '%Lp' "$extraction_root")" == "700" ]] \
+    || { release_warn "$archive_label extraction root failed its private-directory check."; return 1; }
+
+  if ! (
+    # ditto applies the process umask while materializing ZIP entries. Keep the
+    # validation tree deterministic without weakening its archived mode bits.
+    umask 022
+    /usr/bin/sandbox-exec \
+      -D "EXTRACTION_ROOT=$extraction_root" \
+      -f "$sandbox_profile" \
+      /usr/bin/ditto \
+        -x \
+        -k \
+        --noextattr \
+        --noqtn \
+        --noacl \
+        --norsrc \
+        --nopersistRootless \
+        "$archive_path" \
+        "$extraction_root"
+  ); then
+    release_warn "$archive_label archive failed write-confined ditto extraction."
+    return 1
+  fi
+}
 
 validate_archive_paths() {
   local archive_label="$1"
@@ -190,6 +291,49 @@ validate_bundle_symlinks() {
       */../*|*/./*|*//*) release_die "Bundle symlink may escape its canonical relative path: $symlink_path -> $symlink_target" ;;
     esac
   done < <(find "$bundle_path" -type l -print0)
+}
+
+isolate_appledouble_sidecars() {
+  local bundle_path="$1"
+  local archive_label="$2"
+  local sidecar_paths="$VALIDATION_WORKSPACE/$archive_label.appledouble.paths.nul"
+  local quarantine_root="$VALIDATION_WORKSPACE/$archive_label-appledouble"
+  local sidecar_path
+  local sidecar_name
+  local sibling_path
+  local sidecar_magic
+  local sidecar_count=0
+
+  find "$bundle_path" -name '._*' -print0 > "$sidecar_paths" \
+    || release_die "Could not enumerate $archive_label AppleDouble sidecars."
+  chmod 600 "$sidecar_paths" \
+    || release_die "Could not make the $archive_label AppleDouble path evidence private."
+  while IFS= read -r -d '' sidecar_path; do
+    [[ "$sidecar_path" == "$bundle_path/"* \
+        && -f "$sidecar_path" \
+        && ! -L "$sidecar_path" ]] \
+      || release_die "$archive_label contains a non-regular AppleDouble-named object."
+    sidecar_name="$(basename "$sidecar_path")"
+    sibling_path="$(dirname "$sidecar_path")/${sidecar_name#._}"
+    [[ -e "$sibling_path" || -L "$sibling_path" ]] \
+      || release_die "$archive_label contains an orphan AppleDouble sidecar."
+    sidecar_magic="$(/usr/bin/od -An -tx1 -N4 "$sidecar_path" | /usr/bin/tr -d '[:space:]')" \
+      || release_die "Could not inspect an $archive_label AppleDouble sidecar."
+    [[ "$sidecar_magic" == "00051607" ]] \
+      || release_die "$archive_label contains a ._ file without the AppleDouble magic."
+    if [[ "$sidecar_count" == "0" ]]; then
+      mkdir -m 700 "$quarantine_root" \
+        || release_die "Could not prepare the $archive_label AppleDouble quarantine."
+      chmod 700 "$quarantine_root" \
+        || release_die "Could not make the $archive_label AppleDouble quarantine private."
+    fi
+    mv "$sidecar_path" "$quarantine_root/$sidecar_count" \
+      || release_die "Could not isolate an $archive_label AppleDouble sidecar."
+    sidecar_count=$((sidecar_count + 1))
+  done < "$sidecar_paths"
+  [[ -z "$(find "$bundle_path" -name '._*' -print -quit)" ]] \
+    || release_die "$archive_label still contains an AppleDouble-named object after isolation."
+  release_log "Isolated $sidecar_count validated AppleDouble metadata sidecars from $archive_label."
 }
 
 write_bundle_tree_manifest() {
@@ -250,8 +394,11 @@ UNEXPECTED_ZIP_ENTRIES="$(printf '%s\n' "$ZIP_ENTRIES" | grep -Ev "^($USHOT_APP_
 DUPLICATE_ZIP_ENTRIES="$(printf '%s\n' "$ZIP_ENTRIES" | sort | uniq -d)"
 [[ -z "$DUPLICATE_ZIP_ENTRIES" ]] \
   || release_die "Sparkle ZIP contains duplicate paths: $DUPLICATE_ZIP_ENTRIES"
-ditto -x -k "$DIRECTORY/$ZIP_NAME" "$ZIP_EXTRACT_ROOT" \
-  || release_die "Could not extract the application ZIP: $ZIP_NAME"
+extract_zip_write_confined \
+  "$DIRECTORY/$ZIP_NAME" \
+  "$ZIP_EXTRACT_ROOT" \
+  application-zip \
+  || release_die "Could not safely extract the application ZIP: $ZIP_NAME"
 ZIP_APP="$ZIP_EXTRACT_ROOT/$USHOT_APP_BUNDLE"
 [[ -d "$ZIP_APP" && ! -L "$ZIP_APP" ]] \
   || release_die "Sparkle ZIP did not extract one real $USHOT_APP_BUNDLE directory."
@@ -271,11 +418,15 @@ UNEXPECTED_DSYM_ENTRIES="$(printf '%s\n' "$DSYM_ENTRIES" | grep -Ev "^($USHOT_AP
 DUPLICATE_DSYM_ENTRIES="$(printf '%s\n' "$DSYM_ENTRIES" | sort | uniq -d)"
 [[ -z "$DUPLICATE_DSYM_ENTRIES" ]] \
   || release_die "dSYM ZIP contains duplicate paths: $DUPLICATE_DSYM_ENTRIES"
-ditto -x -k "$DIRECTORY/$DSYM_ZIP_NAME" "$DSYM_EXTRACT_ROOT" \
-  || release_die "Could not extract the dSYM ZIP: $DSYM_ZIP_NAME"
+extract_zip_write_confined \
+  "$DIRECTORY/$DSYM_ZIP_NAME" \
+  "$DSYM_EXTRACT_ROOT" \
+  dsym-zip \
+  || release_die "Could not safely extract the dSYM ZIP: $DSYM_ZIP_NAME"
 EXTRACTED_DSYM="$DSYM_EXTRACT_ROOT/$USHOT_APP_BUNDLE.dSYM"
 [[ -d "$EXTRACTED_DSYM" && ! -L "$EXTRACTED_DSYM" ]] \
   || release_die "dSYM ZIP did not extract one real $USHOT_APP_BUNDLE.dSYM directory."
+isolate_appledouble_sidecars "$EXTRACTED_DSYM" dsym-zip
 validate_bundle_symlinks "$EXTRACTED_DSYM"
 release_verify_dsym "$ZIP_APP" "$EXTRACTED_DSYM"
 
