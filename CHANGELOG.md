@@ -20,6 +20,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Record a PASS for the operator recovered-key drill against exact published 0.1.3 assets (`backup_sha256=f308c694…155d0`, published ZIP `91b4fbe2…efc8`, helper `appcast_sha256=965b1971…1a7d6`). Keep production self-update blocked until the complete 0.1.3 → 0.1.4 client matrix is also recorded; do not deploy `/updates/v1/appcast.xml` or use `publish_update_feed=true` before that evidence.
 - Record admin-account human product-path evidence for the `tampered-archive` fixture: Ushot 0.1.3 showed the signature-failure UI, aborted with `SUSparkleErrorDomain` code `4005`, and remained at 0.1.3 (build 4). Formal `negative-verify` / clean-account closure remain open; this is not publication proof.
 
+## [0.1.4] - 2026-08-07
+
+### Changed
+
+- Publish Ushot 0.1.4 (build 5) as the first production feed item with authenticated in-app update from 0.1.3.
+- Deploy the signed v1 appcast at `https://ischeneycc.github.io/ushot/updates/v1/appcast.xml` after immutable five-asset GitHub Release publication.
+
+### Security
+
+- Keep update checks manual-only with no automatic download or system profiling.
+- Require signed-feed verification, host authenticated-XML validation, independent archive EdDSA and exact short/build identity for every update.
+
 ## [0.1.3] - 2026-08-06
 
 ### Changed
