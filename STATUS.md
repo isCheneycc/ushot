@@ -176,6 +176,16 @@ Last updated: 2026-08-06
 - Product identity, app icon/brand asset licensing, Apache-2.0 licensing, pre-0.1.3 rotation, encrypted remote recovery, protected Secret replacement and 0.1.3 direct-download publication are resolved.
 - Exact-published-asset recovered-key drill (2026-08-06): `scripts/run-sparkle-key-recovery-drill.sh` returned `result=PASS` for identity `0.1.3` / build `4`, `backup_sha256=f308c694d6597a52a700ab4f9b97386ee17bd5332ad7725655fd13ab666155d0`, `archive_sha256=91b4fbe2c40826aec909cb38f3fea5e2056e40b5dfc2fbe54b3efeb1d687efc8`, `appcast_sha256=965b19710233d04b02ffdf87888291156df09984a5c0cf300b6cc5c91611a7d6`. Password stayed on the controlling terminal; no plaintext key file. Recorded in `docs/MANUAL_TESTING.md` and `docs/DECISIONS_NEEDED.md`.
 
+## Admin-account 0.1.3 → 0.1.4 product-path matrix (2026-08-07)
+
+- Operator decision: skip clean-account gate; run remaining cases on the current admin account.
+- Product-path results (installed `/Applications/Ushot.app` stayed 0.1.3 through negatives, then succeeded to **0.1.4 (build 5)** on `normal`):
+  - `tampered-archive`, `short-version-mismatch`, `build-number-mismatch`, `short-and-build-mismatch`, `duplicate-build-metadata`, `oversized-signed-feed` (normal + chunked): human/agent UI **PASS** (still 0.1.3)
+  - `normal`: install-and-relaunch **PASS** → 0.1.4 (build 5)
+- Evidence dir: `ushot-phase1-recovery/matrix-report/ADMIN-MATRIX-RESULTS.tsv` (outside this repo tree).
+- Loopback dual-stack hosts (`127.0.0.1` + `::1`) and exact-probe acceptance of `::1` were required for the post-setup gate on this Mac.
+- This does **not** authorize `publish_update_feed=true`, environment allowlists for `v0.1.4`, or production self-update readiness. Clean-account remains skipped by owner choice.
+
 ## Next Concrete Step
 
 - Source identity and transition tooling for candidate 0.1.4 (build 5) are staged on `codex/v0.1.4-first-update`. The recovered-key drill is closed. The seven-case private fixture set for 0.1.3 → 0.1.4 was signed with Keychain account `io.github.ischeneycc.ushot.20260806` on 2026-08-06 (`result=PASS`, fixture-manifest SHA-256 `76a77d319f205d0ee5fe2bda7f7641dd4caf48ad4ce03d9cc7e800ecef3dced2`): normal, tampered-archive, short-version-mismatch, build-number-mismatch, short-and-build-mismatch, duplicate-build-metadata, oversized-signed-feed. Prepare tooling was fixed so a freeze-mode seed appcast (0444) is owner-writable before official `generate_appcast` overwrites it. Loopback now installs dual-stack hosts and listens on `127.0.0.1` plus `::1` so the post-setup resolver gate no longer fails solely because public AAAA remained visible. This is **not** a published Release or self-update readiness claim.

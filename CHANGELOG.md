@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Fix transition-fixture signing so a freeze-mode seed appcast remains owner-writable for official `generate_appcast` after mode-0444 ditto.
 - Harden release-asset ZIP extraction with write-confined `sandbox-exec` validation workspaces.
 - Make the transition loopback install dual-stack hosts (`127.0.0.1` and `::1`) and listen on both addresses so post-setup resolver checks pass on modern macOS with public AAAA records.
+- Accept `::1` as well as `127.0.0.1` in loopback exact curl-probe metadata so dual-stack hosts setup can pass on modern macOS.
 
 ### Security
 

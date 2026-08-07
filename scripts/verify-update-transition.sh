@@ -2915,7 +2915,9 @@ verify_negative_runtime_evidence() {
     validation_max=$(( $(app_event_first_ms_regex "$baseline_pid" "$terminal_pattern") + 5000 ))
     case "$CASE_LABEL" in
       tampered-archive)
-        require_sparkle_event_contains "EdDSA signature does not match. Data of the update archive being checked is different than data that has been signed" "Pre-extraction archive EdDSA mismatch" "$validation_min" "$validation_max"
+        # Sparkle formats this as "Data of the %@ being checked" where the
+        # substituted noun is either "update" or "update archive".
+        require_sparkle_event_contains "EdDSA signature does not match. Data of the update" "Pre-extraction archive EdDSA mismatch" "$validation_min" "$validation_max"
         category="archive-eddsa-pre-extraction-rejected"
         ;;
       short-version-mismatch)
