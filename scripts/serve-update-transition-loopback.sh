@@ -1974,9 +1974,10 @@ def curl_probe(
   fail_safely("curl-probe-unexpected-stderr") unless nonmetadata.empty?
   fail_safely("curl-probe-metadata-count-invalid") unless metadata_lines.length == 1
   metadata = metadata_lines.fetch(0).split("\t", -1)
+  loopback_ips = ["127.0.0.1", "::1"].freeze
   fail_safely("curl-probe-metadata-invalid") \
     unless metadata.length == 5 && metadata[0] == "USHOT_CURL_META" \
-      && metadata[1] == "127.0.0.1" && metadata[2] == "127.0.0.1" \
+      && loopback_ips.include?(metadata[1]) && loopback_ips.include?(metadata[2]) \
       && metadata[3] == requested_url && metadata[4] == "200"
   header_end = wire_bytes.index("\r\n\r\n")
   fail_safely("curl-probe-header-boundary-missing") unless header_end
@@ -2267,7 +2268,31 @@ begin
   if self_test_only
     fatal_state.check!
   else
-    tty = File.open("/dev/tty", "r+")
+    control_fifo_path = request_evidence_path.empty? ? "" : "#{request_evidence_path}.cmd"
+    control_from_fifo = !control_fifo_path.empty? \
+      && File.exist?(control_fifo_path) \
+      && File.ftype(control_fifo_path) == "fifo"
+    control = if control_from_fifo
+      puts("loopback: control_channel=fifo path=#{control_fifo_path}")
+      # Open read/write so the open does not block until a writer attaches.
+      File.open(control_fifo_path, File::RDWR | File::NONBLOCK)
+    else
+      puts("loopback: control_channel=tty")
+      File.open("/dev/tty", "r+")
+    end
+    tty = control
+    read_control_line = lambda do
+      # NONBLOCK fifo may raise EAGAIN until a writer is ready.
+      loop do
+        begin
+          line = control.gets
+          return line
+        rescue Errno::EAGAIN, Errno::EWOULDBLOCK
+          sleep(0.05)
+          fatal_state.check!
+        end
+      end
+    end
     if port == 443
     quoted_ca = ca_path.gsub("'", %q('\''))
     quoted_script = script_path.gsub("'", %q('\''))
@@ -2301,9 +2326,18 @@ begin
       "--expected-script-sha256 #{script_sha256} --root-copy-directory '#{quoted_root_dir}' " \
       "--session-id #{session_id} --ca-sha256 #{ca_fingerprint}"
     )
-    tty.write("Press Return only after both hash-bound setup commands succeed, or Control-C to abort: ")
-    tty.flush
-    tty.gets or fail_safely("operator-setup-checkpoint-closed")
+    if control_from_fifo
+      puts("loopback: waiting for setup-ready on control fifo after hosts+CA install")
+      setup_line = read_control_line.call
+      fail_safely("operator-setup-checkpoint-closed") unless setup_line
+      setup_cmd = setup_line.strip
+      fail_safely("operator-setup-checkpoint-invalid") \
+        unless setup_cmd == "setup-ready" || setup_cmd.empty?
+    else
+      control.write("Press Return only after both hash-bound setup commands succeed, or Control-C to abort: ")
+      control.flush
+      control.gets or fail_safely("operator-setup-checkpoint-closed")
+    end
     verify_system_setup!(session_id, ca_fingerprint, server_certificate_path)
     verify_active_routes!(state, port, ca_path, session_id, workspace, exact: true)
       puts("loopback: exact resolver/trust/byte probe=PASS")
@@ -2314,9 +2348,9 @@ begin
   puts("Case or mode switching requires zero active responses and explicit completion of the current Ushot transaction.")
   loop do
     fatal_state.check!
-    tty.write("ushot-loopback> ")
-    tty.flush
-    input = tty.gets
+    control.write("ushot-loopback> ") unless control_from_fifo
+    control.flush unless control_from_fifo
+    input = control_from_fifo ? read_control_line.call : control.gets
     fail_safely("operator-control-closed") unless input
     command, value = input.strip.split(/[[:space:]]+/, 2)
     case command
