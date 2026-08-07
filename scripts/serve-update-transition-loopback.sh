@@ -631,15 +631,18 @@ end
 
 def hosts_block_strings(session_id)
   marker = "USHOT_UPDATE_TRANSITION_#{session_id}"
+  # Dual-stack: IPv4-only hosts leaves public AAAA records visible to dscacheutil
+  # and fails verify_loopback_resolution! with system-resolution-not-loopback-only.
   [
     "# BEGIN #{marker}",
     "127.0.0.1 #{FEED_HOST} #{ARCHIVE_HOST}",
+    "::1 #{FEED_HOST} #{ARCHIVE_HOST}",
     "# END #{marker}"
   ]
 end
 
 def inspect_hosts(data, session_id, remove: false)
-  begin_line, mapping_line, end_line = hosts_block_strings(session_id)
+  begin_line, ipv4_line, ipv6_line, end_line = hosts_block_strings(session_id)
   lines = data.lines
   output = []
   blocks = 0
@@ -648,12 +651,14 @@ def inspect_hosts(data, session_id, remove: false)
   while index < lines.length
     current = lines[index].sub(/\r?\n\z/, "")
     if current == begin_line
-      next_mapping = lines[index + 1]&.sub(/\r?\n\z/, "")
-      next_end = lines[index + 2]&.sub(/\r?\n\z/, "")
-      fail_safely("hosts-partial-session-block") unless next_mapping == mapping_line && next_end == end_line
+      next_ipv4 = lines[index + 1]&.sub(/\r?\n\z/, "")
+      next_ipv6 = lines[index + 2]&.sub(/\r?\n\z/, "")
+      next_end = lines[index + 3]&.sub(/\r?\n\z/, "")
+      fail_safely("hosts-partial-session-block") \
+        unless next_ipv4 == ipv4_line && next_ipv6 == ipv6_line && next_end == end_line
       blocks += 1
-      output.concat(lines[index, 3]) unless remove
-      index += 3
+      output.concat(lines[index, 4]) unless remove
+      index += 4
       next
     end
     fail_safely("hosts-orphan-session-marker") if current == end_line
@@ -683,9 +688,9 @@ rescue Errno::ELOOP
 end
 
 def hosts_installed_bytes(original, session_id)
-  begin_line, mapping_line, end_line = hosts_block_strings(session_id)
+  begin_line, ipv4_line, ipv6_line, end_line = hosts_block_strings(session_id)
   separator = original.empty? || original.end_with?("\n") ? "" : "\n"
-  "#{original}#{separator}#{begin_line}\n#{mapping_line}\n#{end_line}\n"
+  "#{original}#{separator}#{begin_line}\n#{ipv4_line}\n#{ipv6_line}\n#{end_line}\n"
 end
 
 HOSTS_METADATA_KEYS = %w[dev ino uid gid mode flags acl_sha256 xattrs_sha256].freeze
@@ -1016,9 +1021,12 @@ end
 
 def self_test_cleanup_primitives!(listener)
   session_id = "0123456789abcdef"
-  begin_line, mapping_line, end_line = hosts_block_strings(session_id)
+  begin_line, ipv4_line, ipv6_line, end_line = hosts_block_strings(session_id)
   baseline = "127.0.0.1 localhost\n"
   complete = hosts_installed_bytes(baseline, session_id)
+  fail_safely("cleanup-structure-self-test-failed") \
+    unless complete.include?(ipv4_line) && complete.include?(ipv6_line) \
+      && complete.include?(begin_line) && complete.include?(end_line)
   blocks, cleaned = inspect_hosts(complete, session_id, remove: true)
   fail_safely("cleanup-structure-self-test-failed") unless blocks == 1 && cleaned == baseline
   _mutated_blocks, mutated_cleaned = inspect_hosts("#{complete}# concurrent edit\n", session_id, remove: true)
@@ -1573,7 +1581,7 @@ class EvidenceWriter
     write_row("started_at_utc", Time.now.utc.iso8601(6))
     write_row("script_sha256", script_sha256)
     write_row("test_ca_sha256", ca_sha256)
-    write_row("listener_address", "127.0.0.1")
+    write_row("listener_address", "127.0.0.1,::1")
     write_row("listener_port", port)
     write_row("exact_system_probe_required", port == 443 ? "true" : "false")
     write_row("fixture_manifest_sha256", cases_snapshot.manifest_sha256)
@@ -2072,7 +2080,7 @@ def verify_system_setup!(session_id, ca_fingerprint, server_certificate_path)
   end
 end
 
-def start_server(listener, port, certificate, private_key, state, evidence, session_id, fatal_state)
+def start_server(listeners, port, certificate, private_key, state, evidence, session_id, fatal_state)
   logger = WEBrick::Log.new($stderr, WEBrick::Log::FATAL)
   server = WEBrick::HTTPServer.new(
     :Port => port,
@@ -2086,9 +2094,11 @@ def start_server(listener, port, certificate, private_key, state, evidence, sess
     :SSLCertificate => certificate,
     :SSLPrivateKey => private_key
   )
-  ssl_listener = OpenSSL::SSL::SSLServer.new(listener, server.ssl_context)
-  ssl_listener.start_immediately = true
-  server.listeners << ssl_listener
+  listeners.each do |listener|
+    ssl_listener = OpenSSL::SSL::SSLServer.new(listener, server.ssl_context)
+    ssl_listener.start_immediately = true
+    server.listeners << ssl_listener
+  end
   configure_response(server, state, evidence, session_id, fatal_state)
   thread = Thread.new do
     begin
@@ -2101,6 +2111,21 @@ def start_server(listener, port, certificate, private_key, state, evidence, sess
   end
   thread.abort_on_exception = false
   [server, thread]
+end
+
+def create_loopback_listeners!(port)
+  ipv4 = TCPServer.new("127.0.0.1", port)
+  ipv4.close_on_exec = true
+  listeners = [ipv4]
+  begin
+    ipv6 = TCPServer.new("::1", port)
+    ipv6.close_on_exec = true
+    listeners << ipv6
+  rescue Errno::EADDRINUSE, Errno::EAFNOSUPPORT, Errno::EPERM, SocketError => error
+    ipv4.close
+    fail_safely("loopback-ipv6-listener-unavailable")
+  end
+  listeners
 end
 
 def wait_for_listener!(thread, port, ca_path, session_id, workspace, state, fatal_state)
@@ -2165,11 +2190,13 @@ if operation == "recover-cleanup"
   exit(0)
 end
 
-listener = TCPServer.new("127.0.0.1", port)
-listener.close_on_exec = true
+listeners = create_loopback_listeners!(port)
+listener = listeners.fetch(0)
 guardian_pid = nil
 guardian_writer = nil
 if Process.euid.zero?
+  # Guardian only needs one inherited socket identity for process lifetime; close
+  # the forked copy of the primary listener so the parent retains both binds.
   guardian_pid, guardian_writer = start_cleanup_guardian(listener, root_copy_directory)
   drop_root_privileges!(run_uid, run_gid)
 else
@@ -2210,7 +2237,7 @@ begin
   puts("evidence_begin=ushot-update-transition-loopback-corroborating-v2")
   puts("session_id=#{session_id}")
   puts("script_sha256=#{script_sha256}")
-  puts("listener_address=127.0.0.1")
+  puts("listener_address=127.0.0.1,::1")
   puts("listener_port=#{port}")
   puts("feed_host=#{FEED_HOST}")
   puts("feed_path=#{FEED_ROUTE}")
@@ -2233,7 +2260,7 @@ begin
   puts("evidence_end=ushot-update-transition-loopback-corroborating-v2")
 
   server, server_thread = start_server(
-    listener, port, server_certificate, server_key, state, evidence, session_id, fatal_state
+    listeners, port, server_certificate, server_key, state, evidence, session_id, fatal_state
   )
   wait_for_listener!(server_thread, port, ca_path, session_id, workspace, state, fatal_state)
 
@@ -2370,7 +2397,16 @@ ensure
         ensure_failures << "server-thread-shutdown:#{error.class}"
       end
     end
-  elsif listener && !listener.closed?
+  elsif defined?(listeners) && listeners
+    listeners.each_with_index do |bound_listener, index|
+      next if bound_listener.nil? || bound_listener.closed?
+      begin
+        bound_listener.close
+      rescue StandardError => error
+        ensure_failures << "listener-close-#{index}:#{error.class}"
+      end
+    end
+  elsif defined?(listener) && listener && !listener.closed?
     begin
       listener.close
     rescue StandardError => error

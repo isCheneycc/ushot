@@ -12,10 +12,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add hash-bound 0.1.3 → 0.1.4 update-transition fixture, loopback HTTPS and operator evidence tooling for the clean-account matrix.
 - Fix transition-fixture signing so a freeze-mode seed appcast remains owner-writable for official `generate_appcast` after mode-0444 ditto.
 - Harden release-asset ZIP extraction with write-confined `sandbox-exec` validation workspaces.
+- Make the transition loopback install dual-stack hosts (`127.0.0.1` and `::1`) and listen on both addresses so post-setup resolver checks pass on modern macOS with public AAAA records.
 
 ### Security
 
 - Record a PASS for the operator recovered-key drill against exact published 0.1.3 assets (`backup_sha256=f308c694…155d0`, published ZIP `91b4fbe2…efc8`, helper `appcast_sha256=965b1971…1a7d6`). Keep production self-update blocked until the complete 0.1.3 → 0.1.4 client matrix is also recorded; do not deploy `/updates/v1/appcast.xml` or use `publish_update_feed=true` before that evidence.
+- Record admin-account human product-path evidence for the `tampered-archive` fixture: Ushot 0.1.3 showed the signature-failure UI, aborted with `SUSparkleErrorDomain` code `4005`, and remained at 0.1.3 (build 4). Formal `negative-verify` / clean-account closure remain open; this is not publication proof.
 
 ## [0.1.3] - 2026-08-06
 
