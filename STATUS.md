@@ -186,6 +186,14 @@ Last updated: 2026-08-06
 - Loopback dual-stack hosts (`127.0.0.1` + `::1`) and exact-probe acceptance of `::1` were required for the post-setup gate on this Mac.
 - This does **not** authorize `publish_update_feed=true`, environment allowlists for `v0.1.4`, or production self-update readiness. Clean-account remains skipped by owner choice.
 
+## Published Ushot 0.1.4 (build 5) with production v1 feed (2026-08-07)
+
+- Protected workflow run [`31141110871`](https://github.com/isCheneycc/ushot/actions/runs/31141110871) published immutable GitHub Release [`v0.1.4`](https://github.com/isCheneycc/ushot/releases/tag/v0.1.4) with `publish_update_feed=true`.
+- Anonymous asset digests: DMG `fae003b01655e8c9db6e4f048af88a36222d193636788c48dd3ca8c1dd49165e`, ZIP `e58ec1856002a494270e9233260aa2628866d16e5b6bcc4b1547fba8de10e0f1`, dSYM `de9e7c1b8bf15542f2afae1a477c1a789423125276c8f7154bf3c220e2bace85`, manifest `eb805f193623fadc6f4813a7ce443a5a94709da1ccf8872a6942d30ebc7df1c5`.
+- Production feed `https://ischeneycc.github.io/ushot/updates/v1/appcast.xml` returns HTTP 200 with item 0.1.4 / build 5, embedded markdown notes, and enclosure EdDSA signature; legacy `/updates/appcast.xml` remains HTTP 404.
+- Environments `release`, `update-feed-signing` and `github-pages` admit only tag `v0.1.4` for this publication.
+- Admin-account product-path matrix passed before feed publication; clean-account gate was intentionally skipped by the owner.
+
 ## Next Concrete Step
 
 - Source identity and transition tooling for candidate 0.1.4 (build 5) are staged on `codex/v0.1.4-first-update`. The recovered-key drill is closed. The seven-case private fixture set for 0.1.3 → 0.1.4 was signed with Keychain account `io.github.ischeneycc.ushot.20260806` on 2026-08-06 (`result=PASS`, fixture-manifest SHA-256 `76a77d319f205d0ee5fe2bda7f7641dd4caf48ad4ce03d9cc7e800ecef3dced2`): normal, tampered-archive, short-version-mismatch, build-number-mismatch, short-and-build-mismatch, duplicate-build-metadata, oversized-signed-feed. Prepare tooling was fixed so a freeze-mode seed appcast (0444) is owner-writable before official `generate_appcast` overwrites it. Loopback now installs dual-stack hosts and listens on `127.0.0.1` plus `::1` so the post-setup resolver gate no longer fails solely because public AAAA remained visible. This is **not** a published Release or self-update readiness claim.
