@@ -51,6 +51,11 @@ final class PinnedShotManager {
         memoryPressureSource = source
     }
 
+    /// Logical region corner radius from Capture settings for the given backing scale.
+    func configuredRegionCornerRadius(backingScale: CGFloat) -> CGFloat {
+        settingsStore.settings.capture.logicalRegionCornerRadius(backingScale: backingScale)
+    }
+
     func prepareRegionDraftToolbar() {
         guard preparedRegionDraftToolbarController == nil else { return }
         let startedAt = ProcessInfo.processInfo.systemUptime
@@ -162,13 +167,31 @@ final class PinnedShotManager {
         onMoveEnded: @escaping (CGPoint) -> Void
     ) {
         let identifier = UUID()
+        let configuredCornerRadius = settingsStore.settings.capture.logicalRegionCornerRadius(
+            backingScale: capturedImage.scale
+        )
+        let cornerRadius = RegionCaptureCornerRadius.effective(
+            for: capturedImage.logicalSize,
+            configured: configuredCornerRadius
+        )
+        let regionDocument = AnnotationDocument(
+            baseImageReference: ImageReference(
+                relativePath: "base.png",
+                pixelSize: capturedImage.pixelSize,
+                colorSpaceName: capturedImage.colorSpace?.name as String?
+            ),
+            canvasSize: capturedImage.logicalSize,
+            canvasEffects: CanvasEffects(cornerRadius: cornerRadius)
+        )
         let session = AnnotationEditingSession(
             capturedImage: capturedImage,
+            document: regionDocument,
             editorSettings: settingsStore.settings.editor,
-            updateSensitiveActivityTracker: updateSensitiveActivityTracker
+            updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+            configuredRegionCornerRadius: configuredCornerRadius
         )
         AppLog.capture.notice(
-            "Presenting transparent region confirmation surface: id=\(identifier.uuidString, privacy: .public), logical=\(capturedImage.logicalSize.width, privacy: .public)x\(capturedImage.logicalSize.height, privacy: .public), cachedPixels=\(capturedImage.image.width, privacy: .public)x\(capturedImage.image.height, privacy: .public), outputCommitted=false"
+            "Presenting transparent region confirmation surface: id=\(identifier.uuidString, privacy: .public), logical=\(capturedImage.logicalSize.width, privacy: .public)x\(capturedImage.logicalSize.height, privacy: .public), cachedPixels=\(capturedImage.image.width, privacy: .public)x\(capturedImage.image.height, privacy: .public), cornerRadius=\(cornerRadius, privacy: .public), configuredCornerRadius=\(configuredCornerRadius, privacy: .public), cornerRadiusUnit=\(self.settingsStore.settings.capture.regionCornerRadiusUnit.rawValue, privacy: .public), outputCommitted=false"
         )
 
         precondition(
@@ -681,8 +704,12 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         self.ownsReusableRegionToolbar = presentationMode.isRegionDraft
 
         let initialSize = Self.initialWindowSize(for: session.baseImage)
+        // Prefer the capture desktop frame for region drafts so the panel is
+        // born at the same size positionImagePanel will commit, avoiding a
+        // content reflow when the window is first ordered front.
+        let regionSelectionSize = session.baseImage.sourceMetadata.desktopFrame.standardized.size
         let initialPanelSize = presentationMode.isRegionDraft
-            ? RegionDraftChromeView.panelSize(for: initialSize)
+            ? RegionDraftChromeView.panelSize(for: regionSelectionSize)
             : initialSize
         self.imagePanel = PinnedShotPanel(
             contentRect: NSRect(origin: .zero, size: initialPanelSize),
@@ -727,12 +754,25 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     func present() {
         positionImagePanel()
         if presentationMode.isRegionDraft {
+            // Desktop-frame geometry is the authority. Synchronize content
+            // layout against it before first paint so the confirmation surface
+            // never lands for one frame at the init contentRect size/origin and
+            // then reflows into the capture frame (visible as a tiny jump).
+            let selectionFrame = capturedImage.sourceMetadata.desktopFrame.standardized
+            let selectionSize = selectionFrame.size
+            regionDraftContainerView?.synchronizeSelectionSize(selectionSize)
+            imageView.syncPresentationContentCornerRadius(for: selectionSize)
+            imagePanel.contentView?.layoutSubtreeIfNeeded()
+            imagePanel.displayIfNeeded()
             imagePanel.ignoresMouseEvents = false
             precondition(
                 !imagePanel.ignoresMouseEvents,
                 "The region confirmation surface must own interior pointer input."
             )
             imagePanel.setAccessibilityValue("surfaceInput=enabled; inputOwner=annotation-surface")
+            AppLog.capture.notice(
+                "Region draft presentation geometry committed before order-front: selection=\(selectionFrame.debugDescription, privacy: .public), panel=\(self.imagePanel.frame.debugDescription, privacy: .public), canvas=\(self.imageView.frame.debugDescription, privacy: .public)"
+            )
         }
         NSApplication.shared.activate(ignoringOtherApps: true)
         imagePanel.makeKeyAndOrderFront(nil)
@@ -1236,17 +1276,28 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         imagePanel.backgroundColor = .clear
         imagePanel.isOpaque = false
         if presentationMode.isRegionDraft {
-            imageView.layer?.cornerRadius = 0
+            let selectionSize = capturedImage.sourceMetadata.desktopFrame.standardized.size
+            let panelSize = RegionDraftChromeView.panelSize(for: selectionSize)
+            imageView.syncPresentationContentCornerRadius(for: selectionSize)
             let containerView = RegionDraftContainerView(frame: NSRect(
                 origin: .zero,
-                size: RegionDraftChromeView.panelSize(for: initialSize)
+                size: panelSize
             ))
             containerView.wantsLayer = true
             containerView.layer?.backgroundColor = NSColor.clear.cgColor
             imagePanel.contentView = containerView
+            imageView.frame = CGRect(
+                x: RegionDraftChromeView.panelOutset,
+                y: RegionDraftChromeView.panelOutset,
+                width: selectionSize.width,
+                height: selectionSize.height
+            )
+            imageView.autoresizingMask = []
             containerView.addSubview(imageView)
             let chromeView = RegionDraftChromeView(frame: containerView.bounds)
             chromeView.autoresizingMask = [.width, .height]
+            chromeView.configuredCornerRadius =
+                session.configuredRegionCornerRadius ?? RegionCaptureCornerRadius.defaultLogicalPoints
             chromeView.onResizeBegan = { [weak self] handle, point in
                 guard let self else { return }
                 _ = self.imageView.endTextEditingIfNeeded(reason: .externalAction)
@@ -1263,6 +1314,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 annotationView: imageView,
                 chromeView: chromeView
             )
+            containerView.synchronizeSelectionSize(selectionSize)
             AppLog.capture.notice(
                 "Configured region confirmation input routing: canvasFrame=\(self.imageView.frame.debugDescription, privacy: .public), chromeFrame=\(chromeView.frame.debugDescription, privacy: .public), interior=canvas, handles=chrome"
             )
@@ -1804,7 +1856,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                     "surfaceInput=enabled; inputOwner=pinned-canvas"
                 )
                 self.imageView.setDrawsBaseImage(true)
-                self.imageView.layer?.cornerRadius = 5
+                self.imageView.syncPresentationContentCornerRadius(
+                    for: currentImage.logicalSize
+                )
                 self.imagePanel.hasShadow = true
                 self.toolbarPanel.orderOut(nil)
                 self.toolbarPanel.setAccessibilityIdentifier("pinned.toolbar.window")
@@ -1963,8 +2017,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             animate: false
         )
         repositionToolbar()
+        imageView.syncPresentationContentCornerRadius(for: newFrame.size)
         AppLog.capture.notice(
-            "Updated editable region draft geometry: change=\(change.rawValue, privacy: .public), oldFrame=\(oldFrame.debugDescription, privacy: .public), newFrame=\(newFrame.debugDescription, privacy: .public), translation=\(translation.debugDescription, privacy: .public), pixels=\(updatedImage.image.width, privacy: .public)x\(updatedImage.image.height, privacy: .public)"
+            "Updated editable region draft geometry: change=\(change.rawValue, privacy: .public), oldFrame=\(oldFrame.debugDescription, privacy: .public), newFrame=\(newFrame.debugDescription, privacy: .public), translation=\(translation.debugDescription, privacy: .public), pixels=\(updatedImage.image.width, privacy: .public)x\(updatedImage.image.height, privacy: .public), cornerRadius=\(self.session.controller.document.canvasEffects.cornerRadius, privacy: .public)"
         )
     }
 
@@ -2727,6 +2782,14 @@ private final class RegionDraftChromeView: NSView {
     var onResizeBegan: ((RegionSelectionResizeHandle, CGPoint) -> Void)?
     var onResizeChanged: ((CGPoint) -> Void)?
     var onResizeEnded: ((CGPoint) -> Void)?
+    /// Configured logical corner radius before selection-size clamp.
+    var configuredCornerRadius: CGFloat = RegionCaptureCornerRadius.defaultLogicalPoints {
+        didSet {
+            guard configuredCornerRadius != oldValue else { return }
+            needsDisplay = true
+            setAccessibilityValue(accessibilityValue)
+        }
+    }
 
     var isResizeEnabled = true {
         didSet {
@@ -2799,8 +2862,17 @@ private final class RegionDraftChromeView: NSView {
         let selectionRect = selectionRect
         guard selectionRect.width >= 2, selectionRect.height >= 2 else { return }
 
+        // Match the pre-confirmation overlay stroke inset. Do not re-run
+        // `.integral` here: the selection is already a whole-point frame, and
+        // re-integraling a layout-fractional rect would expand it by 1 pt.
+        let borderRect = selectionRect.insetBy(dx: 0.5, dy: 0.5)
+        let borderRadius = effectiveCornerRadius(for: borderRect.size)
         NSColor.systemBlue.setStroke()
-        let border = NSBezierPath(rect: selectionRect)
+        let border = NSBezierPath(
+            roundedRect: borderRect,
+            xRadius: borderRadius,
+            yRadius: borderRadius
+        )
         border.lineWidth = 2
         border.stroke()
 
@@ -2840,8 +2912,13 @@ private final class RegionDraftChromeView: NSView {
         bounds.insetBy(dx: Self.panelOutset, dy: Self.panelOutset)
     }
 
+    private func effectiveCornerRadius(for size: CGSize) -> CGFloat {
+        RegionCaptureCornerRadius.effective(for: size, configured: configuredCornerRadius)
+    }
+
     private var accessibilityValue: String {
-        "handles=8; resize=\(isResizeEnabled ? "enabled" : "disabled"); borderInset=\(Int(Self.panelOutset)); handleAlignment=border; borderHitTarget=full; interiorHitTarget=canvas"
+        let cornerRadius = effectiveCornerRadius(for: selectionRect.size)
+        return "handles=8; resize=\(isResizeEnabled ? "enabled" : "disabled"); borderInset=\(Int(Self.panelOutset)); handleAlignment=border; borderHitTarget=full; interiorHitTarget=canvas; cornerRadius=\(cornerRadius)"
     }
 
     private func resizeHitRegions() -> [(RegionSelectionResizeHandle, CGRect)] {

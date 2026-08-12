@@ -2,7 +2,7 @@ import Foundation
 import UniformTypeIdentifiers
 
 public struct AppSettings: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 9
+    public static let currentSchemaVersion = 11
 
     public var schemaVersion: Int
     public var general: GeneralSettings
@@ -137,8 +137,60 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
     public var savesOriginalAndEdited = false
     public var showsCornerThumbnail = false
     public var recognizesInterfaceElements = true
+    /// Displayed region corner radius in `regionCornerRadiusUnit`.
+    /// Zero disables rounded region chrome and export clipping.
+    public var regionCornerRadius: Double
+    public var regionCornerRadiusUnit: AnnotationMeasurementUnit
 
-    public init() {}
+    public init(
+        capturesCursor: Bool = false,
+        includesWindowShadow: Bool = true,
+        presentsPinnedShot: Bool = true,
+        showsQuickToolbar: Bool = true,
+        automaticallyCopies: Bool = false,
+        automaticallySaves: Bool = false,
+        automaticallyOpensCanvasEditor: Bool = false,
+        savesOriginalAndEdited: Bool = false,
+        showsCornerThumbnail: Bool = false,
+        recognizesInterfaceElements: Bool = true,
+        regionCornerRadius: Double = RegionCaptureCornerRadius.defaultDisplayedValue,
+        regionCornerRadiusUnit: AnnotationMeasurementUnit = RegionCaptureCornerRadius.defaultUnit
+    ) {
+        self.capturesCursor = capturesCursor
+        self.includesWindowShadow = includesWindowShadow
+        self.presentsPinnedShot = presentsPinnedShot
+        self.showsQuickToolbar = showsQuickToolbar
+        self.automaticallyCopies = automaticallyCopies
+        self.automaticallySaves = automaticallySaves
+        self.automaticallyOpensCanvasEditor = automaticallyOpensCanvasEditor
+        self.savesOriginalAndEdited = savesOriginalAndEdited
+        self.showsCornerThumbnail = showsCornerThumbnail
+        self.recognizesInterfaceElements = recognizesInterfaceElements
+        self.regionCornerRadius = regionCornerRadius
+        self.regionCornerRadiusUnit = regionCornerRadiusUnit
+    }
+
+    public func logicalRegionCornerRadius(backingScale: CGFloat) -> CGFloat {
+        regionCornerRadiusUnit.logicalPoints(
+            fromDisplayedValue: CGFloat(regionCornerRadius),
+            backingScale: backingScale
+        )
+    }
+
+    public mutating func setRegionCornerRadiusUnit(
+        _ unit: AnnotationMeasurementUnit,
+        backingScale: CGFloat
+    ) {
+        guard regionCornerRadiusUnit != unit else { return }
+        regionCornerRadius = Double(
+            regionCornerRadiusUnit.convertedDisplayedValue(
+                CGFloat(regionCornerRadius),
+                to: unit,
+                backingScale: backingScale
+            )
+        )
+        regionCornerRadiusUnit = unit
+    }
 
     private enum CodingKeys: String, CodingKey {
         case capturesCursor
@@ -151,10 +203,13 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         case savesOriginalAndEdited
         case showsCornerThumbnail
         case recognizesInterfaceElements
+        case regionCornerRadius
+        case regionCornerRadiusUnit
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = CaptureSettings()
         capturesCursor = try container.decodeIfPresent(Bool.self, forKey: .capturesCursor) ?? false
         includesWindowShadow = try container.decodeIfPresent(Bool.self, forKey: .includesWindowShadow) ?? true
         presentsPinnedShot = try container.decodeIfPresent(Bool.self, forKey: .presentsPinnedShot) ?? true
@@ -171,6 +226,14 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
             Bool.self,
             forKey: .recognizesInterfaceElements
         ) ?? true
+        regionCornerRadius = try container.decodeIfPresent(
+            Double.self,
+            forKey: .regionCornerRadius
+        ) ?? defaults.regionCornerRadius
+        regionCornerRadiusUnit = try container.decodeIfPresent(
+            AnnotationMeasurementUnit.self,
+            forKey: .regionCornerRadiusUnit
+        ) ?? defaults.regionCornerRadiusUnit
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -185,6 +248,8 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         try container.encode(savesOriginalAndEdited, forKey: .savesOriginalAndEdited)
         try container.encode(showsCornerThumbnail, forKey: .showsCornerThumbnail)
         try container.encode(recognizesInterfaceElements, forKey: .recognizesInterfaceElements)
+        try container.encode(regionCornerRadius, forKey: .regionCornerRadius)
+        try container.encode(regionCornerRadiusUnit, forKey: .regionCornerRadiusUnit)
     }
 }
 
@@ -689,7 +754,36 @@ public enum AppLogLevel: String, Codable, CaseIterable, Sendable {
 }
 
 public struct AdvancedSettings: Codable, Equatable, Sendable {
-    public var logLevel: AppLogLevel = .info
+    public var logLevel: AppLogLevel
+    /// In-app UI language. Defaults to Simplified Chinese.
+    public var language: AppLanguagePreference
 
-    public init() {}
+    public init(
+        logLevel: AppLogLevel = .info,
+        language: AppLanguagePreference = .default
+    ) {
+        self.logLevel = logLevel
+        self.language = language
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case logLevel
+        case language
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AdvancedSettings()
+        logLevel = try container.decodeIfPresent(AppLogLevel.self, forKey: .logLevel) ?? defaults.logLevel
+        language = try container.decodeIfPresent(
+            AppLanguagePreference.self,
+            forKey: .language
+        ) ?? defaults.language
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(logLevel, forKey: .logLevel)
+        try container.encode(language, forKey: .language)
+    }
 }

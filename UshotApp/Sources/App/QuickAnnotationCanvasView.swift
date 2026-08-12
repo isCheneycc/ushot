@@ -2431,8 +2431,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         )
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 5
         layer?.masksToBounds = true
+        syncPresentationContentCornerRadius()
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel(NSLocalizedString("Quick Annotation Overlay", comment: "Quick annotation canvas"))
@@ -2476,6 +2476,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     selectedItemIDs: state.selectedItemIDs,
                     reason: "document-state"
                 )
+                self.syncPresentationContentCornerRadius()
                 self.needsDisplay = true
                 self.refreshPreviewExclusions(
                     document: state.document,
@@ -2642,7 +2643,31 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     func setDrawsBaseImage(_ drawsBaseImage: Bool) {
         guard self.drawsBaseImage != drawsBaseImage else { return }
         self.drawsBaseImage = drawsBaseImage
+        syncPresentationContentCornerRadius()
         needsDisplay = true
+    }
+
+    /// Keeps the live canvas clip aligned with export `canvasEffects.cornerRadius`.
+    /// Region drafts write a non-zero radius; other captures keep the decorative pin radius.
+    func syncPresentationContentCornerRadius(for size: CGSize? = nil) {
+        let targetSize = size ?? bounds.size
+        let documentRadius = session.controller.document.canvasEffects.cornerRadius
+        let radius: CGFloat
+        if documentRadius > 0 {
+            radius = RegionCaptureCornerRadius.effective(
+                for: targetSize.width > 0 && targetSize.height > 0
+                    ? targetSize
+                    : session.controller.document.canvasSize,
+                configured: documentRadius
+            )
+        } else {
+            radius = drawsBaseImage ? 5 : 0
+        }
+        wantsLayer = true
+        if layer?.cornerRadius != radius {
+            layer?.cornerRadius = radius
+        }
+        layer?.masksToBounds = true
     }
 
     func applyStrokeColor(_ color: NSColor) {
@@ -3103,6 +3128,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         if maxFrameDelta(source, preview) < 0.01 {
             regionDraftViewport = nil
         }
+        syncPresentationContentCornerRadius(for: preview.size)
         syncSelectedTextChrome()
         needsDisplay = true
         updateAccessibilitySummary(
@@ -3117,6 +3143,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     func finishRegionDraftFramePreview() {
         guard regionDraftViewport != nil else { return }
         regionDraftViewport = nil
+        syncPresentationContentCornerRadius()
         syncSelectedTextChrome()
         needsDisplay = true
         updateAccessibilitySummary(
@@ -6190,9 +6217,14 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     private var supportsDirectInteractiveComposition: Bool {
         let document = session.controller.document
         guard document.crop.rect == nil,
-              document.rotation.quarterTurnsClockwise == 0,
-              document.canvasEffects == CanvasEffects()
+              document.rotation.quarterTurnsClockwise == 0
         else { return false }
+        // Corner radius alone is presentation/export clipping (layer mask +
+        // AnnotationRenderer). It must not force the opaque preview-image path:
+        // region confirmation keeps drawsBaseImage=false so the frozen overlay
+        // remains the live pixel source while the panel moves or resizes.
+        // Shadows still require the full effects composite.
+        guard document.canvasEffects.shadow == nil else { return false }
         guard case .transparent = document.background else { return false }
         return true
     }

@@ -272,6 +272,42 @@ public final class AnnotationDocumentController: ObservableObject {
         )
     }
 
+    /// Updates canvas corner radius across the live document and edit timeline
+    /// without creating an undoable annotation action. Used when region draft
+    /// geometry changes so the effective radius reclamps with selection size.
+    public func applyCanvasCornerRadius(_ cornerRadius: CGFloat) {
+        precondition(
+            cornerRadius.isFinite && cornerRadius >= 0,
+            "Canvas corner radius must be a finite non-negative value."
+        )
+        func withCornerRadius(_ source: AnnotationDocument) -> AnnotationDocument {
+            guard source.canvasEffects.cornerRadius != cornerRadius else { return source }
+            var copy = source
+            copy.canvasEffects.cornerRadius = cornerRadius
+            return copy
+        }
+
+        undoStack = undoStack.map { change in
+            Change(
+                label: change.label,
+                before: withCornerRadius(change.before),
+                after: withCornerRadius(change.after)
+            )
+        }
+        redoStack = redoStack.map { change in
+            Change(
+                label: change.label,
+                before: withCornerRadius(change.before),
+                after: withCornerRadius(change.after)
+            )
+        }
+        publish(
+            document: withCornerRadius(document),
+            selectedItemIDs: selectedItemIDs,
+            reason: "canvas-corner-radius"
+        )
+    }
+
     public func nextCounterValue() -> Int {
         (document.annotations.compactMap(\.counterValue).max() ?? 0) + 1
     }

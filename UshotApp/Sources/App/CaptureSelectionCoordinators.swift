@@ -242,6 +242,15 @@ final class RegionSelectionCoordinator {
             updateOverlayInputOwnership()
         }
     }
+    /// Overlay blue chrome stays until the confirmation panel is ordered front,
+    /// so mouse-up does not briefly remove the border before the draft surface
+    /// appears (that handoff read as a one-frame layout jump).
+    private var hidesOverlaySelectionChrome = false {
+        didSet {
+            guard hidesOverlaySelectionChrome != oldValue else { return }
+            invalidateViews()
+        }
+    }
     private var isSelectionLocked: Bool { isPreparingDraft || isConfirmingSelection }
 
     init(
@@ -250,6 +259,11 @@ final class RegionSelectionCoordinator {
     ) {
         self.pinnedShotManager = pinnedShotManager
         self.elementResolver = elementResolver
+    }
+
+    /// Logical region corner radius from Capture settings for overlay drawing.
+    fileprivate func configuredCornerRadius(backingScale: CGFloat) -> CGFloat {
+        pinnedShotManager.configuredRegionCornerRadius(backingScale: backingScale)
     }
 
     func select(
@@ -315,7 +329,12 @@ final class RegionSelectionCoordinator {
         } else if let selection, selection.contains(point) || isSpacePressed {
             dragMode = .moving
         } else {
-            selection = CGRect(origin: point, size: .zero)
+            // Anchor creating on a whole-point origin so live size matches the
+            // mouse-up canonical frame (avoids Int-truncation display vs
+            // CGRect.integral expansion: e.g. 504→505).
+            let origin = wholeDesktopPoint(point)
+            dragOrigin = origin
+            selection = CGRect(origin: origin, size: .zero)
             initialSelection = selection
             dragMode = .creating
         }
@@ -337,11 +356,13 @@ final class RegionSelectionCoordinator {
 
         switch dragMode {
         case .creating:
-            selection = CGRect(
-                x: min(dragOrigin.x, constrainedPoint.x),
-                y: min(dragOrigin.y, constrainedPoint.y),
-                width: abs(constrainedPoint.x - dragOrigin.x),
-                height: abs(constrainedPoint.y - dragOrigin.y)
+            selection = liveSelectionFrame(
+                from: CGRect(
+                    x: min(dragOrigin.x, constrainedPoint.x),
+                    y: min(dragOrigin.y, constrainedPoint.y),
+                    width: abs(constrainedPoint.x - dragOrigin.x),
+                    height: abs(constrainedPoint.y - dragOrigin.y)
+                )
             )
         case .snappedCandidate:
             let distance = hypot(
@@ -350,22 +371,33 @@ final class RegionSelectionCoordinator {
             )
             guard distance >= 4 else { return }
             self.dragMode = .creating
-            selection = CGRect(
-                x: min(dragOrigin.x, constrainedPoint.x),
-                y: min(dragOrigin.y, constrainedPoint.y),
-                width: abs(constrainedPoint.x - dragOrigin.x),
-                height: abs(constrainedPoint.y - dragOrigin.y)
+            selection = liveSelectionFrame(
+                from: CGRect(
+                    x: min(dragOrigin.x, constrainedPoint.x),
+                    y: min(dragOrigin.y, constrainedPoint.y),
+                    width: abs(constrainedPoint.x - dragOrigin.x),
+                    height: abs(constrainedPoint.y - dragOrigin.y)
+                )
             )
         case .moving:
             guard let initialSelection else { return }
             let offset = CGPoint(x: point.x - dragOrigin.x, y: point.y - dragOrigin.y)
-            selection = constrained(
-                initialSelection.offsetBy(dx: offset.x, dy: offset.y),
-                to: bounds
+            selection = liveSelectionFrame(
+                from: constrained(
+                    initialSelection.offsetBy(dx: offset.x, dy: offset.y),
+                    to: bounds
+                )
             )
         case .resizing(let handle):
             guard let initialSelection else { return }
-            selection = resized(initialSelection, handle: handle, point: constrainedPoint, bounds: bounds)
+            selection = liveSelectionFrame(
+                from: resized(
+                    initialSelection,
+                    handle: handle,
+                    point: constrainedPoint,
+                    bounds: bounds
+                )
+            )
         }
     }
 
@@ -400,9 +432,12 @@ final class RegionSelectionCoordinator {
                 try Task.checkCancellation()
                 guard let self, self.isPreparingDraft, self.continuation != nil else { return }
                 let cropFinishedAt = ProcessInfo.processInfo.systemUptime
+                // Admit confirmation input ownership first, but keep overlay
+                // chrome painted until the draft panel is fully positioned and
+                // ordered front to avoid a one-frame border/frame jump.
                 self.isConfirmingSelection = true
                 self.isPreparingDraft = false
-                self.views.forEach { $0.displayIfNeeded() }
+                self.hidesOverlaySelectionChrome = false
                 self.pinnedShotManager.presentRegionDraft(
                     capturedImage,
                     onPin: { [weak self] in self?.completeSelection(using: .pin) },
@@ -428,6 +463,8 @@ final class RegionSelectionCoordinator {
                         self?.endConfirmedMove(at: point)
                     }
                 )
+                self.hidesOverlaySelectionChrome = true
+                self.views.forEach { $0.displayIfNeeded() }
                 self.draftCropTask = nil
                 self.draftPresentationTask = nil
                 let readyAt = ProcessInfo.processInfo.systemUptime
@@ -487,7 +524,7 @@ final class RegionSelectionCoordinator {
             panelFrame: panelFrame,
             showsMagnifier: !isSelectionLocked,
             showsConfirmationSurface: isConfirmingSelection,
-            showsSelectionChrome: !isConfirmingSelection,
+            showsSelectionChrome: !hidesOverlaySelectionChrome,
             acceptsPointerInput: !isConfirmingSelection,
             snapCandidateKind: selection == nil ? snapCandidateKind?.rawValue : nil
         )
@@ -834,6 +871,7 @@ final class RegionSelectionCoordinator {
         elementResolutionGeneration &+= 1
         isPreparingDraft = false
         isConfirmingSelection = false
+        hidesOverlaySelectionChrome = false
         panels.forEach { $0.orderOut(nil) }
         panels.removeAll()
         views.removeAll()
@@ -885,6 +923,26 @@ final class RegionSelectionCoordinator {
             "The frozen desktop bounds must preserve a whole-point region frame."
         )
         return canonical
+    }
+
+    /// Live selection uses the same whole-point frame as mouse-up commit so the
+    /// size badge cannot show a truncated fractional size and then jump after
+    /// `CGRect.integral` expands the rect by a point.
+    private func liveSelectionFrame(from selection: CGRect) -> CGRect {
+        let standardized = selection.standardized
+        guard isValidSelection(standardized) else { return standardized }
+        return canonicalSelectionFrame(standardized)
+    }
+
+    private func wholeDesktopPoint(_ point: CGPoint) -> CGPoint {
+        guard let bounds = preparation?.geometry.desktopBounds else {
+            return CGPoint(x: point.x.rounded(.down), y: point.y.rounded(.down))
+        }
+        let clamped = CGPoint(
+            x: min(max(point.x, bounds.minX), bounds.maxX),
+            y: min(max(point.y, bounds.minY), bounds.maxY)
+        )
+        return CGPoint(x: clamped.x.rounded(.down), y: clamped.y.rounded(.down))
     }
 
     private func invalidateViews() {
@@ -1174,7 +1232,9 @@ private final class RegionSelectionOverlayView: NSView {
     override func mouseDown(with event: NSEvent) {
         coordinator?.mouseDown(at: globalPoint(for: event))
     }
-    override func mouseDragged(with event: NSEvent) { coordinator?.mouseDragged(to: globalPoint(for: event)) }
+    override func mouseDragged(with event: NSEvent) {
+        coordinator?.mouseDragged(to: globalPoint(for: event))
+    }
     override func mouseUp(with event: NSEvent) { coordinator?.mouseUp() }
     override func keyDown(with event: NSEvent) { coordinator?.keyDown(with: event) }
     override func keyUp(with event: NSEvent) { coordinator?.keyUp(with: event) }
@@ -1191,14 +1251,36 @@ private final class RegionSelectionOverlayView: NSView {
 
         if let selection = state.selection {
             let localSelection = selection.offsetBy(dx: -state.panelFrame.minX, dy: -state.panelFrame.minY)
+            let configuredRadius = coordinator.configuredCornerRadius(
+                backingScale: capture.descriptor.scale
+            )
+            let cornerRadius = RegionCaptureCornerRadius.effective(
+                for: selection.size,
+                configured: configuredRadius
+            )
             NSGraphicsContext.saveGraphicsState()
-            NSBezierPath(rect: localSelection).addClip()
+            NSBezierPath(
+                roundedRect: localSelection,
+                xRadius: cornerRadius,
+                yRadius: cornerRadius
+            ).addClip()
             drawFrozenImage()
             NSGraphicsContext.restoreGraphicsState()
 
             if state.showsSelectionChrome {
                 NSColor.systemBlue.setStroke()
-                let border = NSBezierPath(rect: localSelection.integral.insetBy(dx: 0.5, dy: 0.5))
+                // Selection is whole-point after live canonicalization; only
+                // inset for the stroke—do not re-integral or the frame grows.
+                let borderRect = localSelection.insetBy(dx: 0.5, dy: 0.5)
+                let borderRadius = RegionCaptureCornerRadius.effective(
+                    for: borderRect.size,
+                    configured: configuredRadius
+                )
+                let border = NSBezierPath(
+                    roundedRect: borderRect,
+                    xRadius: borderRadius,
+                    yRadius: borderRadius
+                )
                 border.lineWidth = 2
                 border.stroke()
                 drawHandles(state.handles, panelFrame: state.panelFrame)
@@ -1230,9 +1312,13 @@ private final class RegionSelectionOverlayView: NSView {
 
     private func drawSize(selection: CGRect, localRect: CGRect) {
         guard localRect.intersects(bounds) else { return }
+        // Whole-point frames are exact integers; round for any residual float noise
+        // instead of truncating (which made 504.6 display as 504 then jump to 505).
+        let pointWidth = Int(selection.width.rounded())
+        let pointHeight = Int(selection.height.rounded())
         let pixelWidth = Int((selection.width * capture.descriptor.scale).rounded())
         let pixelHeight = Int((selection.height * capture.descriptor.scale).rounded())
-        let text = "\(Int(selection.width)) × \(Int(selection.height)) pt · \(pixelWidth) × \(pixelHeight) px"
+        let text = "\(pointWidth) × \(pointHeight) pt · \(pixelWidth) × \(pixelHeight) px"
         let attributes: [NSAttributedString.Key: Any] = [
             .font: AppKitDrawingFonts.regionSelectionSize,
             .foregroundColor: NSColor.white

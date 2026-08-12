@@ -12,8 +12,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         )
         let hostingController = NSHostingController(rootView: rootView)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 580),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -21,6 +21,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.setAccessibilityIdentifier("settings.window")
         window.contentViewController = hostingController
         window.isReleasedWhenClosed = false
+        window.setContentSize(NSSize(width: 860, height: 580))
+        window.contentMinSize = NSSize(width: 780, height: 520)
         window.center()
         super.init(window: window)
         window.delegate = self

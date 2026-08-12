@@ -58,6 +58,12 @@ final class AnnotationEditingSession: ObservableObject {
     private var reportedRenderFailures: Set<String> = []
     private var historyRecorder: HistorySessionRecorder?
     private var previewExcludedAnnotationIDs: Set<UUID> = []
+    /// Configured logical region corner radius for this session, when the session
+    /// was created as a region draft. Used to reclamp after resize commits.
+    private let storedConfiguredRegionCornerRadius: CGFloat?
+
+    /// Configured logical region corner radius for region drafts; `nil` otherwise.
+    var configuredRegionCornerRadius: CGFloat? { storedConfiguredRegionCornerRadius }
 
     var isShowingTransientPreview: Bool { !previewExcludedAnnotationIDs.isEmpty }
 
@@ -67,7 +73,8 @@ final class AnnotationEditingSession: ObservableObject {
         document: AnnotationDocument? = nil,
         editorSettings: EditorSettings,
         updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
-        renderer: any AnnotationRendering = AnnotationRenderer()
+        renderer: any AnnotationRendering = AnnotationRenderer(),
+        configuredRegionCornerRadius: CGFloat? = nil
     ) {
         baseImage = capturedImage
         self.previewImage = previewImage ?? capturedImage
@@ -75,6 +82,7 @@ final class AnnotationEditingSession: ObservableObject {
         self.renderer = renderer
         self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
         self.editorSettings = editorSettings
+        self.storedConfiguredRegionCornerRadius = configuredRegionCornerRadius
         lineWidthUnit = editorSettings.defaultLineWidthUnit
         let initialStyle = Self.makeDefaultStyle(
             for: .select,
@@ -393,9 +401,23 @@ final class AnnotationEditingSession: ObservableObject {
             canvasSize: capturedImage.logicalSize,
             translation: translation
         )
-        AppLog.capture.notice(
-            "Rebased annotation session onto resized region: oldLogical=\(previousImage.logicalSize.debugDescription, privacy: .public), newLogical=\(capturedImage.logicalSize.debugDescription, privacy: .public), translation=\(translation.debugDescription, privacy: .public), annotations=\(self.controller.document.annotations.count, privacy: .public)"
-        )
+        // Region drafts are the only replaceBaseImage caller. Re-apply the
+        // session's configured radius so a smaller selection reclamps, and a
+        // later enlarge recovers the configured value rather than a tiny clamp.
+        if let storedConfiguredRegionCornerRadius {
+            let cornerRadius = RegionCaptureCornerRadius.effective(
+                for: capturedImage.logicalSize,
+                configured: storedConfiguredRegionCornerRadius
+            )
+            controller.applyCanvasCornerRadius(cornerRadius)
+            AppLog.capture.notice(
+                "Rebased annotation session onto resized region: oldLogical=\(previousImage.logicalSize.debugDescription, privacy: .public), newLogical=\(capturedImage.logicalSize.debugDescription, privacy: .public), translation=\(translation.debugDescription, privacy: .public), annotations=\(self.controller.document.annotations.count, privacy: .public), cornerRadius=\(cornerRadius, privacy: .public), configuredCornerRadius=\(storedConfiguredRegionCornerRadius, privacy: .public)"
+            )
+        } else {
+            AppLog.capture.notice(
+                "Rebased annotation session onto resized region: oldLogical=\(previousImage.logicalSize.debugDescription, privacy: .public), newLogical=\(capturedImage.logicalSize.debugDescription, privacy: .public), translation=\(translation.debugDescription, privacy: .public), annotations=\(self.controller.document.annotations.count, privacy: .public)"
+            )
+        }
     }
 
     private func acceptSuccessfulAuthoritativeRender(
