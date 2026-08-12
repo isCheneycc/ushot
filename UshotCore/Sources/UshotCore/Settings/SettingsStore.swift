@@ -94,22 +94,33 @@ public final class SettingsStore: ObservableObject {
         switch decoded.schemaVersion {
         case AppSettings.currentSchemaVersion:
             migrated = decoded
-        case 1, 2, 3, 4, 5, 6, 7, 8:
+        case 1, 2, 3, 4, 5, 6, 7, 8, 9, 10:
             var upgraded = decoded
-            let legacyDefaults = [
-                upgraded.editor.defaultColorHex,
-                upgraded.editor.defaultTextColorHex,
-                upgraded.editor.defaultRectangleColorHex,
-                upgraded.editor.defaultEllipseColorHex
-            ]
-            for value in legacyDefaults {
-                if let legacyDefault = AnnotationColorPalette.normalizedHex(value),
-                   !upgraded.editor.toolbarColorHexes.contains(legacyDefault) {
-                    upgraded.editor.toolbarColorHexes.append(legacyDefault)
+            if decoded.schemaVersion <= 8 {
+                let legacyDefaults = [
+                    upgraded.editor.defaultColorHex,
+                    upgraded.editor.defaultTextColorHex,
+                    upgraded.editor.defaultRectangleColorHex,
+                    upgraded.editor.defaultEllipseColorHex
+                ]
+                for value in legacyDefaults {
+                    if let legacyDefault = AnnotationColorPalette.normalizedHex(value),
+                       !upgraded.editor.toolbarColorHexes.contains(legacyDefault) {
+                        upgraded.editor.toolbarColorHexes.append(legacyDefault)
+                    }
                 }
             }
+            // Schema 10 added Capture region corner-radius (decodeIfPresent).
+            // Schema 11 adds Advanced.language (default Simplified Chinese) and
+            // adopts 12 px as the factory region radius (was briefly 12 pt).
+            if decoded.schemaVersion <= 10,
+               upgraded.capture.regionCornerRadius == 12,
+               upgraded.capture.regionCornerRadiusUnit == .points
+            {
+                upgraded.capture.regionCornerRadiusUnit = .pixels
+            }
             AppLog.lifecycle.notice(
-                "Migrated settings schema: from=\(decoded.schemaVersion, privacy: .public), to=\(AppSettings.currentSchemaVersion, privacy: .public), toolbarColorCount=\(upgraded.editor.toolbarColorHexes.count, privacy: .public)"
+                "Migrated settings schema: from=\(decoded.schemaVersion, privacy: .public), to=\(AppSettings.currentSchemaVersion, privacy: .public), toolbarColorCount=\(upgraded.editor.toolbarColorHexes.count, privacy: .public), regionCornerRadius=\(upgraded.capture.regionCornerRadius, privacy: .public), regionCornerRadiusUnit=\(upgraded.capture.regionCornerRadiusUnit.rawValue, privacy: .public), language=\(upgraded.advanced.language.rawValue, privacy: .public)"
             )
             upgraded.schemaVersion = AppSettings.currentSchemaVersion
             migrated = upgraded

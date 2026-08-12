@@ -6,19 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-12
+
+### Added
+
+- Add a configurable region-capture corner radius, with independent pixel and point units, shared by selection, confirmation and Copy, Save and Pin output.
+- Add an in-app English / Simplified Chinese language preference under Advanced settings, with Simplified Chinese as the factory default.
+
 ### Changed
 
-- Advance source identity to Ushot 0.1.4 (build 5), the first permitted production feed item, while the public release and update feed remain at the published 0.1.3 direct-download state until the evidence gate closes.
-- Add hash-bound 0.1.3 → 0.1.4 update-transition fixture, loopback HTTPS and operator evidence tooling for the clean-account matrix.
-- Fix transition-fixture signing so a freeze-mode seed appcast remains owner-writable for official `generate_appcast` after mode-0444 ditto.
-- Harden release-asset ZIP extraction with write-confined `sandbox-exec` validation workspaces.
-- Make the transition loopback install dual-stack hosts (`127.0.0.1` and `::1`) and listen on both addresses so post-setup resolver checks pass on modern macOS with public AAAA records.
-- Accept `::1` as well as `127.0.0.1` in loopback exact curl-probe metadata so dual-stack hosts setup can pass on modern macOS.
+- Replace the Settings tab bar with an always-visible sidebar and make the Settings window resizable.
+- Keep region selection and live-resize geometry on one whole-point coordinate grid.
 
-### Security
+### Fixed
 
-- Record a PASS for the operator recovered-key drill against exact published 0.1.3 assets (`backup_sha256=f308c694…155d0`, published ZIP `91b4fbe2…efc8`, helper `appcast_sha256=965b1971…1a7d6`). Keep production self-update blocked until the complete 0.1.3 → 0.1.4 client matrix is also recorded; do not deploy `/updates/v1/appcast.xml` or use `publish_update_feed=true` before that evidence.
-- Record admin-account human product-path evidence for the `tampered-archive` fixture: Ushot 0.1.3 showed the signature-failure UI, aborted with `SUSparkleErrorDomain` code `4005`, and remained at 0.1.3 (build 4). Formal `negative-verify` / clean-account closure remain open; this is not publication proof.
+- Preserve rounded region clipping through confirmation resizing, annotation editing, undo/redo and final output.
+- Remove the selection-border and size-label jump that could occur when initial region selection finished.
 
 ## [0.1.4] - 2026-08-07
 
@@ -82,7 +85,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Limited the manual Gatekeeper workaround to removing `com.apple.quarantine` from an official Ushot release instead of clearing every extended attribute.
 - Defined the Sparkle EdDSA private key as release-critical secret material requiring protected storage, an independent encrypted backup and an exercised recovery process.
 
-[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/isCheneycc/ushot/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.4
 [0.1.3]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.3
 [0.1.2]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.2
 [0.1.1]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.1

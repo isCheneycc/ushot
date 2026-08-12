@@ -3,7 +3,7 @@ import ApplicationServices
 import SwiftUI
 import UshotCore
 
-enum SettingsSection: String, CaseIterable, Identifiable {
+enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     case general
     case capture
     case output
@@ -42,6 +42,10 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .advanced: return "wrench.and.screwdriver"
         }
     }
+
+    var accessibilityIdentifier: String {
+        "settings.sidebar.\(rawValue)"
+    }
 }
 
 @MainActor
@@ -60,29 +64,40 @@ final class SettingsAlertModel: ObservableObject {
 struct SettingsRootView: View {
     let environment: AppEnvironment
     @ObservedObject var selectionModel: SettingsSelectionModel
+    @ObservedObject private var store: SettingsStore
     @StateObject private var alerts = SettingsAlertModel()
 
+    init(environment: AppEnvironment, selectionModel: SettingsSelectionModel) {
+        self.environment = environment
+        self.selectionModel = selectionModel
+        self._store = ObservedObject(wrappedValue: environment.settingsStore)
+    }
+
     var body: some View {
-        TabView(selection: $selectionModel.selection) {
-            GeneralSettingsView(environment: environment, alerts: alerts)
-                .settingsTab(.general)
-            CaptureSettingsView(environment: environment, alerts: alerts)
-                .settingsTab(.capture)
-            OutputSettingsView(store: environment.settingsStore, alerts: alerts)
-                .settingsTab(.output)
-            EditorSettingsView(store: environment.settingsStore, alerts: alerts)
-                .settingsTab(.editor)
-            ColorPickerSettingsView(store: environment.settingsStore, alerts: alerts)
-                .settingsTab(.colorPicker)
-            ShortcutsSettingsView(environment: environment, alerts: alerts)
-                .settingsTab(.shortcuts)
-            HistorySettingsView(environment: environment, alerts: alerts)
-                .settingsTab(.history)
-            AdvancedSettingsView(environment: environment, alerts: alerts)
-                .settingsTab(.advanced)
+        // Fixed sidebar (not NavigationSplitView): the system split-view
+        // "Hide Sidebar" control lands in the wrong titlebar place inside a
+        // hosted NSWindow, and the restored layout is also wrong. Settings
+        // should keep the section list always visible in both languages.
+        HStack(spacing: 0) {
+            List(SettingsSection.allCases, selection: $selectionModel.selection) { section in
+                Label(section.title, systemImage: section.symbolName)
+                    .tag(section)
+                    .accessibilityIdentifier(section.accessibilityIdentifier)
+            }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .frame(width: Self.sidebarWidth)
+            .frame(maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .accessibilityIdentifier("settings.sidebar")
+
+            Divider()
+
+            settingsDetail(for: selectionModel.selection)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(16)
-        .frame(minWidth: 720, minHeight: 510)
+        .frame(minWidth: Self.sidebarWidth + 600, minHeight: 520)
+        .environment(\.locale, store.settings.advanced.language.locale)
         .alert(
             "Ushot",
             isPresented: Binding(
@@ -93,13 +108,29 @@ struct SettingsRootView: View {
             message: { Text(alerts.message ?? "") }
         )
     }
-}
 
-private extension View {
-    func settingsTab(_ section: SettingsSection) -> some View {
-        self
-            .tabItem { Label(section.title, systemImage: section.symbolName) }
-            .tag(section)
+    private static let sidebarWidth: CGFloat = 188
+
+    @ViewBuilder
+    private func settingsDetail(for section: SettingsSection) -> some View {
+        switch section {
+        case .general:
+            GeneralSettingsView(environment: environment, alerts: alerts)
+        case .capture:
+            CaptureSettingsView(environment: environment, alerts: alerts)
+        case .output:
+            OutputSettingsView(store: environment.settingsStore, alerts: alerts)
+        case .editor:
+            EditorSettingsView(store: environment.settingsStore, alerts: alerts)
+        case .colorPicker:
+            ColorPickerSettingsView(store: environment.settingsStore, alerts: alerts)
+        case .shortcuts:
+            ShortcutsSettingsView(environment: environment, alerts: alerts)
+        case .history:
+            HistorySettingsView(environment: environment, alerts: alerts)
+        case .advanced:
+            AdvancedSettingsView(environment: environment, alerts: alerts)
+        }
     }
 }
 
@@ -152,7 +183,7 @@ private struct GeneralSettingsView: View {
             }
 
             Section("Login Item Status") {
-                LabeledContent("Status", value: environment.launchAtLoginManager.status.rawValue)
+                LabeledContent("Status", value: environment.launchAtLoginManager.status.title)
                 if environment.launchAtLoginManager.status == .requiresApproval {
                     Button("Open Login Items Settings") {
                         environment.launchAtLoginManager.openSystemSettings()
@@ -183,6 +214,7 @@ private struct CaptureSettingsView: View {
     let environment: AppEnvironment
     @ObservedObject var alerts: SettingsAlertModel
     @ObservedObject private var store: SettingsStore
+    @Environment(\.displayScale) private var displayScale
     @State private var permissionStatus: CapturePermissionStatus = .notAuthorized
     @State private var accessibilityAuthorized = AXIsProcessTrusted()
 
@@ -235,11 +267,89 @@ private struct CaptureSettingsView: View {
                 settingToggle("Include pointer", \AppSettings.capture.capturesCursor)
                 settingToggle("Keep window shadow", \AppSettings.capture.includesWindowShadow)
             }
+
+            Section("Region Corner Radius") {
+                HStack(alignment: .center, spacing: 12) {
+                    RoundedRectangle(
+                        cornerRadius: regionCornerRadiusPreviewValue,
+                        style: .continuous
+                    )
+                    .stroke(.primary, lineWidth: 1.5)
+                    .frame(width: 42, height: 28)
+                    .accessibilityHidden(true)
+
+                    TextField(
+                        "Region corner radius",
+                        value: regionCornerRadiusBinding,
+                        format: .number.precision(.fractionLength(0...1))
+                    )
+                    .labelsHidden()
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 72)
+                    .accessibilityIdentifier("settings.capture.regionCornerRadius")
+
+                    AnnotationMeasurementUnitPicker(
+                        title: "Region corner radius unit",
+                        selection: store.settings.capture.regionCornerRadiusUnit,
+                        onSelect: setRegionCornerRadiusUnit,
+                        accessibilityIdentifier: "settings.capture.regionCornerRadiusUnit"
+                    )
+                }
+                Text("Applies to region selection chrome and Copy / Save / Pin output. Set to 0 for square corners. Window and display captures are unchanged.")
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .task {
             await updatePermissionStatus()
             refreshAccessibilityPermission()
+        }
+    }
+
+    private var regionCornerRadiusBinding: Binding<Double> {
+        Binding(
+            get: { store.settings.capture.regionCornerRadius },
+            set: { value in
+                let unit = store.settings.capture.regionCornerRadiusUnit
+                let range = EditorMeasurementLimits.displayedCornerRadiusRange(
+                    unit: unit,
+                    backingScale: displayScale
+                )
+                guard value.isFinite, range.contains(value) else {
+                    alerts.present(message: String(localized:
+                        "The region corner radius is outside the supported range for the selected unit.",
+                        comment: "Region corner-radius validation error"
+                    ))
+                    return
+                }
+                do {
+                    try store.update(\AppSettings.capture.regionCornerRadius, to: value)
+                } catch {
+                    alerts.present(error)
+                }
+            }
+        )
+    }
+
+    private var regionCornerRadiusPreviewValue: CGFloat {
+        let logicalRadius = store.settings.capture.logicalRegionCornerRadius(
+            backingScale: displayScale
+        )
+        return min(12, max(0, logicalRadius))
+    }
+
+    private func setRegionCornerRadiusUnit(_ unit: AnnotationMeasurementUnit) {
+        let previousValue = store.settings.capture.regionCornerRadius
+        let previousUnit = store.settings.capture.regionCornerRadiusUnit
+        do {
+            try store.update { settings in
+                settings.capture.setRegionCornerRadiusUnit(unit, backingScale: displayScale)
+            }
+            AppLog.lifecycle.notice(
+                "Changed region corner-radius unit: fromValue=\(previousValue, privacy: .public), fromUnit=\(previousUnit.rawValue, privacy: .public), toValue=\(self.store.settings.capture.regionCornerRadius, privacy: .public), toUnit=\(unit.rawValue, privacy: .public), referenceScale=\(self.displayScale, privacy: .public)"
+            )
+        } catch {
+            alerts.present(error)
         }
     }
 
@@ -419,8 +529,8 @@ private struct EditorSettingsView: View {
                     onReset: { confirmsEditorReset = true }
                 )
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 2)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
         .scrollIndicators(.never)
         .sheet(isPresented: $presentsPaletteManager) {
@@ -2042,27 +2152,118 @@ private struct AdvancedSettingsView: View {
 
     var body: some View {
         Form {
-            Picker("Log level", selection: persistedBinding(
-                store: store,
-                keyPath: \AppSettings.advanced.logLevel,
-                alerts: alerts
-            )) {
-                ForEach(AppLogLevel.allCases, id: \.self) { level in
-                    Text(NSLocalizedString(level.rawValue.capitalized, comment: "Log level")).tag(level)
+            Section("Language") {
+                Picker(
+                    "Language",
+                    selection: Binding(
+                        get: { store.settings.advanced.language },
+                        set: { setLanguage($0) }
+                    )
+                ) {
+                    ForEach(AppLanguagePreference.allCases) { language in
+                        Text(language.nativeDisplayName).tag(language)
+                    }
                 }
+                .accessibilityIdentifier("settings.advanced.language")
+                Text("Ushot uses this language for its interface. Changing language restarts Ushot so every menu and window updates.")
+                    .foregroundStyle(.secondary)
             }
 
-            if let loadError = store.loadError {
-                Label(loadError.localizedDescription, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-            }
+            Section("Diagnostics") {
+                Picker("Log level", selection: persistedBinding(
+                    store: store,
+                    keyPath: \AppSettings.advanced.logLevel,
+                    alerts: alerts
+                )) {
+                    ForEach(AppLogLevel.allCases, id: \.self) { level in
+                        Text(NSLocalizedString(level.rawValue.capitalized, comment: "Log level")).tag(level)
+                    }
+                }
 
-            HStack {
-                Button("Open Data Directory") { openDataDirectory() }
-                Button("Reset Settings", role: .destructive) { resetSettings() }
+                if let loadError = store.loadError {
+                    Label(loadError.localizedDescription, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                }
+
+                HStack {
+                    Button("Open Data Directory") { openDataDirectory() }
+                    Button("Reset Settings", role: .destructive) { resetSettings() }
+                }
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func setLanguage(_ language: AppLanguagePreference) {
+        let previous = store.settings.advanced.language
+        guard language != previous else { return }
+        do {
+            try store.update(\AppSettings.advanced.language, to: language)
+            AppLanguagePreference.apply(language)
+            AppLog.lifecycle.notice(
+                "Changed in-app language preference: from=\(previous.rawValue, privacy: .public), to=\(language.rawValue, privacy: .public); relaunching"
+            )
+            relaunchApplication()
+        } catch {
+            alerts.present(error)
+        }
+    }
+
+    /// Restarts Ushot after a language change.
+    ///
+    /// `NSWorkspace.openApplication` on a running app only activates the existing
+    /// instance; terminating afterward exits without a replacement (looks like a
+    /// crash). Schedule a detached helper that waits until this PID exits, then
+    /// opens a new instance with `open -n`.
+    private func relaunchApplication() {
+        let appPath = Bundle.main.bundlePath
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        var environment = ProcessInfo.processInfo.environment
+        environment["USHOT_RELAUNCH_APP"] = appPath
+        environment["USHOT_RELAUNCH_PID"] = String(pid)
+        process.environment = environment
+        // nohup + background so the waiter is not killed when this process exits.
+        // Env vars expand inside the inner bash (single-quoted body is not
+        // expanded by the outer shell).
+        process.arguments = [
+            "-c",
+            #"""
+            /usr/bin/nohup /bin/bash -c '
+              while /bin/kill -0 "$USHOT_RELAUNCH_PID" 2>/dev/null; do
+                /bin/sleep 0.1
+              done
+              /bin/sleep 0.2
+              /usr/bin/open -n "$USHOT_RELAUNCH_APP"
+            ' >/dev/null 2>&1 &
+            """#
+        ]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw ScreenshotAppError.captureFailed(
+                    description: "Relaunch helper exited with status \(process.terminationStatus)."
+                )
+            }
+            AppLog.lifecycle.notice(
+                "Scheduled post-exit relaunch after language change: pid=\(pid, privacy: .public), path=\(appPath, privacy: .public)"
+            )
+        } catch {
+            AppLog.lifecycle.error(
+                "Failed to schedule Ushot relaunch after language change: \(error.localizedDescription, privacy: .public)"
+            )
+            alerts.present(message: String(localized:
+                "Ushot could not restart after changing the language. Quit and open Ushot again to apply it.",
+                comment: "Language change relaunch failure"
+            ))
+            return
+        }
+        NSApp.terminate(nil)
     }
 
     private func openDataDirectory() {
@@ -2099,6 +2300,14 @@ private struct AdvancedSettingsView: View {
                     try environment.launchAtLoginManager.setEnabled(true)
                 }
                 throw error
+            }
+            let language = store.settings.advanced.language
+            if language != previous.advanced.language {
+                AppLanguagePreference.apply(language)
+                AppLog.lifecycle.notice(
+                    "Reset settings changed language: from=\(previous.advanced.language.rawValue, privacy: .public), to=\(language.rawValue, privacy: .public); relaunching"
+                )
+                relaunchApplication()
             }
         } catch {
             alerts.present(error)

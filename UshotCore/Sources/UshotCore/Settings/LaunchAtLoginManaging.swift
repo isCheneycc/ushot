@@ -6,6 +6,20 @@ public enum LaunchAtLoginStatus: String, Equatable, Sendable {
     case enabled
     case requiresApproval
     case notFound
+
+    /// Localized status text for Settings → General.
+    public var title: String {
+        switch self {
+        case .notRegistered:
+            return NSLocalizedString("Not Registered", comment: "Launch at login status")
+        case .enabled:
+            return NSLocalizedString("Enabled", comment: "Launch at login status")
+        case .requiresApproval:
+            return NSLocalizedString("Requires Approval", comment: "Launch at login status")
+        case .notFound:
+            return NSLocalizedString("Not Found", comment: "Launch at login status")
+        }
+    }
 }
 
 public enum LaunchAtLoginReconciliationResult: Equatable, Sendable {
