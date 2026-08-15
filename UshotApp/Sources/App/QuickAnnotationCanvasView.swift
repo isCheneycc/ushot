@@ -3340,18 +3340,22 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         AppLog.capture.notice(
             "Pinned canvas interaction began: tool=\(self.session.currentTool.rawValue, privacy: .public), x=\(point.x, privacy: .public), y=\(point.y, privacy: .public)"
         )
-        startPoint = point
-        currentPoint = point
 
         if event.modifierFlags.contains(.option) {
             return
         }
 
         if beginSelectionInteraction(at: point, event: event) {
+            precondition(
+                startPoint == nil && currentPoint == nil,
+                "Moving or resizing a selection must not arm a new annotation draft."
+            )
             needsDisplay = true
             return
         }
 
+        startPoint = point
+        currentPoint = point
         switch session.currentTool {
         case .select:
             session.controller.selectedItemIDs.removeAll()

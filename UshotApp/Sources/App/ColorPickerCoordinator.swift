@@ -43,7 +43,6 @@ final class ColorPickerCoordinator {
     private var sessionGeneration = 0
     private var sampleGeneration = 0
     private var completionGeneration: Int?
-    private var closesAfterCompletion = false
     private var preparationTask: Task<Void, Never>?
     private var samplingTask: Task<Void, Never>?
     private var keyboardMonitor: Any?
@@ -134,8 +133,7 @@ final class ColorPickerCoordinator {
         currentPoint = point
         scheduleSample(
             origin: .completion,
-            copyAfterSampling: true,
-            closesAfterCopy: true
+            copyAfterSampling: true
         )
     }
 
@@ -253,8 +251,7 @@ final class ColorPickerCoordinator {
         at explicitPoint: CGPoint? = nil,
         target explicitTarget: ColorPickerSampleTarget? = nil,
         origin: ColorPickerSampleOrigin,
-        copyAfterSampling: Bool = false,
-        closesAfterCopy: Bool = false
+        copyAfterSampling: Bool = false
     ) {
         guard let sampler, let point = explicitPoint ?? currentPoint else { return }
         let colorSpace = explicitTarget?.colorSpace
@@ -308,7 +305,6 @@ final class ColorPickerCoordinator {
             completionGeneration = request.generation
             exactPresentationGeneration = request.generation
             minimumPresentationGeneration = nil
-            closesAfterCompletion = closesAfterCopy
         }
         guard samplingTask == nil else { return }
         let activeSession = sessionGeneration
@@ -449,15 +445,10 @@ final class ColorPickerCoordinator {
                     continue
                 }
                 let shouldCopy = isExactCompletion
-                let shouldClose = shouldCopy && closesAfterCompletion
                 completionGeneration = nil
-                closesAfterCompletion = false
                 clearSamplingTask(sessionGeneration: activeSession)
-                if shouldCopy {
-                    let copied = copyCurrentSample()
-                    if copied, shouldClose {
-                        cleanup(reason: "click-copy")
-                    }
+                if shouldCopy, copyCurrentSample() {
+                    cleanup(reason: "copy-completed")
                 }
                 return
             } catch is CancellationError {
@@ -770,7 +761,6 @@ final class ColorPickerCoordinator {
         samplingTask = nil
         removeKeyboardMonitor()
         completionGeneration = nil
-        closesAfterCompletion = false
         panels.forEach {
             $0.orderOut(nil)
             $0.close()
@@ -1214,7 +1204,7 @@ private final class ColorPickerCardView: NSView {
     private func drawInstructions() {
         let font = NSFont.systemFont(ofSize: 9)
         drawText(
-            "Click: copy & close    ⌘C: copy    Tab: color space",
+            "Click / ⌘C: copy & close    Tab: color space",
             in: CGRect(x: 14, y: 30, width: bounds.width - 28, height: 14),
             font: font,
             color: .secondaryLabelColor,

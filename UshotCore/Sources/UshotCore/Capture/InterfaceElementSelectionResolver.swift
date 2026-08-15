@@ -3,15 +3,15 @@ import CoreGraphics
 import Foundation
 
 public enum InterfaceElementResolution: Equatable, Sendable {
-    case element(CGRect)
+    case elementHierarchy([CGRect])
     case accessibilityPermissionRequired
     case noElement
 }
 
-/// Resolves the deepest useful Accessibility element underneath an AppKit
-/// desktop point. The owning application is taken from the already-frozen
-/// ScreenCaptureKit window list, so Ushot's overlay never becomes the queried
-/// accessibility target.
+/// Resolves the useful Accessibility hierarchy underneath an AppKit desktop
+/// point, ordered from the deepest element toward its ancestors. The owning
+/// application is taken from the already-frozen ScreenCaptureKit window list,
+/// so Ushot's overlay never becomes the queried accessibility target.
 public struct InterfaceElementSelectionResolver: Sendable {
     public init() {}
 
@@ -46,6 +46,7 @@ public struct InterfaceElementSelectionResolver: Sendable {
         }
 
         let transformer = CoordinateTransformer(primaryDisplayHeight: primaryDisplayHeight)
+        var hierarchy: [CGRect] = []
         for _ in 0..<12 {
             if let accessibilityFrame = frame(of: element) {
                 let appKitFrame = transformer
@@ -53,13 +54,16 @@ public struct InterfaceElementSelectionResolver: Sendable {
                     .standardized
                 let clipped = appKitFrame.intersection(window.frame.standardized)
                 if isUseful(frame: clipped, containing: appKitPoint) {
-                    return .element(clipped.integral)
+                    let candidate = clipped.integral
+                    if !hierarchy.contains(candidate) {
+                        hierarchy.append(candidate)
+                    }
                 }
             }
             guard let parent = parent(of: element) else { break }
             element = parent
         }
-        return .noElement
+        return hierarchy.isEmpty ? .noElement : .elementHierarchy(hierarchy)
     }
 
     private func frame(of element: AXUIElement) -> CGRect? {

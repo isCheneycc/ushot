@@ -306,10 +306,19 @@ final class UshotAppUITests: XCTestCase {
         )
         windowPoint.hover()
         waitForValue(of: overlay, containing: "snap=window")
+        waitForValue(of: overlay, containing: "magnifier=visible")
+        waitForValue(of: overlay, containing: "magnifierTarget=window")
+        waitForValue(of: overlay, containing: "magnifierGrid=1px")
+        waitForValue(of: overlay, containing: "magnifierCenter=crosshair")
+        XCTAssertFalse(
+            (overlay.value as? String)?.contains("magnifierSelection=none") == true,
+            "A smart-snap candidate must publish its physical-pixel size in the magnifier HUD."
+        )
         windowPoint.click()
 
         let canvas = app.groups["pinned.canvas"]
         XCTAssertTrue(canvas.waitForExistence(timeout: 3))
+        waitForValue(of: overlay, containing: "magnifier=hidden")
         let expected = CGRect(
             x: overlay.frame.minX + overlay.frame.width * 0.18,
             // The fixture is expressed in AppKit's bottom-left coordinate
@@ -322,6 +331,63 @@ final class UshotAppUITests: XCTestCase {
         XCTAssertEqual(canvas.frame.minY, expected.minY, accuracy: 3)
         XCTAssertEqual(canvas.frame.width, expected.width, accuracy: 3)
         XCTAssertEqual(canvas.frame.height, expected.height, accuracy: 3)
+        app.buttons["capture.region.cancel"].click()
+        XCTAssertTrue(overlay.waitForNonExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testRegionSelectionKeepsBrowserControlStableAndCyclesParents() {
+        let app = launch(arguments: [
+            "--uitest-reset-settings",
+            "--uitest-region-selection",
+            "--uitest-region-selection-controls"
+        ])
+        defer { app.terminate() }
+
+        let overlay = app.groups["capture.region.overlay"]
+        XCTAssertTrue(overlay.waitForExistence(timeout: 5))
+        let innerPoints = [
+            CGVector(dx: 0.40, dy: 0.48),
+            CGVector(dx: 0.42, dy: 0.50),
+            CGVector(dx: 0.46, dy: 0.52)
+        ]
+        for offset in innerPoints {
+            overlay.coordinate(withNormalizedOffset: offset).hover()
+        }
+        waitForValue(of: overlay, containing: "snap=interface-element")
+        waitForValue(of: overlay, containing: "snapLevel=1/3")
+        waitForValue(of: overlay, containing: "snapStabilityFallbacks=0")
+
+        app.typeKey(.upArrow, modifierFlags: .option)
+        waitForValue(of: overlay, containing: "snapLevel=2/3")
+
+        // Move outside the inner control but remain inside its selected parent.
+        // A slow browser accessibility lookup must not flash back to the window.
+        overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.50)).hover()
+        waitForValue(of: overlay, containing: "snap=interface-element")
+        waitForValue(of: overlay, containing: "snapLevel=1/2")
+        waitForValue(of: overlay, containing: "snapStabilityFallbacks=0")
+
+        app.typeKey(.upArrow, modifierFlags: .option)
+        waitForValue(of: overlay, containing: "snap=window")
+        waitForValue(of: overlay, containing: "snapLevel=2/2")
+        app.typeKey(.downArrow, modifierFlags: .option)
+        waitForValue(of: overlay, containing: "snap=interface-element")
+        waitForValue(of: overlay, containing: "snapLevel=1/2")
+
+        overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.50)).click()
+        let canvas = app.groups["pinned.canvas"]
+        XCTAssertTrue(canvas.waitForExistence(timeout: 3))
+        let expectedParent = CGRect(
+            x: overlay.frame.minX + overlay.frame.width * 0.22,
+            y: overlay.frame.minY + overlay.frame.height * (1 - 0.24 - 0.40),
+            width: overlay.frame.width * 0.44,
+            height: overlay.frame.height * 0.40
+        ).integral
+        XCTAssertEqual(canvas.frame.minX, expectedParent.minX, accuracy: 3)
+        XCTAssertEqual(canvas.frame.minY, expectedParent.minY, accuracy: 3)
+        XCTAssertEqual(canvas.frame.width, expectedParent.width, accuracy: 3)
+        XCTAssertEqual(canvas.frame.height, expectedParent.height, accuracy: 3)
         app.buttons["capture.region.cancel"].click()
         XCTAssertTrue(overlay.waitForNonExistence(timeout: 3))
     }
@@ -1533,10 +1599,10 @@ final class UshotAppUITests: XCTestCase {
         app.typeKey("c", modifierFlags: .command)
         let copiedValue = waitForPasteboardString(after: pasteboardChangeCount)
         XCTAssertTrue(copiedValue.hasPrefix("color(display-p3 "))
-        XCTAssertTrue(overlay.exists, "Command-C must copy without closing the color picker.")
-
-        app.typeKey(.escape, modifierFlags: [])
-        XCTAssertTrue(overlay.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(
+            overlay.waitForNonExistence(timeout: 3),
+            "Command-C must close the color picker after copying the fresh sample."
+        )
     }
 
     private enum ColorPickerRenderedPrimaryColor: String {
