@@ -626,7 +626,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 layer: 0
             )]
         )
-        let selector = RegionSelectionCoordinator(pinnedShotManager: pinnedShotManager)
+        let selector: RegionSelectionCoordinator
+        if ProcessInfo.processInfo.arguments.contains("--uitest-region-selection-controls") {
+            let outerControlFrame = CGRect(
+                x: screen.frame.minX + screen.frame.width * 0.22,
+                y: screen.frame.minY + screen.frame.height * 0.24,
+                width: screen.frame.width * 0.44,
+                height: screen.frame.height * 0.40
+            ).integral
+            let innerControlFrame = CGRect(
+                x: screen.frame.minX + screen.frame.width * 0.32,
+                y: screen.frame.minY + screen.frame.height * 0.38,
+                width: screen.frame.width * 0.24,
+                height: screen.frame.height * 0.20
+            ).integral
+            selector = RegionSelectionCoordinator(
+                pinnedShotManager: pinnedShotManager,
+                elementResolutionHandler: { _, window, _ in
+                    // Model a comparatively slow browser accessibility tree so
+                    // pointer events arrive while one lookup is still active.
+                    Thread.sleep(forTimeInterval: 0.06)
+                    return .elementHierarchy([
+                        innerControlFrame,
+                        outerControlFrame,
+                        window.frame
+                    ])
+                }
+            )
+        } else {
+            selector = RegionSelectionCoordinator(pinnedShotManager: pinnedShotManager)
+        }
         uiTestRegionSelector = selector
         uiTestRegionSelectionTask = Task { @MainActor [weak self, selector] in
             defer {

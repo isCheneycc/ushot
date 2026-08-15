@@ -71,7 +71,7 @@ Global shortcuts are configurable, and F1–F20 can be assigned without an addit
 ## Privacy by design
 
 - **Screen Recording is required** for capture, color sampling, and other pixel access. Pixels are read only after an explicit user action and are processed on the Mac.
-- **Accessibility is optional.** It refines smart region snapping from an application window to a useful control. Ordinary capture and window-level snapping continue to work when permission is absent, denied, or revoked.
+- **Accessibility is optional.** It refines smart region snapping from an application window to a stable control hierarchy. During capture, Option-Up/Down or Option-scroll selects a parent or child level. Ordinary capture and window-level snapping continue to work when permission is absent, denied, or revoked.
 - **History is opt-in.** Disabling history stops new records; it does not silently delete existing ones.
 - **Network access is user-initiated.** The only normal network entry is **Check for Updates…**. Those HTTPS requests expose ordinary connection metadata to GitHub Pages and GitHub Releases, but Ushot adds no screenshot, annotation, clipboard, history, advertising identifier, or system profile.
 

@@ -13,6 +13,11 @@ enum AppKitDrawingFonts {
         size: 12,
         weight: .semibold
     )
+    static let regionMagnifierHUD = makeMonospacedFont(
+        role: "region-magnifier-hud",
+        size: 8.5,
+        weight: .medium
+    )
     static let screenRulerBody = makeMonospacedFont(
         role: "screen-ruler-body",
         size: 10,
@@ -32,6 +37,7 @@ enum AppKitDrawingFonts {
     static func prepare() {
         _ = shortcutRecorder
         _ = regionSelectionSize
+        _ = regionMagnifierHUD
         _ = screenRulerBody
         _ = colorPickerDetail
         _ = compactChrome

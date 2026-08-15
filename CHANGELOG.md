@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-15
+
+### Added
+
+- Add optional Accessibility-powered snapping to useful controls inside the topmost captured window.
+- Add explicit parent and child snap-level navigation with Option-Up, Option-Down and Option-scroll.
+- Upgrade the region magnifier with physical pixel coordinates, selection dimensions, a one-pixel grid, a center crosshair and the active snap-target level.
+
+### Changed
+
+- Keep smart snapping stable while pointer movement overlaps slower Accessibility lookups, preserving the selected hierarchy level across refreshed results.
+- Exit the color picker immediately after a click or Command-C successfully copies a color.
+
+### Fixed
+
+- Prevent moving or resizing an existing rectangle annotation from arming a zero-size annotation draft that briefly appeared as a dot.
+
 ## [0.1.5] - 2026-08-12
 
 ### Added
@@ -85,7 +102,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Limited the manual Gatekeeper workaround to removing `com.apple.quarantine` from an official Ushot release instead of clearing every extended attribute.
 - Defined the Sparkle EdDSA private key as release-critical secret material requiring protected storage, an independent encrypted backup and an exercised recovery process.
 
-[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/isCheneycc/ushot/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/isCheneycc/ushot/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.4
 [0.1.3]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.3

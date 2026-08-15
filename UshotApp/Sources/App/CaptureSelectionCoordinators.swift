@@ -178,6 +178,12 @@ final class WindowSelectionCoordinator {
 
 @MainActor
 final class RegionSelectionCoordinator {
+    typealias ElementResolutionHandler = @Sendable (
+        _ point: CGPoint,
+        _ window: WindowDescriptor,
+        _ primaryDisplayHeight: CGFloat
+    ) -> InterfaceElementResolution
+
     private enum OutputAction: String {
         case copy
         case save
@@ -196,12 +202,23 @@ final class RegionSelectionCoordinator {
         case interfaceElement = "interface-element"
     }
 
+    private struct SnapTarget: Equatable {
+        let frame: CGRect
+        let kind: SnapCandidateKind
+    }
+
+    private struct ElementResolutionRequest: Sendable {
+        let point: CGPoint
+        let window: WindowDescriptor
+        let lifecycleGeneration: UInt
+    }
+
     private var continuation: CheckedContinuation<CGRect, Error>?
     private var panels: [SelectionOverlayPanel] = []
     private var views: [RegionSelectionOverlayView] = []
     private let pinnedShotManager: PinnedShotManager
     private var preparation: RegionCapturePreparation?
-    private let elementResolver: InterfaceElementSelectionResolver
+    private let elementResolutionHandler: ElementResolutionHandler
     private var recognizesInterfaceElements = true
     private var snapCandidate: CGRect? {
         didSet {
@@ -215,6 +232,13 @@ final class RegionSelectionCoordinator {
             invalidateViews()
         }
     }
+    private var snapTargets: [SnapTarget] = []
+    private var selectedSnapTargetIndex = 0
+    private var snapWindowID: CGWindowID?
+    private var snapLevelWasUserAdjusted = false
+    private var hierarchyScrollAccumulator: CGFloat = 0
+    private var interfaceElementToWindowFallbackCount = 0
+    private var pendingElementResolution: ElementResolutionRequest?
     private var elementResolutionTask: Task<Void, Never>?
     private var elementResolutionGeneration: UInt = 0
     private var didLogMissingAccessibilityPermission = false
@@ -258,7 +282,21 @@ final class RegionSelectionCoordinator {
         elementResolver: InterfaceElementSelectionResolver = InterfaceElementSelectionResolver()
     ) {
         self.pinnedShotManager = pinnedShotManager
-        self.elementResolver = elementResolver
+        elementResolutionHandler = { point, window, primaryDisplayHeight in
+            elementResolver.resolve(
+                at: point,
+                in: window,
+                primaryDisplayHeight: primaryDisplayHeight
+            )
+        }
+    }
+
+    init(
+        pinnedShotManager: PinnedShotManager,
+        elementResolutionHandler: @escaping ElementResolutionHandler
+    ) {
+        self.pinnedShotManager = pinnedShotManager
+        self.elementResolutionHandler = elementResolutionHandler
     }
 
     /// Logical region corner radius from Capture settings for overlay drawing.
@@ -280,6 +318,13 @@ final class RegionSelectionCoordinator {
         self.mouseLocation = NSEvent.mouseLocation
         self.snapCandidate = nil
         self.snapCandidateKind = nil
+        self.snapTargets = []
+        self.selectedSnapTargetIndex = 0
+        self.snapWindowID = nil
+        self.snapLevelWasUserAdjusted = false
+        self.hierarchyScrollAccumulator = 0
+        self.interfaceElementToWindowFallbackCount = 0
+        self.pendingElementResolution = nil
         self.didLogMissingAccessibilityPermission = false
 
         return try await withCheckedThrowingContinuation { continuation in
@@ -314,8 +359,9 @@ final class RegionSelectionCoordinator {
             guard let snapCandidateKind else {
                 preconditionFailure("A smart region candidate must retain its source kind until pointer-down.")
             }
+            pendingElementResolution = nil
             elementResolutionTask?.cancel()
-            elementResolutionTask = nil
+            elementResolutionGeneration &+= 1
             AppLog.capture.notice(
                 "Accepted smart region candidate: kind=\(snapCandidateKind.rawValue, privacy: .public), x=\(snapCandidate.minX, privacy: .public), y=\(snapCandidate.minY, privacy: .public), width=\(snapCandidate.width, privacy: .public), height=\(snapCandidate.height, privacy: .public)"
             )
@@ -323,6 +369,10 @@ final class RegionSelectionCoordinator {
             initialSelection = snapCandidate
             self.snapCandidate = nil
             self.snapCandidateKind = nil
+            snapTargets = []
+            selectedSnapTargetIndex = 0
+            snapWindowID = nil
+            snapLevelWasUserAdjusted = false
             dragMode = .snappedCandidate
         } else if let selection, let handle = resizeHandle(at: point, selection: selection) {
             dragMode = .resizing(handle)
@@ -503,7 +553,16 @@ final class RegionSelectionCoordinator {
         case 49:
             if !isSelectionLocked { isSpacePressed = true }
         case 123, 124, 125, 126:
-            if !isSelectionLocked {
+            if !isSelectionLocked,
+               selection == nil,
+               event.modifierFlags.contains(.option),
+               (event.keyCode == 125 || event.keyCode == 126)
+            {
+                cycleSnapTarget(
+                    towardParent: event.keyCode == 126,
+                    reason: "option-arrow"
+                )
+            } else if !isSelectionLocked {
                 nudgeSelection(keyCode: event.keyCode, largeStep: event.modifierFlags.contains(.shift))
             }
         default:
@@ -517,25 +576,61 @@ final class RegionSelectionCoordinator {
 
     fileprivate func drawState(for panelFrame: CGRect) -> RegionOverlayDrawState {
         let displayedSelection = selection ?? snapCandidate
+        let selectionPixelSize = displayedSelection.flatMap(physicalPixelSize)
+        let magnifierInteraction: String
+        switch dragMode {
+        case nil: magnifierInteraction = "hover"
+        case .creating?: magnifierInteraction = "creating"
+        case .snappedCandidate?: magnifierInteraction = "snapped-candidate"
+        case .moving?: magnifierInteraction = "moving"
+        case .resizing?: magnifierInteraction = "resizing"
+        }
+        let showsMagnifier: Bool
+        if case .moving? = dragMode {
+            showsMagnifier = false
+        } else {
+            showsMagnifier = !isSelectionLocked
+        }
         return RegionOverlayDrawState(
             selection: displayedSelection,
+            selectionPixelSize: selectionPixelSize,
             mouseLocation: mouseLocation,
             handles: selection.map(handlePoints) ?? [],
             panelFrame: panelFrame,
-            showsMagnifier: !isSelectionLocked,
+            showsMagnifier: showsMagnifier,
+            magnifierInteraction: magnifierInteraction,
             showsConfirmationSurface: isConfirmingSelection,
             showsSelectionChrome: !hidesOverlaySelectionChrome,
             acceptsPointerInput: !isConfirmingSelection,
-            snapCandidateKind: selection == nil ? snapCandidateKind?.rawValue : nil
+            snapCandidateKind: selection == nil ? snapCandidateKind?.rawValue : nil,
+            snapCandidateLevel: selection == nil && !snapTargets.isEmpty
+                ? selectedSnapTargetIndex + 1
+                : nil,
+            snapCandidateLevelCount: selection == nil && !snapTargets.isEmpty
+                ? snapTargets.count
+                : nil,
+            snapStabilityFallbacks: interfaceElementToWindowFallbackCount
+        )
+    }
+
+    private func physicalPixelSize(for selection: CGRect) -> CGSize? {
+        guard let preparation else { return nil }
+        let intersectingScales = preparation.displays.compactMap { capture -> CGFloat? in
+            let intersection = selection.intersection(capture.descriptor.frame)
+            guard !intersection.isNull,
+                  intersection.width > 0,
+                  intersection.height > 0
+            else { return nil }
+            return capture.descriptor.scale
+        }
+        guard let outputScale = intersectingScales.max() else { return nil }
+        return CGSize(
+            width: ceil(selection.width * outputScale),
+            height: ceil(selection.height * outputScale)
         )
     }
 
     private func updateSnapCandidate(at point: CGPoint) {
-        elementResolutionGeneration &+= 1
-        let generation = elementResolutionGeneration
-        elementResolutionTask?.cancel()
-        elementResolutionTask = nil
-
         guard recognizesInterfaceElements,
               let preparation,
               let window = WindowSelectionResolver().topmostWindow(
@@ -543,65 +638,280 @@ final class RegionSelectionCoordinator {
                 candidates: preparation.windows
               )
         else {
-            snapCandidate = nil
-            snapCandidateKind = nil
+            clearSnapCandidates(reason: "no-window")
             return
         }
 
         let windowFrame = canonicalSelectionFrame(window.frame)
         guard isValidSelection(windowFrame) else {
-            snapCandidate = nil
-            snapCandidateKind = nil
+            clearSnapCandidates(reason: "invalid-window")
             return
         }
-        snapCandidate = windowFrame
-        snapCandidateKind = .window
 
-        let resolver = elementResolver
-        let primaryDisplayHeight = CGDisplayBounds(CGMainDisplayID()).height
+        if snapWindowID != window.id || snapTargets.isEmpty {
+            publishSnapTargets(
+                [SnapTarget(frame: windowFrame, kind: .window)],
+                selectedIndex: 0,
+                windowID: window.id,
+                userAdjusted: false,
+                reason: "window-hit"
+            )
+        }
+
+        pendingElementResolution = ElementResolutionRequest(
+            point: point,
+            window: window,
+            lifecycleGeneration: elementResolutionGeneration
+        )
+        startElementResolutionPipelineIfNeeded()
+    }
+
+    private func startElementResolutionPipelineIfNeeded() {
+        guard elementResolutionTask == nil, pendingElementResolution != nil else { return }
         elementResolutionTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 35_000_000)
-            } catch is CancellationError {
-                return
-            } catch {
-                AppLog.capture.error(
-                    "Element snap debounce failed: \(error.localizedDescription, privacy: .public)"
-                )
-                return
-            }
-            guard !Task.isCancelled else { return }
+            await self?.runElementResolutionPipeline()
+        }
+    }
+
+    private func runElementResolutionPipeline() async {
+        while !Task.isCancelled, let request = pendingElementResolution {
+            pendingElementResolution = nil
+            let resolutionHandler = elementResolutionHandler
+            let primaryDisplayHeight = CGDisplayBounds(CGMainDisplayID()).height
             let resolution = await Task.detached(priority: .userInitiated) {
-                resolver.resolve(
-                    at: point,
-                    in: window,
-                    primaryDisplayHeight: primaryDisplayHeight
-                )
+                resolutionHandler(request.point, request.window, primaryDisplayHeight)
             }.value
-            guard let self,
-                  !Task.isCancelled,
-                  generation == self.elementResolutionGeneration,
-                  self.dragMode == nil,
-                  !self.isSelectionLocked
-            else { return }
-            switch resolution {
-            case .element(let frame):
-                let candidate = self.canonicalSelectionFrame(frame)
-                guard self.isValidSelection(candidate), candidate.contains(point) else { return }
-                self.snapCandidateKind = .interfaceElement
-                self.snapCandidate = candidate
-                AppLog.capture.debug(
-                    "Resolved interface-element snap candidate: windowID=\(window.id, privacy: .public), x=\(candidate.minX, privacy: .public), y=\(candidate.minY, privacy: .public), width=\(candidate.width, privacy: .public), height=\(candidate.height, privacy: .public)"
-                )
-            case .accessibilityPermissionRequired:
-                guard !self.didLogMissingAccessibilityPermission else { return }
-                self.didLogMissingAccessibilityPermission = true
-                AppLog.capture.notice(
-                    "Interface-element snapping is limited to window frames until Accessibility permission is granted"
-                )
-            case .noElement:
-                break
+            guard !Task.isCancelled,
+                  request.lifecycleGeneration == elementResolutionGeneration,
+                  dragMode == nil,
+                  !isSelectionLocked,
+                  snapWindowID == request.window.id
+            else { continue }
+            applyElementResolution(resolution, request: request)
+        }
+        elementResolutionTask = nil
+        startElementResolutionPipelineIfNeeded()
+    }
+
+    private func applyElementResolution(
+        _ resolution: InterfaceElementResolution,
+        request: ElementResolutionRequest
+    ) {
+        guard let point = mouseLocation else { return }
+        let windowFrame = canonicalSelectionFrame(request.window.frame)
+        switch resolution {
+        case .elementHierarchy(let frames):
+            var controlFrames = frames
+                .map(canonicalSelectionFrame)
+                .filter {
+                    isValidSelection($0)
+                        && $0.contains(point)
+                        && $0 != windowFrame
+                }
+            if snapCandidateKind == .interfaceElement,
+               let snapCandidate,
+               snapCandidate.contains(point),
+               !controlFrames.contains(snapCandidate)
+            {
+                // The frozen target cannot move underneath the overlay. Retain
+                // a previously verified frame when a web accessibility tree
+                // transiently returns a different descendant path.
+                controlFrames.append(snapCandidate)
             }
+            controlFrames = controlFrames.reduce(into: []) { result, frame in
+                if !result.contains(frame) {
+                    result.append(frame)
+                }
+            }.sorted {
+                $0.width * $0.height < $1.width * $1.height
+            }
+            guard !controlFrames.isEmpty else {
+                if pendingElementResolution != nil { return }
+                publishWindowFallback(
+                    frame: windowFrame,
+                    windowID: request.window.id,
+                    reason: "no-current-control"
+                )
+                return
+            }
+
+            let targets = controlFrames.map {
+                SnapTarget(frame: $0, kind: .interfaceElement)
+            } + [SnapTarget(frame: windowFrame, kind: .window)]
+            let selectedIndex = selectedIndex(
+                in: targets,
+                preserving: snapCandidate,
+                userAdjusted: snapLevelWasUserAdjusted
+            )
+            publishSnapTargets(
+                targets,
+                selectedIndex: selectedIndex,
+                windowID: request.window.id,
+                userAdjusted: snapLevelWasUserAdjusted,
+                reason: "accessibility-hierarchy"
+            )
+        case .accessibilityPermissionRequired:
+            if snapCandidateKind != .interfaceElement || snapCandidate?.contains(point) != true {
+                publishWindowFallback(
+                    frame: windowFrame,
+                    windowID: request.window.id,
+                    reason: "accessibility-permission"
+                )
+            }
+            guard !didLogMissingAccessibilityPermission else { return }
+            didLogMissingAccessibilityPermission = true
+            AppLog.capture.notice(
+                "Interface-element snapping is limited to window frames until Accessibility permission is granted"
+            )
+        case .noElement:
+            if snapCandidateKind == .interfaceElement, snapCandidate?.contains(point) == true {
+                return
+            }
+            if pendingElementResolution != nil { return }
+            publishWindowFallback(
+                frame: windowFrame,
+                windowID: request.window.id,
+                reason: "no-accessibility-element"
+            )
+        }
+    }
+
+    private func selectedIndex(
+        in targets: [SnapTarget],
+        preserving previousFrame: CGRect?,
+        userAdjusted: Bool
+    ) -> Int {
+        if let previousFrame,
+           let matchedIndex = targets.firstIndex(where: { $0.frame == previousFrame }),
+           (snapCandidateKind == .interfaceElement || userAdjusted)
+        {
+            return matchedIndex
+        }
+        guard userAdjusted, !snapTargets.isEmpty else { return 0 }
+        let previousLevelFromWindow = snapTargets.count - 1 - selectedSnapTargetIndex
+        return max(0, targets.count - 1 - previousLevelFromWindow)
+    }
+
+    private func publishWindowFallback(
+        frame: CGRect,
+        windowID: CGWindowID,
+        reason: String
+    ) {
+        publishSnapTargets(
+            [SnapTarget(frame: frame, kind: .window)],
+            selectedIndex: 0,
+            windowID: windowID,
+            userAdjusted: false,
+            reason: reason
+        )
+    }
+
+    private func publishSnapTargets(
+        _ targets: [SnapTarget],
+        selectedIndex: Int,
+        windowID: CGWindowID,
+        userAdjusted: Bool,
+        reason: String
+    ) {
+        precondition(!targets.isEmpty, "Smart region snapping requires at least one target.")
+        precondition(targets.indices.contains(selectedIndex), "Smart region snap level is out of range.")
+        let previousKind = snapCandidateKind
+        let previousFrame = snapCandidate
+        let previousWindowID = snapWindowID
+        let previousLevel = selectedSnapTargetIndex
+        let previousLevelCount = snapTargets.count
+        let target = targets[selectedIndex]
+        if previousKind == .interfaceElement,
+           target.kind == .window,
+           previousWindowID == windowID,
+           !userAdjusted
+        {
+            interfaceElementToWindowFallbackCount += 1
+        }
+        snapTargets = targets
+        selectedSnapTargetIndex = selectedIndex
+        snapWindowID = windowID
+        snapLevelWasUserAdjusted = userAdjusted
+        snapCandidate = target.frame
+        snapCandidateKind = target.kind
+        if previousLevel != selectedIndex || previousLevelCount != targets.count {
+            invalidateViews()
+        }
+        guard previousKind != target.kind || previousFrame != target.frame else { return }
+        AppLog.capture.debug(
+            "Smart region target changed: reason=\(reason, privacy: .public), windowID=\(windowID, privacy: .public), kind=\(target.kind.rawValue, privacy: .public), level=\(selectedIndex + 1, privacy: .public)/\(targets.count, privacy: .public), x=\(target.frame.minX, privacy: .public), y=\(target.frame.minY, privacy: .public), width=\(target.frame.width, privacy: .public), height=\(target.frame.height, privacy: .public)"
+        )
+    }
+
+    private func clearSnapCandidates(reason: String) {
+        let hadCandidate = snapCandidate != nil
+        pendingElementResolution = nil
+        elementResolutionTask?.cancel()
+        elementResolutionGeneration &+= 1
+        snapTargets = []
+        selectedSnapTargetIndex = 0
+        snapWindowID = nil
+        snapLevelWasUserAdjusted = false
+        hierarchyScrollAccumulator = 0
+        snapCandidate = nil
+        snapCandidateKind = nil
+        if hadCandidate {
+            AppLog.capture.debug(
+                "Cleared smart region target: reason=\(reason, privacy: .public)"
+            )
+        }
+    }
+
+    private func cycleSnapTarget(towardParent: Bool, reason: String) {
+        guard selection == nil,
+              !isSelectionLocked,
+              dragMode == nil,
+              let point = mouseLocation,
+              !snapTargets.isEmpty
+        else { return }
+        let validTargets = snapTargets.filter { $0.frame.contains(point) }
+        guard validTargets.count > 1 else { return }
+        let currentIndex = validTargets.firstIndex {
+            $0.frame == snapCandidate && $0.kind == snapCandidateKind
+        } ?? 0
+        let targetIndex = min(
+            max(0, currentIndex + (towardParent ? 1 : -1)),
+            validTargets.count - 1
+        )
+        guard targetIndex != currentIndex, let windowID = snapWindowID else {
+            NSSound.beep()
+            return
+        }
+        publishSnapTargets(
+            validTargets,
+            selectedIndex: targetIndex,
+            windowID: windowID,
+            userAdjusted: true,
+            reason: reason
+        )
+    }
+
+    fileprivate func scrollWheel(with event: NSEvent) {
+        guard event.modifierFlags.contains(.option),
+              event.momentumPhase.isEmpty,
+              !isSelectionLocked,
+              selection == nil
+        else { return }
+        if event.phase.contains(.began) {
+            hierarchyScrollAccumulator = 0
+        }
+        let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 16
+        hierarchyScrollAccumulator += event.scrollingDeltaY * multiplier
+        let threshold: CGFloat = 18
+        if abs(hierarchyScrollAccumulator) >= threshold {
+            cycleSnapTarget(
+                towardParent: hierarchyScrollAccumulator > 0,
+                reason: "option-scroll"
+            )
+            hierarchyScrollAccumulator = 0
+        }
+        if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+            hierarchyScrollAccumulator = 0
         }
     }
 
@@ -866,8 +1176,8 @@ final class RegionSelectionCoordinator {
         draftPresentationTask = nil
         draftCropTask?.cancel()
         draftCropTask = nil
+        pendingElementResolution = nil
         elementResolutionTask?.cancel()
-        elementResolutionTask = nil
         elementResolutionGeneration &+= 1
         isPreparingDraft = false
         isConfirmingSelection = false
@@ -880,6 +1190,12 @@ final class RegionSelectionCoordinator {
         selection = nil
         snapCandidate = nil
         snapCandidateKind = nil
+        snapTargets = []
+        selectedSnapTargetIndex = 0
+        snapWindowID = nil
+        snapLevelWasUserAdjusted = false
+        hierarchyScrollAccumulator = 0
+        interfaceElementToWindowFallbackCount = 0
         mouseLocation = nil
         dragMode = nil
         initialSelection = nil
@@ -1181,17 +1497,31 @@ private final class WindowSelectionOverlayView: NSView {
 
 private struct RegionOverlayDrawState {
     let selection: CGRect?
+    let selectionPixelSize: CGSize?
     let mouseLocation: CGPoint?
     let handles: [CGPoint]
     let panelFrame: CGRect
     let showsMagnifier: Bool
+    let magnifierInteraction: String
     let showsConfirmationSurface: Bool
     let showsSelectionChrome: Bool
     let acceptsPointerInput: Bool
     let snapCandidateKind: String?
+    let snapCandidateLevel: Int?
+    let snapCandidateLevelCount: Int?
+    let snapStabilityFallbacks: Int
 }
 
 private final class RegionSelectionOverlayView: NSView {
+    private struct MagnifierMetrics {
+        let pixelX: Int
+        let pixelY: Int
+        let selectionPixelSize: CGSize?
+        let snapCandidateKind: String?
+        let snapCandidateLevel: Int?
+        let snapCandidateLevelCount: Int?
+    }
+
     private let capture: DisplayCapture
     private let frozenImage: NSImage
     private weak var coordinator: RegionSelectionCoordinator?
@@ -1236,14 +1566,30 @@ private final class RegionSelectionOverlayView: NSView {
         coordinator?.mouseDragged(to: globalPoint(for: event))
     }
     override func mouseUp(with event: NSEvent) { coordinator?.mouseUp() }
+    override func scrollWheel(with event: NSEvent) { coordinator?.scrollWheel(with: event) }
     override func keyDown(with event: NSEvent) { coordinator?.keyDown(with: event) }
     override func keyUp(with event: NSEvent) { coordinator?.keyUp(with: event) }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let window, let coordinator else { return }
         let state = coordinator.drawState(for: window.frame)
+        let magnifierMetrics = state.mouseLocation.flatMap { mouse in
+            state.showsMagnifier && state.panelFrame.contains(mouse)
+                ? self.magnifierMetrics(
+                    at: mouse,
+                    panelFrame: state.panelFrame,
+                    selectionPixelSize: state.selectionPixelSize,
+                    snapCandidateKind: state.snapCandidateKind,
+                    snapCandidateLevel: state.snapCandidateLevel,
+                    snapCandidateLevelCount: state.snapCandidateLevelCount
+                )
+                : nil
+        }
+        let magnifierSelection = magnifierMetrics?.selectionPixelSize.map {
+            "\(Int($0.width))x\(Int($0.height))"
+        } ?? "none"
         setAccessibilityValue(
-            "selectionChrome=\(state.showsSelectionChrome ? "visible" : "hidden"); confirmationSurface=\(state.showsConfirmationSurface ? "visible" : "hidden"); overlayInput=\(state.acceptsPointerInput ? "enabled" : "ignored"); snap=\(state.snapCandidateKind ?? "none")"
+            "selectionChrome=\(state.showsSelectionChrome ? "visible" : "hidden"); confirmationSurface=\(state.showsConfirmationSurface ? "visible" : "hidden"); overlayInput=\(state.acceptsPointerInput ? "enabled" : "ignored"); snap=\(state.snapCandidateKind ?? "none"); snapLevel=\(state.snapCandidateLevel.map(String.init) ?? "none")/\(state.snapCandidateLevelCount.map(String.init) ?? "none"); snapStabilityFallbacks=\(state.snapStabilityFallbacks); magnifier=\(magnifierMetrics == nil ? "hidden" : "visible"); magnifierInteraction=\(state.magnifierInteraction); magnifierPixel=\(magnifierMetrics.map { "\($0.pixelX),\($0.pixelY)" } ?? "none"); magnifierSelection=\(magnifierSelection); magnifierTarget=\(magnifierMetrics?.snapCandidateKind ?? "none"); magnifierGrid=1px; magnifierCenter=crosshair"
         )
         drawFrozenImage()
         NSColor.black.withAlphaComponent(0.34).setFill()
@@ -1285,13 +1631,22 @@ private final class RegionSelectionOverlayView: NSView {
                 border.stroke()
                 drawHandles(state.handles, panelFrame: state.panelFrame)
             }
-            drawSize(selection: selection, localRect: localSelection)
+            if magnifierMetrics == nil {
+                drawSize(
+                    selection: selection,
+                    selectionPixelSize: state.selectionPixelSize,
+                    localRect: localSelection
+                )
+            }
         }
-        if state.showsMagnifier,
-           let mouse = state.mouseLocation,
-           state.panelFrame.contains(mouse)
+        if let mouse = state.mouseLocation,
+           let magnifierMetrics
         {
-            drawMagnifier(at: mouse, panelFrame: state.panelFrame)
+            drawMagnifier(
+                at: mouse,
+                panelFrame: state.panelFrame,
+                metrics: magnifierMetrics
+            )
         }
     }
 
@@ -1310,14 +1665,18 @@ private final class RegionSelectionOverlayView: NSView {
         }
     }
 
-    private func drawSize(selection: CGRect, localRect: CGRect) {
-        guard localRect.intersects(bounds) else { return }
+    private func drawSize(
+        selection: CGRect,
+        selectionPixelSize: CGSize?,
+        localRect: CGRect
+    ) {
+        guard localRect.intersects(bounds), let selectionPixelSize else { return }
         // Whole-point frames are exact integers; round for any residual float noise
         // instead of truncating (which made 504.6 display as 504 then jump to 505).
         let pointWidth = Int(selection.width.rounded())
         let pointHeight = Int(selection.height.rounded())
-        let pixelWidth = Int((selection.width * capture.descriptor.scale).rounded())
-        let pixelHeight = Int((selection.height * capture.descriptor.scale).rounded())
+        let pixelWidth = Int(selectionPixelSize.width)
+        let pixelHeight = Int(selectionPixelSize.height)
         let text = "\(pointWidth) × \(pointHeight) pt · \(pixelWidth) × \(pixelHeight) px"
         let attributes: [NSAttributedString.Key: Any] = [
             .font: AppKitDrawingFonts.regionSelectionSize,
@@ -1332,14 +1691,43 @@ private final class RegionSelectionOverlayView: NSView {
         text.draw(at: origin, withAttributes: attributes)
     }
 
-    private func drawMagnifier(at globalPoint: CGPoint, panelFrame: CGRect) {
+    private func magnifierMetrics(
+        at globalPoint: CGPoint,
+        panelFrame: CGRect,
+        selectionPixelSize: CGSize?,
+        snapCandidateKind: String?,
+        snapCandidateLevel: Int?,
+        snapCandidateLevelCount: Int?
+    ) -> MagnifierMetrics {
         let scale = capture.descriptor.scale
-        let pixelX = (globalPoint.x - panelFrame.minX) * scale
-        let pixelY = (panelFrame.maxY - globalPoint.y) * scale
+        let pixelX = min(
+            max(0, Int(floor((globalPoint.x - panelFrame.minX) * scale))),
+            capture.capturedImage.image.width - 1
+        )
+        let pixelY = min(
+            max(0, Int(floor((panelFrame.maxY - globalPoint.y) * scale))),
+            capture.capturedImage.image.height - 1
+        )
+        return MagnifierMetrics(
+            pixelX: pixelX,
+            pixelY: pixelY,
+            selectionPixelSize: selectionPixelSize,
+            snapCandidateKind: snapCandidateKind,
+            snapCandidateLevel: snapCandidateLevel,
+            snapCandidateLevelCount: snapCandidateLevelCount
+        )
+    }
+
+    private func drawMagnifier(
+        at globalPoint: CGPoint,
+        panelFrame: CGRect,
+        metrics: MagnifierMetrics
+    ) {
+        let scale = capture.descriptor.scale
         let sampleSize = max(5, Int(11 * scale))
         var crop = CGRect(
-            x: floor(pixelX) - CGFloat(sampleSize / 2),
-            y: floor(pixelY) - CGFloat(sampleSize / 2),
+            x: CGFloat(metrics.pixelX - sampleSize / 2),
+            y: CGFloat(metrics.pixelY - sampleSize / 2),
             width: CGFloat(sampleSize),
             height: CGFloat(sampleSize)
         )
@@ -1349,9 +1737,47 @@ private final class RegionSelectionOverlayView: NSView {
         guard let sampled = capture.capturedImage.image.cropping(to: sampledCrop) else { return }
 
         let local = CGPoint(x: globalPoint.x - panelFrame.minX, y: globalPoint.y - panelFrame.minY)
-        var destination = CGRect(x: local.x + 18, y: local.y - 128, width: 110, height: 110)
-        if destination.maxX > bounds.maxX { destination.origin.x = local.x - 128 }
-        if destination.minY < bounds.minY { destination.origin.y = local.y + 18 }
+        let lensSize = CGSize(width: 110, height: 110)
+        let infoWidth: CGFloat = 144
+        let infoHeight: CGFloat = 34
+        let infoGap: CGFloat = 4
+        let stackSize = CGSize(
+            width: max(lensSize.width, infoWidth),
+            height: lensSize.height + infoGap + infoHeight
+        )
+        let edgeMargin: CGFloat = 8
+        var stack = CGRect(
+            x: local.x + 18,
+            y: local.y - 18 - stackSize.height,
+            width: stackSize.width,
+            height: stackSize.height
+        )
+        if stack.maxX > bounds.maxX - edgeMargin {
+            stack.origin.x = local.x - 18 - stack.width
+        }
+        if stack.minY < bounds.minY + edgeMargin {
+            stack.origin.y = local.y + 18
+        }
+        stack.origin.x = min(
+            max(edgeMargin, stack.origin.x),
+            max(edgeMargin, bounds.maxX - edgeMargin - stack.width)
+        )
+        stack.origin.y = min(
+            max(edgeMargin, stack.origin.y),
+            max(edgeMargin, bounds.maxY - edgeMargin - stack.height)
+        )
+        let infoRect = CGRect(
+            x: stack.minX,
+            y: stack.minY,
+            width: infoWidth,
+            height: infoHeight
+        )
+        let destination = CGRect(
+            x: stack.midX - lensSize.width / 2,
+            y: infoRect.maxY + infoGap,
+            width: lensSize.width,
+            height: lensSize.height
+        )
 
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
@@ -1375,12 +1801,17 @@ private final class RegionSelectionOverlayView: NSView {
 
         let cellWidth = destination.width / sampledCrop.width
         let cellHeight = destination.height / sampledCrop.height
+        drawMagnifierPixelGrid(
+            columns: Int(sampledCrop.width),
+            rows: Int(sampledCrop.height),
+            in: destination
+        )
         let sampledPixelX = min(
-            max(floor(pixelX), sampledCrop.minX),
+            max(CGFloat(metrics.pixelX), sampledCrop.minX),
             sampledCrop.maxX - 1
         )
         let sampledPixelY = min(
-            max(floor(pixelY), sampledCrop.minY),
+            max(CGFloat(metrics.pixelY), sampledCrop.minY),
             sampledCrop.maxY - 1
         )
         let centerPixel = CGRect(
@@ -1389,6 +1820,7 @@ private final class RegionSelectionOverlayView: NSView {
             width: cellWidth,
             height: cellHeight
         )
+        drawMagnifierCrosshair(around: centerPixel, in: destination)
         NSColor.black.withAlphaComponent(0.72).setStroke()
         let centerPixelOuterBorder = NSBezierPath(rect: centerPixel.insetBy(dx: -1, dy: -1))
         centerPixelOuterBorder.lineWidth = 2
@@ -1415,6 +1847,120 @@ private final class RegionSelectionOverlayView: NSView {
         )
         innerBorder.lineWidth = 1
         innerBorder.stroke()
+        drawMagnifierInfo(metrics, in: infoRect)
+    }
+
+    private func drawMagnifierPixelGrid(columns: Int, rows: Int, in rect: CGRect) {
+        guard columns > 1, rows > 1 else { return }
+        let path = NSBezierPath()
+        let cellWidth = rect.width / CGFloat(columns)
+        let cellHeight = rect.height / CGFloat(rows)
+        for column in 1..<columns {
+            let x = rect.minX + CGFloat(column) * cellWidth
+            path.move(to: CGPoint(x: x, y: rect.minY))
+            path.line(to: CGPoint(x: x, y: rect.maxY))
+        }
+        for row in 1..<rows {
+            let y = rect.minY + CGFloat(row) * cellHeight
+            path.move(to: CGPoint(x: rect.minX, y: y))
+            path.line(to: CGPoint(x: rect.maxX, y: y))
+        }
+        NSColor.black.withAlphaComponent(0.18).setStroke()
+        path.lineWidth = 1 / max(1, capture.descriptor.scale)
+        path.stroke()
+    }
+
+    private func drawMagnifierCrosshair(around centerPixel: CGRect, in rect: CGRect) {
+        let center = CGPoint(x: centerPixel.midX, y: centerPixel.midY)
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: rect.minX, y: center.y))
+        path.line(to: CGPoint(x: centerPixel.minX, y: center.y))
+        path.move(to: CGPoint(x: centerPixel.maxX, y: center.y))
+        path.line(to: CGPoint(x: rect.maxX, y: center.y))
+        path.move(to: CGPoint(x: center.x, y: rect.minY))
+        path.line(to: CGPoint(x: center.x, y: centerPixel.minY))
+        path.move(to: CGPoint(x: center.x, y: centerPixel.maxY))
+        path.line(to: CGPoint(x: center.x, y: rect.maxY))
+
+        NSColor.black.withAlphaComponent(0.72).setStroke()
+        path.lineWidth = 2
+        path.stroke()
+        NSColor.white.withAlphaComponent(0.9).setStroke()
+        path.lineWidth = 0.75
+        path.stroke()
+    }
+
+    private func drawMagnifierInfo(_ metrics: MagnifierMetrics, in rect: CGRect) {
+        let reducesTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        let increasesContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        let backgroundAlpha: CGFloat = reducesTransparency ? 0.94 : 0.78
+        let infoPath = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+        NSColor.black.withAlphaComponent(backgroundAlpha).setFill()
+        infoPath.fill()
+        NSColor.black.withAlphaComponent(increasesContrast ? 0.9 : 0.56).setStroke()
+        infoPath.lineWidth = increasesContrast ? 1.5 : 1
+        infoPath.stroke()
+        NSColor.white.withAlphaComponent(0.72).setStroke()
+        let innerPath = NSBezierPath(
+            roundedRect: rect.insetBy(dx: 1, dy: 1),
+            xRadius: 5,
+            yRadius: 5
+        )
+        innerPath.lineWidth = 0.75
+        innerPath.stroke()
+
+        let primary = "X \(metrics.pixelX)  Y \(metrics.pixelY) px"
+        let targetTitle: String?
+        switch metrics.snapCandidateKind {
+        case "window":
+            targetTitle = NSLocalizedString("Window", comment: "Region magnifier smart-snap target")
+        case "interface-element":
+            targetTitle = NSLocalizedString("Control", comment: "Region magnifier smart-snap target")
+        default:
+            targetTitle = nil
+        }
+        let hierarchyTitle = targetTitle.map { title in
+            guard let level = metrics.snapCandidateLevel,
+                  let count = metrics.snapCandidateLevelCount,
+                  count > 1
+            else { return title }
+            return "\(title) \(level)/\(count)"
+        }
+        let secondary = metrics.selectionPixelSize.map { size in
+            let dimensions = "\(Int(size.width))×\(Int(size.height)) px"
+            return hierarchyTitle.map { "\($0) · \(dimensions)" } ?? dimensions
+        } ?? hierarchyTitle
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: AppKitDrawingFonts.regionMagnifierHUD,
+            .foregroundColor: NSColor.white
+        ]
+        drawCenteredMagnifierText(
+            primary,
+            atY: secondary == nil ? rect.midY - 5 : rect.minY + 18,
+            in: rect,
+            attributes: attributes
+        )
+        if let secondary {
+            drawCenteredMagnifierText(
+                secondary,
+                atY: rect.minY + 4,
+                in: rect,
+                attributes: attributes
+            )
+        }
+    }
+
+    private func drawCenteredMagnifierText(
+        _ text: String,
+        atY y: CGFloat,
+        in rect: CGRect,
+        attributes: [NSAttributedString.Key: Any]
+    ) {
+        let textSize = text.size(withAttributes: attributes)
+        text.draw(
+            at: CGPoint(x: rect.midX - textSize.width / 2, y: y),
+            withAttributes: attributes
+        )
     }
 
     private func globalPoint(for event: NSEvent) -> CGPoint {
