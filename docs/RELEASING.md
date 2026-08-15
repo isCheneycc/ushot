@@ -2,13 +2,13 @@
 
 Ushot currently has no Developer ID certificate. Public builds are distributed from GitHub as intentionally ad-hoc signed, unnotarized artifacts; the current release and updater rollout does not require paid Apple Developer Program membership. Local development and the installed `/Applications/Ushot.app` use a separate, stable Apple Development signature so routine development does not continuously invalidate Screen Recording authorization.
 
-The fixed hardened update feed, currently absent pending its evidence gate, is:
+The fixed hardened update feed is active and currently serves Ushot 0.1.6 (build 7):
 
 ```text
 https://ischeneycc.github.io/ushot/updates/v1/appcast.xml
 ```
 
-The first public installation requires the user to remove quarantine explicitly. Direct-download GitHub Releases and production Sparkle updates have separate readiness gates. Ushot 0.1.1 is the first direct-download preview and remains on the legacy `/updates/appcast.xml`, which must stay permanently absent. Ushot 0.1.2 (build 3) is the published first manual-install hardened transition; its immutable five-asset Release used `publish_update_feed=false`, and the v1 endpoint remains absent. Parsed `SUAppcastItem` values cannot prove that authenticated XML contained no duplicate or wrong-namespace metadata, so published Ushot 0.1.3 (build 4) is the second manual GitHub-only transition and adds pre-parse validation. Its protected run also used `publish_update_feed=false`; both appcast URLs remain HTTP 404. The first permitted v1 feed item and online update is 0.1.4 (build 5), after the complete 0.1.3 → 0.1.4 matrix passes.
+The first public installation requires the user to remove quarantine explicitly. Direct-download GitHub Releases and production Sparkle updates have separate readiness gates. Ushot 0.1.1 is the first direct-download preview and remains on the legacy `/updates/appcast.xml`, which must stay permanently absent. Ushot 0.1.2 (build 3) is the published first manual-install hardened transition; its immutable five-asset Release used `publish_update_feed=false`, and the v1 endpoint remained absent. Parsed `SUAppcastItem` values cannot prove that authenticated XML contained no duplicate or wrong-namespace metadata, so published Ushot 0.1.3 (build 4) is the second manual GitHub-only transition and adds pre-parse validation. Its protected run also used `publish_update_feed=false`; both appcast URLs remained HTTP 404. The complete 0.1.3 → 0.1.4 matrix passed before protected run [`31141110871`](https://github.com/isCheneycc/ushot/actions/runs/31141110871) published 0.1.4 (build 5) as the first v1 feed item. Runs [`31552493658`](https://github.com/isCheneycc/ushot/actions/runs/31552493658) and [`31864175412`](https://github.com/isCheneycc/ushot/actions/runs/31864175412) subsequently extended that authenticated history with 0.1.5 (build 6) and 0.1.6 (build 7).
 
 ## Security invariants
 
@@ -37,18 +37,18 @@ Every release command enforces the applicable invariants below. The appcast, pro
 - The feed-only signing job has only read access to repository contents and actions; the publishing job has repository write access but never receives the Sparkle private key, while the final Pages/OIDC job checks out no source and executes only the pinned deploy action
 - Every release-workflow checkout disables persisted GitHub credentials, and every action used by that workflow is pinned to a full commit SHA
 - The default `publish_update_feed=false` path still builds, validates, publishes and anonymously download-verifies exactly the five Release assets, but does not fetch Sparkle tools or the current feed, read the EdDSA private key, create a Pages artifact or run `deploy-appcast`
-- Only `publish_update_feed=true` may sign and deploy the production feed, and that opt-in does not waive the 0.1.3 hardened-runtime build evidence, operator-run key-recovery drill or clean-account 0.1.3 → 0.1.4 raw-XML/mismatch/tamper/update matrix
+- Only `publish_update_feed=true` may sign and deploy the production feed. The first feed item was admitted only after the 0.1.3 hardened-runtime build evidence, operator-run key-recovery drill and clean-account 0.1.3 → 0.1.4 raw-XML/mismatch/tamper/update matrix passed; every later feed-enabled release must preserve those gates and extend the authenticated history
 
 Disabling Hardened Runtime is deliberate **only** for `public-adhoc`: Sparkle documents that an ad-hoc host can fail to load Sparkle when Library Validation is enabled. `local-signed` and the future `developer-id` mode keep Hardened Runtime enabled. The scripts never recursively re-sign Sparkle with `codesign --deep`.
 
-The archive-version check above is a protected publication gate, while the reviewed runtime fork adds the separate post-extraction check and strict archive-EdDSA policy. The published 0.1.2 dependency remains historically pinned to `https://github.com/isCheneycc/Sparkle`, exact immutable tag `2.9.5-ushot.2`, revision `f4d8362bf9b6231596db3a0cc8812fdca8100961`; it predates the raw authenticated-XML hook. Fork tag `2.9.5-ushot.3` is retained only as the historical authenticated-XML-hook predecessor. Published Ushot 0.1.3 pins the [bounded-feed successor Release](https://github.com/isCheneycc/Sparkle/releases/tag/2.9.5-ushot.4), exact tag `2.9.5-ushot.4`, revision `3d81360ff115ffb80222c2723d72cb4cfa802774`, whose SwiftPM ZIP SHA-256 is `d8d36e5b5ee9e97b17babc1beeb26795b96558cafe5450130aafa5b169d5c829`; Release/CI builds must continue to refuse automatic package resolution. The runtime fork does not replace the publisher: appcasts and archives continue to be generated and signed with the official upstream Sparkle 2.9.5 tools. The fork Release was verified dependency evidence, not Ushot publication or runtime-transition evidence. Ushot's protected direct-download publication is now independently recorded below, but production self-update remains blocked until the complete 0.1.3 → 0.1.4 runtime matrix has recorded evidence; source review, CI or a downloadable Release cannot waive it.
+The archive-version check above is a protected publication gate, while the reviewed runtime fork adds the separate post-extraction check and strict archive-EdDSA policy. The published 0.1.2 dependency remains historically pinned to `https://github.com/isCheneycc/Sparkle`, exact immutable tag `2.9.5-ushot.2`, revision `f4d8362bf9b6231596db3a0cc8812fdca8100961`; it predates the raw authenticated-XML hook. Fork tag `2.9.5-ushot.3` is retained only as the historical authenticated-XML-hook predecessor. Published Ushot 0.1.3 pins the [bounded-feed successor Release](https://github.com/isCheneycc/Sparkle/releases/tag/2.9.5-ushot.4), exact tag `2.9.5-ushot.4`, revision `3d81360ff115ffb80222c2723d72cb4cfa802774`, whose SwiftPM ZIP SHA-256 is `d8d36e5b5ee9e97b17babc1beeb26795b96558cafe5450130aafa5b169d5c829`; Release/CI builds must continue to refuse automatic package resolution. The runtime fork does not replace the publisher: appcasts and archives continue to be generated and signed with the official upstream Sparkle 2.9.5 tools. The fork Release was verified dependency evidence, not Ushot publication or runtime-transition evidence. The complete 0.1.3 → 0.1.4 runtime matrix passed before the first feed publication; source review, CI or a downloadable Release still cannot substitute for the runtime and pipeline gates on later releases.
 
 ## One-time GitHub setup
 
 1. Create the public repository `isCheneycc/ushot`.
 2. Protect `main`, require the `CI` workflow, require pull requests, and do not permit release operators to bypass those rules.
 3. Create a tag ruleset for `v*` that blocks updates and deletion. Tag protection is mandatory: a published tag is immutable.
-4. Create a protected GitHub Environment named `release`, add required reviewers, and use exact tag deployment rules. The completed second manual transition admitted only `v0.1.3`; a later first-feed run may admit only `v0.1.4` after its separate approval. Never use a `v*` wildcard. This general approval environment must contain no `SPARKLE_ED25519_PRIVATE_KEY` secret. A failed or superseded tag stays permanently absent from this allowlist because its immutable workflow source cannot be revoked from `main`.
+4. Create a protected GitHub Environment named `release`, add required reviewers, and use exact tag deployment rules. Admit only the exact currently reviewed release tag—`v0.1.6` after the completed 0.1.6 publication—and never use a `v*` wildcard. This general approval environment must contain no `SPARKLE_ED25519_PRIVATE_KEY` secret. A failed or superseded tag stays permanently absent from this allowlist because its immutable workflow source cannot be revoked from `main`.
 
 Those four steps are sufficient for `publish_update_feed=false`. Before any `publish_update_feed=true` run:
 
@@ -73,9 +73,9 @@ The current helper reads the Keychain value into process memory, proves that it 
 
 The 2026-08-06 ciphertext at `~/Documents/Ushot-Sparkle-Ed25519-Backup.enc` is OpenSSL salted format, mode `0600`, 64 bytes, SHA-256 `da3f8fdd48a2906e48a7847ce252af472c11d865950673f7fb05375736d3f379`, and its decrypt/byte-compare check passed. It is on the same internal disk as the login Keychain and therefore is only encrypted staging evidence. The helper used for that run also created and deleted temporary plaintext files; APFS snapshots or residual blocks cannot be ruled out. Preserve this record as old-key evidence, but do not claim it is an independent backup or use it for the rotated production key's recovery gate.
 
-The repository owner approved rotation on 2026-08-06 because no production appcast has been signed and the manual 0.1.3 installation is the clean trust-root migration. The new key was generated with the checksum-pinned official Sparkle 2.9.5 tool under account `io.github.ischeneycc.ushot.20260806`; its derived public key exactly matches `+zRL11/2yYePt5O+OetThnLGwyvAvFtPPXxiBBOTTjE=` in source. The encrypted GitHub recovery record passed at archived private root commit `9fe3d07a31bad91c6b75142955f31d1c30816ec1`, ciphertext SHA-256 `f308c694d6597a52a700ab4f9b97386ee17bd5332ad7725655fd13ab666155d0`; a mode-0700 fresh clone matched the locally recovery-checked bytes and passed Git-object, five-file, mode, header and digest checks. The old `update-feed-signing` Secret was then replaced through stdin and its metadata advanced to `2026-08-06T06:02:05Z`. Published 0.1.1/0.1.2 artifacts and their old public key remain unchanged; published 0.1.3 embeds the rotated public key. A temporary local Keychain copy or staging ciphertext may be deleted only after the exact published-asset recovery drill passes and the owner explicitly approves deletion.
+The repository owner approved rotation on 2026-08-06 because no production appcast had yet been signed and the manual 0.1.3 installation provided the clean trust-root migration. The new key was generated with the checksum-pinned official Sparkle 2.9.5 tool under account `io.github.ischeneycc.ushot.20260806`; its derived public key exactly matches `+zRL11/2yYePt5O+OetThnLGwyvAvFtPPXxiBBOTTjE=` in source. The encrypted GitHub recovery record passed at archived private root commit `9fe3d07a31bad91c6b75142955f31d1c30816ec1`, ciphertext SHA-256 `f308c694d6597a52a700ab4f9b97386ee17bd5332ad7725655fd13ab666155d0`; a mode-0700 fresh clone matched the locally recovery-checked bytes and passed Git-object, five-file, mode, header and digest checks. The old `update-feed-signing` Secret was then replaced through stdin and its metadata advanced to `2026-08-06T06:02:05Z`. Published 0.1.1/0.1.2 artifacts and their old public key remain unchanged; published 0.1.3 embeds the rotated public key. A temporary local Keychain copy or staging ciphertext may be deleted only after the exact published-asset recovery drill passes and the owner explicitly approves deletion.
 
-Using the exact five published 0.1.3 assets, the key custodian must personally run the drill from an interactive Terminal:
+Before the first feed publication, the key custodian personally ran the drill against the exact five published 0.1.3 assets from an interactive Terminal. Repeat the same procedure against the applicable published assets whenever a later release policy requires a new recovery drill:
 
 ```bash
 scripts/run-sparkle-key-recovery-drill.sh \
@@ -84,7 +84,7 @@ scripts/run-sparkle-key-recovery-drill.sh \
   --assets-directory "/absolute/path/to/ushot/build/release/public-adhoc/artifacts"
 ```
 
-The user enters the password only at OpenSSL's hidden `/dev/tty` prompt. Do not ask the user to send or paste it into chat, a command, an environment variable or a log. Record only the nonsecret `version`, `build`, backup/archive/appcast hashes and `result=PASS` lines. The helper verifies the exact 0.1.3 assets, recovered public-key identity, disposable appcast/archive signatures and tamper rejection without a plaintext key file; this is still not client-update evidence, and the separate protected run remains the source of publication evidence.
+The user enters the password only at OpenSSL's hidden `/dev/tty` prompt. Do not ask the user to send or paste it into chat, a command, an environment variable or a log. Record only the nonsecret `version`, `build`, backup/archive/appcast hashes and `result=PASS` lines. The helper verifies the selected exact assets, recovered public-key identity, disposable appcast/archive signatures and tamper rejection without a plaintext key file; this is not client-update evidence, and the separate protected run remains the source of publication evidence.
 
 ## Local stable build and installation
 
@@ -108,30 +108,31 @@ Never install a `public-adhoc` build over the local signed `/Applications/Ushot.
 
 1. Update `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` in `Config/Base.xcconfig`. Both values must match the release tag and final bundle. A feed-enabled release additionally requires both the stable semantic version and positive decimal build to be strictly greater than every retained item in the signed production appcast.
 2. Add nonempty restricted-Markdown source notes at `updates/release-notes/<version>.md`. Links, images, raw HTML, autolinks, entities and URL/domain/network-address-like destinations are forbidden. Do not add Sparkle signing comments or appcast elements yourself.
-3. Run the relevant tests and direct-install manual checks. Preserve the published 0.1.2 evidence. For 0.1.3, inspect the three required host booleans, exact `SUMaximumSignedAppcastContentLength=1048576`, all three embedded framework markers and the exact authenticated-XML hook; exercise pipeline duplicate/wrong-namespace/DTD/entity rejection plus declared-length and streamed/chunked appcast oversize rejection; prove that the appcast-only cap does not reject a larger persistent update archive; and keep `publish_update_feed=false`. The complete 0.1.3 → 0.1.4 updater matrix is additionally mandatory before the first `publish_update_feed=true` run.
+3. Run the relevant tests and direct-install manual checks. Preserve the historical 0.1.2/0.1.3 transition evidence. For a feed-enabled release, authenticate and validate the existing production feed before extension, prove that both the new stable version and build are strictly monotonic, and rerun the relevant runtime, raw-XML, archive-signature, exact-version and active-work regressions. A `publish_update_feed=false` release is direct-download-only and must never be presented as an in-app update.
 4. Commit the exact release source.
-5. Merge the release commit into protected `main`, wait for the `CI` push run on that exact commit to succeed, then create and push an immutable tag matching the version exactly, for example `v0.1.3` for the second manual transition.
+5. Merge the release commit into protected `main`, wait for the `CI` push run on that exact commit to succeed, then create and push an immutable tag matching the version exactly, for example `v0.1.6` for version 0.1.6.
 6. Add that exact tag to the protected `release` environment's deployment rules and confirm failed or superseded tags remain excluded. Then dispatch **Protected release** at the tag ref, not at `main`. The ref and the `tag` input must be identical:
 
    ```bash
-   TAG=v0.1.3
-   BUILD_NUMBER=4
+   TAG=v0.1.6
+   BUILD_NUMBER=7
+   PUBLISH_UPDATE_FEED=true
    gh workflow run release.yml \
      --ref "$TAG" \
      -f tag="$TAG" \
      -f build_number="$BUILD_NUMBER" \
-     -f publish_update_feed=false
+     -f publish_update_feed="$PUBLISH_UPDATE_FEED"
    ```
 
 7. Approve the protected `release` environment only after comparing the run ref, requested tag, bound commit SHA and successful CI run.
 
-The completed 0.1.2 and 0.1.3 runs both used `publish_update_feed=false`. Each published five immutable direct-download assets, verified every remote byte and downloaded all five again through the anonymous public boundary. The 0.1.3 run skipped every signing, feed-validation and Pages job. Preserve those records exactly. Users must install both transitions manually as applicable. **Check for Updates…** remains visible and reports a feed failure at the absent v1 endpoint through the 0.1.3 manual stage.
+The completed 0.1.2 and 0.1.3 runs both used `publish_update_feed=false`. Each published five immutable direct-download assets, verified every remote byte and downloaded all five again through the anonymous public boundary. The 0.1.3 run skipped every signing, feed-validation and Pages job. Preserve those records exactly. Users had to install both transitions manually as applicable; **Check for Updates…** reported a feed failure at the absent v1 endpoint through the 0.1.3 manual stage.
 
-The 0.1.3 publication prerequisite is satisfied. Only after the operator-run encrypted-key recovery drill is recorded and the complete clean-account 0.1.3 → 0.1.4 authenticated-XML/helper/replacement/tamper/exact-version/active-work matrix passes may an operator dispatch the first feed path:
+The operator-run encrypted-key recovery drill and complete clean-account 0.1.3 → 0.1.4 authenticated-XML/helper/replacement/tamper/exact-version/active-work matrix passed before 0.1.4 became the first feed item. The latest completed feed extension used:
 
 ```bash
-TAG=v0.1.4
-BUILD_NUMBER=5
+TAG=v0.1.6
+BUILD_NUMBER=7
 gh workflow run release.yml \
   --ref "$TAG" \
   -f tag="$TAG" \
@@ -148,17 +149,29 @@ For a local packaging dry run that does not publish anything:
 ```bash
 scripts/build-release.sh \
   --mode public-adhoc \
-  --version 0.1.3 \
-  --build-number 4
+  --version 0.1.6 \
+  --build-number 7
 
 scripts/package-release.sh \
   --mode public-adhoc \
-  --version 0.1.3 \
-  --build-number 4 \
-  --tag v0.1.3
+  --version 0.1.6 \
+  --build-number 7 \
+  --tag v0.1.6
 ```
 
 ## Exact release assets
+
+The immutable published [`v0.1.6`](https://github.com/isCheneycc/ushot/releases/tag/v0.1.6) GitHub Release contains exactly the following:
+
+```text
+Ushot-0.1.6-arm64.dmg
+Ushot-0.1.6-arm64.zip
+Ushot-0.1.6-arm64.dSYM.zip
+Ushot-0.1.6-arm64.release-manifest.json
+SHA256SUMS.txt
+```
+
+Protected workflow run [`31864175412`](https://github.com/isCheneycc/ushot/actions/runs/31864175412) published this exact set on 2026-08-15 with `publish_update_feed=true`, verified all five assets through the anonymous public boundary and extended the authenticated v1 feed. The SHA-256 values are DMG `bce6a4ee94d3e5199adc2d495722af8920698907937b18ee9f40a1399d2016cc`, app ZIP `eeed6d5001499ccff32bbfe46d16bdfb1d6469797221f4a68af82702a8c8268d`, dSYM ZIP `a10ad3dff16b7e1de0036a01f1c63294a272fb53c78fe248471055ba11685282`, manifest `7ea03f1f6a63059120e03a5b0671f25672592b1f59ece73847f6d6e6c65be166`, and checksums `06a8d3b210c92cb5f3bbdf02721936acd0dc5edaf47f34781b707d6490662a8f`. Independent post-deployment verification authenticated the live appcast with the embedded Ed25519 public key and the app-identical raw-XML validator; its SHA-256 was `1b1f504c0e746d6509e6d6f4735c3b7d55914c79daf8535cdabb6912aa088225`. The legacy appcast remained HTTP 404.
 
 The immutable published `v0.1.2` GitHub Release contains exactly the following:
 
@@ -185,7 +198,7 @@ SHA256SUMS.txt
 Protected workflow run [`31078896953`](https://github.com/isCheneycc/ushot/actions/runs/31078896953) published this exact set on 2026-08-06 with `publish_update_feed=false` and verified all five assets through the anonymous public boundary. The SHA-256 values are DMG `223041e8b60321572a5952183331de4e13101ad119cd39b36244ddb7aef58349`, app ZIP `91b4fbe2c40826aec909cb38f3fea5e2056e40b5dfc2fbe54b3efeb1d687efc8`, dSYM ZIP `d540d593a7b745b3068792cd0dd296c8aea74e7792031ffdb29b4cfc18c9854f`, manifest `78410b923978e825083c164db9c308f37b3c7062d81899d9e173911a951529c0`, and checksums `19ba42accdad1c288966bc947f9905a9bc70b79e172a3a09b11f47cba30a99cf`. Both the legacy and v1 appcast URLs remained HTTP 404, and the signing, feed-validation and Pages jobs were skipped. This makes 0.1.3 available for direct download and manual installation; it is not evidence that in-app update is active.
 
 - DMG: first installation only; it contains `Ushot.app` and an `/Applications` link.
-- ZIP: contains the app bundle and becomes the only full Sparkle enclosure only when a feed-enabled run signs it into the appcast. In the direct-download preview it is simply a validated Release asset and is not evidence of updater readiness.
+- ZIP: contains the app bundle and becomes the only full Sparkle enclosure only when a feed-enabled run signs it into the appcast. In a direct-download-only run it is simply a validated Release asset and is not evidence of updater readiness.
 - dSYM ZIP: archived symbols whose UUIDs must match the shipped executable.
 - Manifest: product, bundle, version, build, tag, architecture, signature mode and per-asset hashes.
 - Checksums: SHA-256 for the DMG, update ZIP, dSYM ZIP and manifest.
@@ -211,7 +224,7 @@ Automation proves artifact identity, versions, hashes and publication ordering. 
 - Screen Recording grant and denial behavior;
 - relaunch, capture modes, annotation, copy/save/pin, history and login item behavior on the supported hardware selected for the preview.
 
-Those checks admit only the direct-download Release. They preserve 0.1.2 as the published first manual transition and admitted 0.1.3 only as the published second manual transition, never as a feed. The completed 0.1.3 prepublication gate additionally required the three host booleans, exact `SUMaximumSignedAppcastContentLength=1048576`, all three framework markers, live hook ownership, pipeline duplicate/wrong-namespace/DTD/entity rejection, declared and streamed/chunked appcast oversize rejection, feed-cap exemption for persistent archives, and fail-closed missing/wrong configuration fixtures. Before the first `publish_update_feed=true` run for 0.1.4 (build 5), the separate 0.1.3 → 0.1.4 updater matrix must then verify:
+Those checks admit only the direct-download Release. They preserve 0.1.2 as the published first manual transition and admitted 0.1.3 only as the published second manual transition, never as a feed. The completed 0.1.3 prepublication gate additionally required the three host booleans, exact `SUMaximumSignedAppcastContentLength=1048576`, all three framework markers, live hook ownership, pipeline duplicate/wrong-namespace/DTD/entity rejection, declared and streamed/chunked appcast oversize rejection, feed-cap exemption for persistent archives, and fail-closed missing/wrong configuration fixtures. Before the first `publish_update_feed=true` run for 0.1.4 (build 5), the separate 0.1.3 → 0.1.4 updater matrix passed the following checks; keep them as the regression basis for later feed extensions:
 
 - the built 0.1.3 three required host booleans, exact `SUMaximumSignedAppcastContentLength=1048576`, all three embedded framework capability markers and authenticated-XML hook, including fail-closed missing/wrong-policy and owner-loss fixtures;
 - an isolated-loopback HTTPS run that keeps the exact production feed URL and canonical signed enclosure URL without deploying Pages or modifying `SUFeedURL`;
@@ -222,7 +235,7 @@ Those checks admit only the direct-download Release. They preserve 0.1.2 as the 
 - permission reauthorization and multiple-display behavior after replacement;
 - recovery of the EdDSA key from the independent encrypted backup without exposing it.
 
-Until that two-version matrix succeeds, the ad-hoc Sparkle updater remains blocked even when a GitHub Release is downloadable. Screen Recording permission may need to be granted again after public updates because ad-hoc identity continuity is not guaranteed.
+That two-version matrix passed before 0.1.4 became the first production feed item. Screen Recording permission may need to be granted again after public updates because ad-hoc identity continuity is not guaranteed.
 
 ## Failure recovery
 
@@ -237,9 +250,9 @@ Until that two-version matrix succeeds, the ad-hoc Sparkle updater remains block
 
 ## Future Developer ID path
 
-This path is deferred and is not required for the current ad-hoc rollout. The reviewed runtime fork is designed to require archive EdDSA independently of application code signing, but Developer ID distribution must remain disabled until that behavior has built/runtime evidence and the complete ad-hoc transition matrix passes. Before enabling `developer-id`, add a regression that corrupts only the archive EdDSA signature while preserving a valid Developer ID identity, and repeat the complete transition matrix; notarization cannot replace that result.
+This path is deferred and is not required for the current ad-hoc rollout. The reviewed runtime fork requires archive EdDSA independently of application code signing, but Developer ID distribution remains disabled until that behavior has Developer-ID-specific built/runtime evidence. Before enabling `developer-id`, add a regression that corrupts only the archive EdDSA signature while preserving a valid Developer ID identity, and repeat the complete transition matrix; notarization cannot replace that result.
 
-After that blocker is resolved and the Apple Developer Program is joined, preserve the Bundle ID, Sparkle public key and key account. Then configure `DEVELOPER_ID_APPLICATION` and `DEVELOPMENT_TEAM` and test the explicit future path:
+If that evidence is completed and the Apple Developer Program is joined, preserve the Bundle ID, Sparkle public key and key account. Then configure `DEVELOPER_ID_APPLICATION` and `DEVELOPMENT_TEAM` and test the explicit future path:
 
 ```bash
 export DEVELOPER_ID_APPLICATION='Developer ID Application: Example (TEAMID)'

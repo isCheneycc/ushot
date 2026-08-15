@@ -19,7 +19,7 @@ Ushot 是一款面向 macOS 14 及以上版本 Apple 芯片 Mac 的原生截图�
 截图像素、标注、剪贴板输出、颜色采样、历史记录与图像编码均在本机处理。Ushot 不包含账户、遥测、分析、广告 SDK、崩溃报告上传或系统信息提交。
 
 > [!IMPORTANT]
-> Ushot 0.1.5（build 6）是当前公开发布版本。请从官方 GitHub Release 安装；已安装 0.1.3 或 0.1.4 的用户也可以通过**检查更新…**从生产 v1 更新源下载并安装 0.1.5。
+> Ushot 0.1.6（build 7）是当前公开发布版本。请从官方 GitHub Release 安装；已安装 0.1.3、0.1.4 或 0.1.5 的用户也可以通过**检查更新…**从生产 v1 更新源下载并安装 0.1.6。
 
 ## 一次截图，一条连续工作流
 
@@ -71,7 +71,7 @@ open ScreenshotApp.xcodeproj
 ## 隐私优先的设计
 
 - **截图与像素访问需要屏幕录制权限。** 像素仅在用户明确触发操作后读取，并始终在 Mac 本机处理。
-- **辅助功能权限是可选的。** 它只会把智能区域吸附从应用窗口细化到有用控件。权限不存在、被拒绝或撤销时，普通截图与窗口级吸附仍然可用。
+- **辅助功能权限是可选的。** 它只会把智能区域吸附从应用窗口细化到稳定的控件层级。截图时可使用 Option-↑/↓ 或按住 Option 滚动来选择父级或子级。权限不存在、被拒绝或撤销时，普通截图与窗口级吸附仍然可用。
 - **历史记录由用户主动开启。** 关闭历史记录会停止创建新记录，但不会静默删除已有内容。
 - **网络访问由用户主动触发。** 唯一的常规网络入口是**检查更新…**。这些 HTTPS 请求会向 GitHub Pages 与 GitHub Releases 暴露正常的连接元数据，但 Ushot 不会附加截图、标注、剪贴板、历史记录、广告标识符或系统信息。
 
@@ -79,9 +79,9 @@ open ScreenshotApp.xcodeproj
 
 ## 发布状态与安装
 
-Ushot 0.1.5（build 6）是当前已发布版本。受保护工作流已发布其不可变五资产 GitHub Release，并扩展了已签名的 v1 appcast。0.1.3 或 0.1.4 用户可手动安装 0.1.5，也可通过**检查更新…**升级。直接从 `main` 构建的版本仍属于开发产物，而不是受支持的分发渠道。
+Ushot 0.1.6（build 7）是当前已发布版本。受保护工作流已发布其不可变五资产 GitHub Release，并扩展了已签名的 v1 appcast。0.1.3、0.1.4 或 0.1.5 用户可手动安装 0.1.6，也可通过**检查更新…**升级。直接从 `main` 构建的版本仍属于开发产物，而不是受支持的分发渠道。
 
-请从不可变的 [Ushot v0.1.5 Release](https://github.com/isCheneycc/ushot/releases/tag/v0.1.5) 下载 [Ushot-0.1.5-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.5/Ushot-0.1.5-arm64.dmg) 并手动安装。公开产物会刻意采用 ad-hoc 签名，不包含 Developer ID 签名或 Apple 公证，并且不会启用 App Sandbox。
+请从不可变的 [Ushot v0.1.6 Release](https://github.com/isCheneycc/ushot/releases/tag/v0.1.6) 下载 [Ushot-0.1.6-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.6/Ushot-0.1.6-arm64.dmg) 并手动安装。公开产物会刻意采用 ad-hoc 签名，不包含 Developer ID 签名或 Apple 公证，并且不会启用 App Sandbox。
 
 1. 打开 DMG，将 `Ushot.app` 拖入**应用程序**。
 2. 只移除下载文件的隔离属性，然后打开 Ushot：
@@ -99,7 +99,7 @@ Ushot 0.1.5（build 6）是当前已发布版本。受保护工作流已发布�
 
 更新检查只能由用户手动触发。Ushot 不会在启动时或定时检查，不会自动下载，也不会提交系统信息。
 
-0.1.1 客户端仍固定使用旧 `/updates/appcast.xml` 端点，该端点将永久保持不可用（HTTP 404）。Ushot 0.1.2 及以后版本指向 v1 更新源。其首个版本是 0.1.4（build 5），当前版本是 0.1.5（build 6）：已安装 0.1.3 或 0.1.4 的客户端可通过**检查更新…**下载并安装 0.1.5。0.1.1 或 0.1.2 安装无法经该路径自更新，应改为从 GitHub 手动安装当前发布版。
+0.1.1 客户端仍固定使用旧 `/updates/appcast.xml` 端点，该端点将永久保持不可用（HTTP 404）。Ushot 0.1.2 及以后版本指向 v1 更新源。其首个版本是 0.1.4（build 5），当前版本是 0.1.6（build 7）：已安装 0.1.3、0.1.4 或 0.1.5 的客户端可通过**检查更新…**下载并安装 0.1.6。0.1.1 或 0.1.2 安装无法经该路径自更新，应改为从 GitHub 手动安装当前发布版。
 
 - Ushot 0.1.2 及以后版本固定使用 `https://ischeneycc.github.io/ushot/updates/v1/appcast.xml`；旧端点永久保持 HTTP 404。
 - 受限 Markdown 格式的发行说明直接嵌入签名更新源，因此显示说明不会发起独立请求。
