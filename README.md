@@ -19,7 +19,7 @@ Ushot is a native screenshot and annotation utility for Apple silicon Macs runni
 Screenshot pixels, annotations, clipboard exports, color samples, history, and encoded files are processed locally. Ushot has no account, telemetry, analytics, advertising SDK, crash-report upload, or system-profile submission.
 
 > [!IMPORTANT]
-> Ushot 0.1.5 (build 6) is the current public release. Install it from the official GitHub Release, or use **Check for Updates…** on an installed 0.1.3 or 0.1.4 client to download and install 0.1.5 from the production v1 feed.
+> Ushot 0.1.6 (build 7) is the current public release. Install it from the official GitHub Release, or use **Check for Updates…** on an installed 0.1.3, 0.1.4, or 0.1.5 client to download and install 0.1.6 from the production v1 feed.
 
 ## One capture, one continuous workflow
 
@@ -79,9 +79,9 @@ Read [PRIVACY.md](PRIVACY.md) for the complete data, permission, persistence, an
 
 ## Release status and installation
 
-Ushot 0.1.5 (build 6) is the current published release. The protected workflow published its immutable five-asset GitHub Release and extended the signed v1 appcast. Users of 0.1.3 or 0.1.4 can install 0.1.5 manually or through **Check for Updates…**. Builds taken directly from `main` remain development artifacts rather than a supported distribution channel.
+Ushot 0.1.6 (build 7) is the current published release. The protected workflow published its immutable five-asset GitHub Release and extended the signed v1 appcast. Users of 0.1.3, 0.1.4, or 0.1.5 can install 0.1.6 manually or through **Check for Updates…**. Builds taken directly from `main` remain development artifacts rather than a supported distribution channel.
 
-Download [Ushot-0.1.5-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.5/Ushot-0.1.5-arm64.dmg) from the immutable [Ushot v0.1.5 Release](https://github.com/isCheneycc/ushot/releases/tag/v0.1.5) and install it manually. Public artifacts are intentionally ad-hoc signed, have no Developer ID signature or Apple notarization, and are not sandboxed.
+Download [Ushot-0.1.6-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.6/Ushot-0.1.6-arm64.dmg) from the immutable [Ushot v0.1.6 Release](https://github.com/isCheneycc/ushot/releases/tag/v0.1.6) and install it manually. Public artifacts are intentionally ad-hoc signed, have no Developer ID signature or Apple notarization, and are not sandboxed.
 
 1. Open the DMG and drag `Ushot.app` into **Applications**.
 2. Remove only the downloaded-file quarantine attribute, then open Ushot:
@@ -99,7 +99,7 @@ The app bundle includes the applicable [third-party license notices](UshotApp/Re
 
 Update checks are manual only. Ushot does not check at launch or on a schedule, download automatically, or submit a system profile.
 
-The 0.1.1 client remains pinned to the legacy `/updates/appcast.xml` endpoint, which stays permanently unavailable (HTTP 404). Ushot 0.1.2 and later point at the v1 feed. Its first item was 0.1.4 (build 5), and its current item is 0.1.5 (build 6): an installed 0.1.3 or 0.1.4 client can use **Check for Updates…** to download and install 0.1.5. A 0.1.1 or 0.1.2 install cannot self-update through that path and should install a current release manually from GitHub.
+The 0.1.1 client remains pinned to the legacy `/updates/appcast.xml` endpoint, which stays permanently unavailable (HTTP 404). Ushot 0.1.2 and later point at the v1 feed. Its first item was 0.1.4 (build 5), and its current item is 0.1.6 (build 7): an installed 0.1.3, 0.1.4, or 0.1.5 client can use **Check for Updates…** to download and install 0.1.6. A 0.1.1 or 0.1.2 install cannot self-update through that path and should install a current release manually from GitHub.
 
 - Ushot 0.1.2 and later are pinned to `https://ischeneycc.github.io/ushot/updates/v1/appcast.xml`; the legacy endpoint remains HTTP 404.
 - Restricted-Markdown release notes are embedded in that signed feed, so showing them does not make a detached notes request.
