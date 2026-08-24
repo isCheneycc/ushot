@@ -158,7 +158,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
 
     var onWindowDragBegan: ((NSEvent) -> Void)?
     var onWindowDragChanged: ((NSEvent) -> Void)?
-    var onWindowDragEnded: (() -> Void)?
+    var onWindowDragEnded: ((String) -> Void)?
     var onExternalDrag: ((NSEvent) -> Void)?
     var onCopyFinalImage: (() -> Void)?
     var onPreviewChange: ((CapturedImage) -> Void)?
@@ -479,8 +479,40 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         }
         self.mouseUp(with: mouseUp)
         precondition(!isWindowDragInProgress, "Pinned mouse-up must end the active drag state.")
+
+        self.mouseDown(with: mouseDown)
+        precondition(
+            isWindowDragInProgress,
+            "Pinned editing-disable regression must begin with an active body move."
+        )
+        setAnnotationEditingEnabled(false)
+        precondition(
+            !isWindowDragInProgress && !isReadOnlyWindowDragArmed,
+            "Disabling an already read-only canvas must still release its active body move."
+        )
+        self.mouseUp(with: mouseUp)
+
+        let originalTool = session.currentTool
+        let originalAnnotationCount = session.controller.document.annotations.count
+        setAnnotationEditingEnabled(true)
+        session.currentTool = .select
+        self.mouseDown(with: mouseDown)
+        precondition(
+            isWindowDragInProgress,
+            "Pinned tool-switch regression must begin with an active Select body move."
+        )
+        session.currentTool = .text
+        self.mouseUp(with: mouseUp)
+        precondition(
+            !isWindowDragInProgress
+                && !isTextEditing
+                && session.controller.document.annotations.count == originalAnnotationCount,
+            "Releasing a body move after a tool switch must not begin or commit an annotation."
+        )
+        session.currentTool = originalTool
+        setAnnotationEditingEnabled(false)
         AppLog.capture.notice(
-            "Pinned cursor press regression passed: pressCursor=closed-hand, movement=zero, releaseState=idle"
+            "Pinned cursor press regression passed: pressCursor=closed-hand, movement=zero, releaseState=idle, editingDisableCancellation=true, toolSwitchReleaseSideEffect=false"
         )
     }
 
@@ -2618,13 +2650,15 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         preservesSharedEditorState: Bool,
         reason: String
     ) {
+        if !enabled {
+            finishWindowDragIfNeeded(reason: "annotation-editing-disabled-\(reason)")
+        }
         guard isAnnotationEditingEnabled != enabled else { return }
         if !enabled {
             _ = endTextEditingIfNeeded(reason: .externalAction)
             cancelLineWidthEditing(reason: "annotation-editing-disabled")
             cancelProvisionalDrawing()
             isReadOnlyWindowDragArmed = false
-            isWindowDragInProgress = false
             if !preservesSharedEditorState {
                 session.controller.selectedItemIDs.removeAll()
                 session.setPreviewExcludedAnnotationIDs([])
@@ -3189,8 +3223,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             else { return }
             guard NSEvent.pressedMouseButtons & 1 != 0 else {
                 AppLog.capture.debug("Pinned screenshot drag cursor released after pointer-up")
-                self.onWindowDragEnded?()
-                self.setWindowDragInProgress(false)
+                self.finishWindowDragIfNeeded(reason: "pressed-buttons-released")
                 return
             }
             // The active press owns the cursor until release, including the interval
@@ -3198,6 +3231,15 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             NSCursor.closedHand.set()
             self.observeWindowDragRelease(generation: generation)
         }
+    }
+
+    private func finishWindowDragIfNeeded(reason: String) {
+        guard isWindowDragInProgress else { return }
+        AppLog.capture.debug(
+            "Pinned canvas body move ending: reason=\(reason, privacy: .public)"
+        )
+        setWindowDragInProgress(false)
+        onWindowDragEnded?(reason)
     }
 
     private var activeSelectionInteractionCursor: NSCursor? {
@@ -3306,7 +3348,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         if supportsDirectInteractiveComposition {
             drawInteractiveDocument()
         } else {
-            previewImage.draw(in: bounds, from: .zero, operation: .copy, fraction: 1)
+            drawScaledScreenshot(
+                previewImage,
+                sourcePixelSize: session.previewImage.pixelSize
+            )
             drawExcludedAnnotations()
         }
         drawSelection()
@@ -3381,6 +3426,11 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             updateSelectionInteraction(to: point)
             return
         }
+        if isWindowDragInProgress {
+            NSCursor.closedHand.set()
+            onWindowDragChanged?(event)
+            return
+        }
         if event.modifierFlags.contains(.option) {
             onExternalDrag?(event)
             return
@@ -3410,18 +3460,13 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
 
     override func mouseUp(with event: NSEvent) {
         guard isAnnotationEditingEnabled else {
-            if isReadOnlyWindowDragArmed {
-                onWindowDragEnded?()
-            }
-            setWindowDragInProgress(false)
+            finishWindowDragIfNeeded(reason: "pointer-up-read-only")
             applyCursor(for: convert(event.locationInWindow, from: nil))
             return
         }
+        let completesWindowDrag = isWindowDragInProgress
         defer {
-            if session.currentTool == .select, isReadOnlyWindowDragArmed {
-                onWindowDragEnded?()
-                setWindowDragInProgress(false)
-            }
+            finishWindowDragIfNeeded(reason: "pointer-up-editing")
             startPoint = nil
             currentPoint = nil
             freehandPoints.removeAll()
@@ -3434,6 +3479,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 captured: session.previewImage
             )
         }
+        guard !completesWindowDrag else { return }
         let end = documentPoint(fromViewPoint: convert(event.locationInWindow, from: nil))
 
         if selectionInteraction != nil {
@@ -5860,13 +5906,35 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
 
     private func drawInteractiveDocument() {
         if drawsBaseImage {
-            baseImage.draw(in: bounds, from: .zero, operation: .copy, fraction: 1)
+            drawScaledScreenshot(
+                baseImage,
+                sourcePixelSize: session.baseImage.pixelSize
+            )
         }
         for storedItem in session.controller.document.orderedAnnotations {
             if storedItem.id == textEditingState?.itemID { continue }
             let item = displayItem(for: storedItem)
             drawInteractiveItem(item)
         }
+    }
+
+    /// Nearest-neighbor is correct only for a true two-axis 1:1 mapping.
+    /// Every other size uses high-quality interpolation: using `.none` for an
+    /// enlarged screenshot or for a width-only match manufactures jagged
+    /// edges, while AppKit's implicit default makes reduced previews soft.
+    private func drawScaledScreenshot(_ image: NSImage, sourcePixelSize: CGSize) {
+        guard let context = NSGraphicsContext.current else {
+            image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1)
+            return
+        }
+        let previousInterpolation = context.imageInterpolation
+        defer { context.imageInterpolation = previousInterpolation }
+        let decision = ScreenshotSamplingPolicy.decision(
+            sourcePixelSize: sourcePixelSize,
+            destinationPixelSize: convertToBacking(bounds).size
+        )
+        context.imageInterpolation = decision.usesNearestNeighbor ? .none : .high
+        image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1)
     }
 
     private func drawInteractiveItem(_ item: AnnotationItem) {

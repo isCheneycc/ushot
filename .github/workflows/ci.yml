@@ -42,19 +42,47 @@ jobs:
     name: Swift unit tests
     needs: release-metadata
     runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Run package tests
-        run: >-
-          swift test
-          --package-path .
-          --configuration debug
-          --disable-automatic-resolution
+      - name: Run package tests on a supported pre-macOS-26 system
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(sw_vers -productVersion)" == 15.* ]] || {
+            echo 'error: compatibility tests must execute on macOS 15.' >&2
+            exit 1
+          }
+          SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+          [[ "$SDK_VERSION" == 26.* ]] || {
+            echo "error: app compilation requires a macOS 26 SDK; got $SDK_VERSION." >&2
+            exit 1
+          }
+          xcodebuild -version
+          swift test \
+            --package-path . \
+            --configuration debug \
+            --disable-automatic-resolution
+          TEST_HOST="$(find .build -type f \
+            -path '*/ScreenshotAppPackageTests.xctest/Contents/MacOS/ScreenshotAppPackageTests' \
+            -perm -111 -print -quit)"
+          [[ -n "$TEST_HOST" ]] || {
+            echo 'error: SwiftPM test host was not produced.' >&2
+            exit 1
+          }
+          source scripts/release-common.sh
+          release_validate_screen_capture_kit_runtime_compatibility "$TEST_HOST"
 
   public-build-gate:
     name: Public ad-hoc build gate
     needs: release-metadata
     runs-on: macos-15
+    outputs:
+      compatibility_artifact_id: ${{ steps.preserve_compatibility_app.outputs.artifact-id }}
+      compatibility_artifact_digest: ${{ steps.preserve_compatibility_app.outputs.artifact-digest }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve release metadata
@@ -65,7 +93,19 @@ jobs:
           echo "VERSION=$(release_xcconfig_value MARKETING_VERSION Config/Base.xcconfig)" >> "$GITHUB_ENV"
           echo "BUILD_NUMBER=$(release_xcconfig_value CURRENT_PROJECT_VERSION Config/Base.xcconfig)" >> "$GITHUB_ENV"
       - name: Build and validate the public distribution mode
+        shell: bash
         run: |
+          set -euo pipefail
+          [[ "$(sw_vers -productVersion)" == 15.* ]] || {
+            echo 'error: public build compatibility gate must execute on macOS 15.' >&2
+            exit 1
+          }
+          SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+          [[ "$SDK_VERSION" == 26.* ]] || {
+            echo "error: app compilation requires a macOS 26 SDK; got $SDK_VERSION." >&2
+            exit 1
+          }
+          xcodebuild -version
           scripts/build-release.sh \
             --mode public-adhoc \
             --version "$VERSION" \
@@ -75,3 +115,107 @@ jobs:
             --version "$VERSION" \
             --build-number "$BUILD_NUMBER" \
             --tag "v$VERSION"
+      - id: preserve_compatibility_app
+        name: Preserve the exact app ZIP for macOS 14 launch compatibility
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ushot-macos14-compatibility-${{ github.run_attempt }}
+          path: build/release/public-adhoc/artifacts/Ushot-*-arm64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  macos-14-launch-smoke:
+    name: macOS 14 launch compatibility
+    needs: public-build-gate
+    runs-on: macos-14
+    permissions:
+      actions: read
+      contents: read
+    env:
+      EXPECTED_COMPATIBILITY_ARTIFACT_ID: ${{ needs.public-build-gate.outputs.compatibility_artifact_id }}
+      EXPECTED_COMPATIBILITY_ARTIFACT_DIGEST: ${{ needs.public-build-gate.outputs.compatibility_artifact_digest }}
+      EXPECTED_COMPATIBILITY_ARTIFACT_NAME: ushot-macos14-compatibility-${{ github.run_attempt }}
+    steps:
+      - name: Bind the compatibility artifact to this workflow run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_COMPATIBILITY_ARTIFACT_ID" =~ ^[1-9][0-9]*$ \
+              && "$EXPECTED_COMPATIBILITY_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ \
+              && "$EXPECTED_COMPATIBILITY_ARTIFACT_NAME" =~ ^ushot-macos14-compatibility-[1-9][0-9]*$ ]] || {
+            echo 'error: public-build gate did not expose a canonical compatibility artifact identity.' >&2
+            exit 1
+          }
+          ARTIFACT_JSON="$RUNNER_TEMP/compatibility-artifact.json"
+          REST_DIGEST="sha256:${EXPECTED_COMPATIBILITY_ARTIFACT_DIGEST#sha256:}"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$EXPECTED_COMPATIBILITY_ARTIFACT_ID" \
+            > "$ARTIFACT_JSON"
+          jq -e \
+            --argjson artifact_id "$EXPECTED_COMPATIBILITY_ARTIFACT_ID" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --arg artifact_name "$EXPECTED_COMPATIBILITY_ARTIFACT_NAME" \
+            --arg artifact_digest "$REST_DIGEST" \
+            '.id == $artifact_id and .name == $artifact_name and .digest == $artifact_digest and .expired == false and .workflow_run.id == $run_id' \
+            "$ARTIFACT_JSON" >/dev/null || {
+              echo 'error: compatibility artifact metadata does not match the public-build producer.' >&2
+              exit 1
+            }
+      - name: Recover the exact public-build app ZIP
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.public-build-gate.outputs.compatibility_artifact_id }}
+          path: ${{ runner.temp }}/ushot-macos14
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify weak imports and launch on macOS 14
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(sw_vers -productVersion)" == 14.* ]] || {
+            echo 'error: launch compatibility smoke must execute on macOS 14.' >&2
+            exit 1
+          }
+          ROOT="${RUNNER_TEMP}/ushot-macos14"
+          ZIP="$(find "$ROOT" -maxdepth 1 -type f -name 'Ushot-*-arm64.zip' -print -quit)"
+          [[ -n "$ZIP" ]] || {
+            echo 'error: the compatibility artifact did not contain the app ZIP.' >&2
+            exit 1
+          }
+          mkdir -p "$ROOT/extracted"
+          ditto -x -k "$ZIP" "$ROOT/extracted"
+          APP="$ROOT/extracted/Ushot.app"
+          BINARY="$APP/Contents/MacOS/Ushot"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          otool -L "$BINARY" | grep -F \
+            '/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit' \
+            | grep -F ', weak)'
+          for symbol in \
+            '_OBJC_CLASS_$_SCScreenshotConfiguration' \
+            '_OBJC_CLASS_$_SCScreenshotOutput'
+          do
+            nm -m "$BINARY" | grep -F "(undefined) weak external $symbol (from ScreenCaptureKit)"
+            xcrun dyld_info -imports "$BINARY" | grep -F "$symbol [weak-import]"
+            xcrun dyld_info -fixups "$BINARY" | grep -F "ScreenCaptureKit/$symbol [weak-import]"
+          done
+          "$BINARY" >"$ROOT/launch.log" 2>&1 &
+          APP_PID=$!
+          cleanup() {
+            if kill -0 "$APP_PID" 2>/dev/null; then
+              kill -TERM "$APP_PID" 2>/dev/null || true
+              wait "$APP_PID" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          for _ in 1 2 3 4 5 6; do
+            sleep 0.5
+            kill -0 "$APP_PID" 2>/dev/null || {
+              cat "$ROOT/launch.log" >&2
+              echo 'error: Ushot exited during the macOS 14 launch smoke.' >&2
+              exit 1
+            }
+          done
+          echo 'compatibility: Ushot remained alive on macOS 14 with weak macOS 26 class imports.'

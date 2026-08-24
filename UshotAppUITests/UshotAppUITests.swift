@@ -1568,6 +1568,12 @@ final class UshotAppUITests: XCTestCase {
         XCTAssertEqual(card.frame.width, 430, accuracy: 2)
         XCTAssertEqual(card.frame.height, 330, accuracy: 2)
         XCTAssertTrue(overlay.frame.contains(card.frame), "The color card must remain fully on screen.")
+        waitForValue(of: card, containing: "hierarchy=copy,channels,metadata,shortcuts")
+        waitForValue(of: card, containing: "shortcutLayout=three-plus-two")
+        waitForValue(of: card, containing: "R ")
+        waitForValue(of: card, containing: "G ")
+        waitForValue(of: card, containing: "B ")
+        waitForValue(of: card, containing: "A ")
 
         let valueBeforeMove = try XCTUnwrap(overlay.value as? String)
         overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.47)).hover()
@@ -1581,6 +1587,7 @@ final class UshotAppUITests: XCTestCase {
 
         app.typeKey(.tab, modifierFlags: [])
         waitForValue(of: overlay, containing: "colorSpace=displayP3")
+        waitForValue(of: card, containing: "presentation=CSS")
 
         app.typeKey(.rightArrow, modifierFlags: [])
         waitForValue(

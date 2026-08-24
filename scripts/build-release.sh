@@ -66,10 +66,16 @@ release_require_command xcodebuild
 release_require_command codesign
 release_require_command dwarfdump
 release_require_command file
+release_require_command xcrun
 
 if ! xcodebuild -version >/dev/null 2>&1; then
   release_die "A full Xcode installation is required. Select it with: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
 fi
+SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)" \
+  || release_die "Could not resolve the selected macOS SDK version."
+[[ "$SDK_VERSION" == 26.* ]] \
+  || release_die "Ushot app compilation requires a macOS 26 SDK; selected SDK is $SDK_VERSION."
+release_log "Using macOS SDK $SDK_VERSION for the macOS 14 deployment target."
 
 MODE_ROOT="$BUILD_ROOT/$MODE"
 DERIVED_DATA="$MODE_ROOT/DerivedData"

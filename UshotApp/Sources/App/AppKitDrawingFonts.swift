@@ -23,10 +23,20 @@ enum AppKitDrawingFonts {
         size: 10,
         weight: .regular
     )
-    static let colorPickerDetail = makeMonospacedFont(
-        role: "color-picker-detail",
-        size: 9.5,
-        weight: .regular
+    static let colorPickerPrimaryValue = makeMonospacedFont(
+        role: "color-picker-primary-value",
+        size: 18,
+        weight: .semibold
+    )
+    static let colorPickerLongValue = makeMonospacedFont(
+        role: "color-picker-long-value",
+        size: 11.5,
+        weight: .medium
+    )
+    static let colorPickerChannelValue = makeMonospacedFont(
+        role: "color-picker-channel-value",
+        size: 10.5,
+        weight: .medium
     )
     static let compactChrome = makeMonospacedFont(
         role: "compact-chrome",
@@ -39,7 +49,9 @@ enum AppKitDrawingFonts {
         _ = regionSelectionSize
         _ = regionMagnifierHUD
         _ = screenRulerBody
-        _ = colorPickerDetail
+        _ = colorPickerPrimaryValue
+        _ = colorPickerLongValue
+        _ = colorPickerChannelValue
         _ = compactChrome
         AppLog.lifecycle.debug("Prepared retained AppKit drawing fonts")
     }
