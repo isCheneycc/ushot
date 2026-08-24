@@ -14,6 +14,10 @@ ARCHS = arm64
 SUPPORTED_PLATFORMS = macosx
 SWIFT_VERSION = 5.0
 LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/../Frameworks
+// ScreenCaptureKit itself is available on every supported system, but the
+// automatic natural-size screenshot classes are new in macOS 26. Keep the
+// framework weak so those class references cannot prevent launch on macOS 14/15.
+OTHER_LDFLAGS = $(inherited) -weak_framework ScreenCaptureKit
 
 GENERATE_INFOPLIST_FILE = NO
 INFOPLIST_FILE = UshotApp/Info.plist

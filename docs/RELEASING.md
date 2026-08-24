@@ -17,6 +17,8 @@ Every release command enforces the applicable invariants below. The appcast, pro
 - Product: `Ushot.app`
 - Bundle identifier: `io.github.ischeneycc.ushot`
 - Architecture: `arm64`
+- App-compiling CI and release jobs run on the `macos-15` arm64 image with the installed Xcode 26.3 toolchain selected explicitly, so the compiler sees the macOS 26 ScreenCaptureKit screenshot API while tests execute on a supported older OS; control, approval, signing, validation and publication jobs retain their narrower existing toolchain boundaries
+- The deployment target remains macOS 14. ScreenCaptureKit is weak-linked, 0.1.7-or-later asset validation requires `SCScreenshotConfiguration` and `SCScreenshotOutput` to remain weak imports, and CI launches the exact public-build app artifact to prove macOS 14 launch compatibility; runtime availability routing keeps macOS 14/15 on the separately validated legacy capture path
 - Stable tag: `v<MARKETING_VERSION>`
 - Build: positive integer matching `CURRENT_PROJECT_VERSION`
 - Workflow run ref, requested tag, local tag, remote tag and `GITHUB_SHA` all resolve to the same commit, and the local/remote tag object SHA also matches for annotated tags

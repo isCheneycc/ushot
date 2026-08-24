@@ -9,6 +9,7 @@ VALIDATE_SCRIPT="$SCRIPT_DIR/validate-appcast.sh"
 DERIVE_KEY_SCRIPT="$SCRIPT_DIR/derive-sparkle-public-key.swift"
 KEY_RECOVERY_DRILL_SCRIPT="$SCRIPT_DIR/run-sparkle-key-recovery-drill.sh"
 RELEASE_WORKFLOW="$PROJECT_ROOT/.github/workflows/release.yml"
+CI_WORKFLOW="$PROJECT_ROOT/.github/workflows/ci.yml"
 # shellcheck source=release-common.sh
 source "$SCRIPT_DIR/release-common.sh"
 # shellcheck source=install-local.sh
@@ -171,6 +172,7 @@ assert_rollout_constants() {
   [[ "$USHOT_SIGNED_FEED_VALIDATION_TRANSITION_BUILD" == "4" ]]
   [[ "$USHOT_FIRST_FEED_VERSION" == "0.1.4" ]]
   [[ "$USHOT_FIRST_FEED_BUILD" == "5" ]]
+  [[ "$USHOT_SCREEN_CAPTURE_KIT_WEAK_LINK_VERSION" == "0.1.7" ]]
   [[ "$USHOT_LEGACY_APPCAST_URL" == "https://ischeneycc.github.io/ushot/updates/appcast.xml" ]]
   [[ "$USHOT_LEGACY_APPCAST_RELATIVE_PATH" == "updates/appcast.xml" ]]
   [[ "$USHOT_APPCAST_RELATIVE_PATH" == "updates/v1/appcast.xml" ]]
@@ -416,6 +418,7 @@ APP_BUNDLE_IDENTIFIER = io.github.ischeneycc.ushot
 SPARKLE_KEY_ACCOUNT = io.github.ischeneycc.ushot.20260806
 SPARKLE_PUBLIC_ED_KEY = $USHOT_SPARKLE_PUBLIC_ED_KEY
 LD_RUNPATH_SEARCH_PATHS = \$(inherited) @executable_path/../Frameworks
+OTHER_LDFLAGS = \$(inherited) -weak_framework ScreenCaptureKit
 MARKETING_VERSION = $version
 CURRENT_PROJECT_VERSION = $build_number
 EOF
@@ -497,6 +500,11 @@ set -euo pipefail
 case "${1:-}" in
   -L)
     printf '%s\n' '@rpath/Sparkle.framework/Versions/B/Sparkle (compatibility version 2.0.0, current version 2.9.5)'
+    if [[ -n "${MOCK_SCREEN_CAPTURE_KIT_STRONG_FRAMEWORK:-}" ]]; then
+      printf '%s\n' '/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit (compatibility version 1.0.0, current version 1.0.0)'
+    else
+      printf '%s\n' '/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit (compatibility version 1.0.0, current version 1.0.0, weak)'
+    fi
     ;;
   -l)
     printf '%s\n' 'cmd LC_RPATH' 'path @executable_path/../Frameworks (offset 12)'
@@ -506,7 +514,34 @@ case "${1:-}" in
     ;;
 esac
 MOCK_OTOOL
-chmod +x "$APP_MOCK_BIN/otool"
+cat > "$APP_MOCK_BIN/nm" <<'MOCK_NM'
+#!/bin/bash
+set -euo pipefail
+linkage='weak external'
+if [[ -n "${MOCK_SCREEN_CAPTURE_KIT_STRONG_CLASS:-}" ]]; then
+  linkage='external'
+fi
+printf '%s\n' \
+  "                 (undefined) $linkage _OBJC_CLASS_\$_SCScreenshotConfiguration (from ScreenCaptureKit)" \
+  "                 (undefined) $linkage _OBJC_CLASS_\$_SCScreenshotOutput (from ScreenCaptureKit)"
+MOCK_NM
+cat > "$APP_MOCK_BIN/xcrun" <<'MOCK_XCRUN'
+#!/bin/bash
+set -euo pipefail
+[[ "${1:-}" == "dyld_info" ]] || exit 1
+case "${2:-}" in
+  -imports|-fixups) ;;
+  *) exit 1 ;;
+esac
+marker=' [weak-import]'
+if [[ -n "${MOCK_SCREEN_CAPTURE_KIT_STRONG_DYLD:-}" ]]; then
+  marker=''
+fi
+printf '%s\n' \
+  "ScreenCaptureKit/_OBJC_CLASS_\$_SCScreenshotConfiguration$marker" \
+  "ScreenCaptureKit/_OBJC_CLASS_\$_SCScreenshotOutput$marker"
+MOCK_XCRUN
+chmod +x "$APP_MOCK_BIN/otool" "$APP_MOCK_BIN/nm" "$APP_MOCK_BIN/xcrun"
 printf '#!/bin/bash\nexit 0\n' > "$TEST_APP/Contents/MacOS/Ushot"
 printf '#!/bin/bash\nexit 0\n' > "$TEST_APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
 chmod +x \
@@ -555,6 +590,43 @@ validate_hardened_app() {
 }
 
 expect_success "built-app gate accepts host requirements and all framework markers" validate_hardened_app
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 0.1.7' "$TEST_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 8' "$TEST_APP/Contents/Info.plist"
+validate_weak_linked_capture_app() {
+  PATH="$APP_MOCK_BIN:$PATH" release_validate_app_identity "$TEST_APP" "0.1.7" "8"
+}
+validate_strong_framework_capture_app() {
+  MOCK_SCREEN_CAPTURE_KIT_STRONG_FRAMEWORK=1 \
+    PATH="$APP_MOCK_BIN:$PATH" \
+    release_validate_app_identity "$TEST_APP" "0.1.7" "8"
+}
+validate_strong_class_capture_app() {
+  MOCK_SCREEN_CAPTURE_KIT_STRONG_CLASS=1 \
+    PATH="$APP_MOCK_BIN:$PATH" \
+    release_validate_app_identity "$TEST_APP" "0.1.7" "8"
+}
+validate_strong_dyld_capture_app() {
+  MOCK_SCREEN_CAPTURE_KIT_STRONG_DYLD=1 \
+    PATH="$APP_MOCK_BIN:$PATH" \
+    release_validate_app_identity "$TEST_APP" "0.1.7" "8"
+}
+expect_success \
+  "built-app gate accepts weak-linked macOS 26 ScreenCaptureKit classes" \
+  validate_weak_linked_capture_app
+expect_failure_containing \
+  "built-app gate rejects strong-linked macOS 26 ScreenCaptureKit classes" \
+  "must weak-link ScreenCaptureKit" \
+  validate_strong_framework_capture_app
+expect_failure_containing \
+  "built-app gate rejects strong-imported macOS 26 ScreenCaptureKit classes" \
+  "must weak-import macOS 26 ScreenCaptureKit class" \
+  validate_strong_class_capture_app
+expect_failure_containing \
+  "built-app gate rejects a non-weak dyld fixup for macOS 26 ScreenCaptureKit classes" \
+  "dyld -imports must mark macOS 26 class" \
+  validate_strong_dyld_capture_app
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 0.1.3' "$TEST_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 4' "$TEST_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $USHOT_PRE_ROTATION_SPARKLE_PUBLIC_ED_KEY" \
   "$TEST_APP/Contents/Info.plist"
 expect_failure_containing \
@@ -1496,6 +1568,49 @@ assert_runtime_validation_reuses_reviewed_helper_artifact() {
 expect_success \
   "credential-free runtime validation reuses the immutable reviewed helper without compilation" \
   assert_runtime_validation_reuses_reviewed_helper_artifact
+
+workflow_job_runner() {
+  local workflow="$1"
+  local job="$2"
+
+  awk -v job="  $job:" '
+    $0 == job { in_job = 1; next }
+    in_job && /^  [A-Za-z0-9_-]+:$/ { exit }
+    in_job && $1 == "runs-on:" { print $2; exit }
+  ' "$workflow"
+}
+
+workflow_job_selects_xcode_26_3() {
+  local workflow="$1"
+  local job="$2"
+
+  awk -v job="  $job:" '
+    $0 == job { in_job = 1; next }
+    in_job && /^  [A-Za-z0-9_-]+:$/ { exit }
+    in_job { print }
+  ' "$workflow" | grep -Fq \
+    'DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer'
+}
+
+assert_sdk_runner_boundaries() {
+  [[ "$(workflow_job_runner "$CI_WORKFLOW" release-metadata)" == "macos-15" ]]
+  [[ "$(workflow_job_runner "$CI_WORKFLOW" unit-tests)" == "macos-15" ]]
+  [[ "$(workflow_job_runner "$CI_WORKFLOW" public-build-gate)" == "macos-15" ]]
+  [[ "$(workflow_job_runner "$CI_WORKFLOW" macos-14-launch-smoke)" == "macos-14" ]]
+  [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" build-artifacts)" == "macos-15" ]]
+  [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" preflight)" == "macos-15" ]]
+  [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" build-authenticated-appcast-validator)" == "macos-15" ]]
+  [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" sign-update-feed)" == "macos-15" ]]
+  [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" validate-signed-appcast)" == "macos-15" ]]
+  [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" publish-release)" == "macos-15" ]]
+  workflow_job_selects_xcode_26_3 "$CI_WORKFLOW" unit-tests
+  workflow_job_selects_xcode_26_3 "$CI_WORKFLOW" public-build-gate
+  workflow_job_selects_xcode_26_3 "$RELEASE_WORKFLOW" build-artifacts
+}
+
+expect_success \
+  "SDK 26 app builds execute on old-system runners and stay separated from release control and signing jobs" \
+  assert_sdk_runner_boundaries
 
 run_future_with_seed() {
   printf '%s' "$TEST_PRIVATE_KEY_SEED" | \

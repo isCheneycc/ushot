@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Keep macOS 14 and 15 launch-compatible while using the macOS 26 automatic natural-size window capture API when available.
 - Capture window surfaces at validated native pixel geometry and use nearest-neighbor sampling only at exact one-to-one presentation, keeping previews crisp without introducing scaled jagged edges.
 - Remove the display-edge dead zone that made pinned screenshots lag behind the pointer while crossing between displays.
 - Reject Pin while a pointer move or resize is still active so output always uses committed geometry.

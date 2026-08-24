@@ -42,6 +42,7 @@ USHOT_SIGNED_FEED_VALIDATION_TRANSITION_VERSION="0.1.3"
 USHOT_SIGNED_FEED_VALIDATION_TRANSITION_BUILD="4"
 USHOT_FIRST_FEED_VERSION="0.1.4"
 USHOT_FIRST_FEED_BUILD="5"
+USHOT_SCREEN_CAPTURE_KIT_WEAK_LINK_VERSION="0.1.7"
 
 release_log() {
   printf 'release: %s\n' "$*"
@@ -331,6 +332,8 @@ release_validate_source_settings() {
     || release_die "SPARKLE_KEY_ACCOUNT must be $USHOT_SPARKLE_KEY_ACCOUNT."
   [[ "$(release_xcconfig_value LD_RUNPATH_SEARCH_PATHS "$base_config")" == '$(inherited) @executable_path/../Frameworks' ]] \
     || release_die "LD_RUNPATH_SEARCH_PATHS must load embedded frameworks from @executable_path/../Frameworks."
+  [[ "$(release_xcconfig_value OTHER_LDFLAGS "$base_config")" == '$(inherited) -weak_framework ScreenCaptureKit' ]] \
+    || release_die "OTHER_LDFLAGS must weak-link ScreenCaptureKit for supported pre-macOS-26 systems."
   local sparkle_public_key
   sparkle_public_key="$(release_xcconfig_value SPARKLE_PUBLIC_ED_KEY "$base_config")"
   [[ "$sparkle_public_key" == "$USHOT_SPARKLE_PUBLIC_ED_KEY" ]] \
@@ -513,6 +516,63 @@ release_validate_supported_installed_app_identity() {
   release_validate_app_identity "$app_path" "$version" "$build_number"
 }
 
+release_validate_screen_capture_kit_runtime_compatibility() {
+  local executable="$1"
+  local class_symbol
+  local dyld_mode
+  local dyld_output
+
+  release_require_command otool
+  release_require_command nm
+  release_require_command xcrun
+  otool -L "$executable" | awk '
+    $1 == "/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit" {
+      found = 1
+      if ($0 ~ /, weak\)$/) { weak = 1 }
+    }
+    END { exit(found && weak ? 0 : 1) }
+  ' || release_die "Built app must weak-link ScreenCaptureKit for supported pre-macOS-26 systems."
+
+  for class_symbol in \
+    '_OBJC_CLASS_$_SCScreenshotConfiguration' \
+    '_OBJC_CLASS_$_SCScreenshotOutput'
+  do
+    nm -m "$executable" | awk -v symbol="$class_symbol" '
+      index($0, symbol) {
+        found = 1
+        if ($0 ~ /\(undefined\) weak external/ && $0 ~ /\(from ScreenCaptureKit\)$/) {
+          safe = 1
+        } else {
+          unsafe = 1
+        }
+      }
+      END { exit(found && safe && !unsafe ? 0 : 1) }
+    ' || release_die "Built app must weak-import macOS 26 ScreenCaptureKit class $class_symbol."
+  done
+
+  for dyld_mode in -imports -fixups; do
+    dyld_output="$(xcrun dyld_info "$dyld_mode" "$executable")" \
+      || release_die "Could not inspect ScreenCaptureKit $dyld_mode with dyld_info."
+    for class_symbol in \
+      '_OBJC_CLASS_$_SCScreenshotConfiguration' \
+      '_OBJC_CLASS_$_SCScreenshotOutput'
+    do
+      awk -v symbol="$class_symbol" '
+        index($0, symbol) {
+          found = 1
+          if (index($0, "[weak-import]") > 0) {
+            safe = 1
+          } else {
+            unsafe = 1
+          }
+        }
+        END { exit(found && safe && !unsafe ? 0 : 1) }
+      ' <<< "$dyld_output" \
+        || release_die "Built app dyld $dyld_mode must mark macOS 26 class $class_symbol as a weak import."
+    done
+  done
+}
+
 release_validate_app_identity() {
   local app_path="$1"
   local expected_version="$2"
@@ -682,6 +742,12 @@ release_validate_app_identity() {
     }
     END { exit(found ? 0 : 1) }
   ' || release_die "Built app cannot resolve embedded frameworks: missing @executable_path/../Frameworks LC_RPATH."
+  if [[ "$expected_version" == "$USHOT_SCREEN_CAPTURE_KIT_WEAK_LINK_VERSION" ]] \
+      || release_version_is_strictly_greater \
+        "$expected_version" \
+        "$USHOT_SCREEN_CAPTURE_KIT_WEAK_LINK_VERSION"; then
+    release_validate_screen_capture_kit_runtime_compatibility "$executable"
+  fi
   [[ -s "$app_path/Contents/Resources/ThirdPartyNotices.txt" ]] \
     || release_die "Built app must include its third-party license notices."
   [[ -s "$app_path/Contents/Resources/LICENSE" ]] \
