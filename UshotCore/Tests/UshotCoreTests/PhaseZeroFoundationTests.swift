@@ -2516,6 +2516,131 @@ final class UshotCoreFoundationTests: XCTestCase {
         XCTAssertEqual(constrained.x, constrained.y, accuracy: 0.001)
     }
 
+    func testPinnedShotFittingPreservesAspectRatioWithoutIndependentRounding() {
+        let geometry = PinnedShotPresentationGeometry(
+            nativeSize: CGSize(width: 1_728, height: 1_117)
+        )
+
+        let fitted = geometry.fittedSize(within: CGSize(width: 1_728, height: 1_050))
+
+        XCTAssertEqual(fitted.width, 1_624.350_940_017_905, accuracy: 0.000_001)
+        XCTAssertEqual(fitted.height, 1_050, accuracy: 0.000_001)
+        XCTAssertEqual(
+            fitted.width / fitted.height,
+            geometry.nativeSize.width / geometry.nativeSize.height,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testPinnedShotCumulativeZoomDoesNotDriftAndKeepsAnchor() {
+        let geometry = PinnedShotPresentationGeometry(
+            nativeSize: CGSize(width: 1_658, height: 1_084)
+        )
+        let beginFrame = CGRect(x: 100, y: 200, width: 895, height: 594)
+        let anchor = CGPoint(x: 368.5, y: 645.5)
+        let widthRange: ClosedRange<CGFloat> = 160 ... 3_400
+
+        let first = geometry.zoomedFrame(
+            from: beginFrame,
+            anchoredAt: anchor,
+            cumulativeMagnification: 0.18,
+            widthRange: widthRange
+        )
+        _ = geometry.zoomedFrame(
+            from: beginFrame,
+            anchoredAt: anchor,
+            cumulativeMagnification: 0.42,
+            widthRange: widthRange
+        )
+        let repeated = geometry.zoomedFrame(
+            from: beginFrame,
+            anchoredAt: anchor,
+            cumulativeMagnification: 0.18,
+            widthRange: widthRange
+        )
+
+        XCTAssertEqual(first, repeated)
+        XCTAssertEqual(
+            first.width / first.height,
+            geometry.nativeSize.width / geometry.nativeSize.height,
+            accuracy: 0.000_001
+        )
+        let unitX = (anchor.x - beginFrame.minX) / beginFrame.width
+        let unitY = (anchor.y - beginFrame.minY) / beginFrame.height
+        XCTAssertEqual(first.minX + unitX * first.width, anchor.x, accuracy: 0.000_001)
+        XCTAssertEqual(first.minY + unitY * first.height, anchor.y, accuracy: 0.000_001)
+    }
+
+    func testPinnedShotNativeSnapRestoresBothAxes() {
+        let nativeSize = CGSize(width: 1_657.5, height: 1_083.5)
+        let geometry = PinnedShotPresentationGeometry(nativeSize: nativeSize)
+        let frame = geometry.zoomedFrame(
+            from: CGRect(x: 20, y: 40, width: 1_000, height: 700),
+            anchoredAt: CGPoint(x: 400, y: 300),
+            cumulativeMagnification: 0.65,
+            widthRange: 160 ... 3_400
+        )
+
+        XCTAssertEqual(frame.size, nativeSize)
+    }
+
+    func testPinnedShotClampingChangesOnlyOrigin() {
+        let visible = CGRect(x: -100, y: 20, width: 1_200, height: 800)
+        let proposed = CGRect(x: 900, y: -200, width: 600, height: 500)
+
+        let clamped = PinnedShotPresentationGeometry.clampedFrame(
+            proposed,
+            within: visible
+        )
+
+        XCTAssertEqual(clamped.size, proposed.size)
+        XCTAssertGreaterThanOrEqual(clamped.minX, visible.minX)
+        XCTAssertGreaterThanOrEqual(clamped.minY, visible.minY)
+        XCTAssertLessThanOrEqual(clamped.maxX, visible.maxX)
+        XCTAssertLessThanOrEqual(clamped.maxY, visible.maxY)
+    }
+
+    func testScreenshotSamplingUsesNearestNeighborOnlyForTwoAxisOneToOne() {
+        let source = CGSize(width: 3_315, height: 2_167)
+        let exactPointSize = ScreenshotSamplingPolicy.pixelExactPointSize(
+            sourcePixelSize: source,
+            backingScale: 2
+        )
+        XCTAssertEqual(exactPointSize, CGSize(width: 1_657.5, height: 1_083.5))
+
+        let exact = ScreenshotSamplingPolicy.decision(
+            sourcePixelSize: source,
+            destinationPixelSize: source
+        )
+        XCTAssertEqual(exact.mode, .oneToOne)
+        XCTAssertTrue(exact.usesNearestNeighbor)
+
+        let heightMismatch = ScreenshotSamplingPolicy.decision(
+            sourcePixelSize: source,
+            destinationPixelSize: CGSize(width: source.width, height: source.height - 1)
+        )
+        XCTAssertEqual(heightMismatch.mode, .nonUniform)
+        XCTAssertFalse(heightMismatch.usesNearestNeighbor)
+
+        let quarterPixelMismatch = ScreenshotSamplingPolicy.decision(
+            sourcePixelSize: source,
+            destinationPixelSize: CGSize(width: source.width - 0.25, height: source.height)
+        )
+        XCTAssertNotEqual(quarterPixelMismatch.mode, .oneToOne)
+        XCTAssertFalse(quarterPixelMismatch.usesNearestNeighbor)
+
+        for scale: CGFloat in [0.5, 0.75, 1.25, 2] {
+            let decision = ScreenshotSamplingPolicy.decision(
+                sourcePixelSize: source,
+                destinationPixelSize: CGSize(
+                    width: source.width * scale,
+                    height: source.height * scale
+                )
+            )
+            XCTAssertFalse(decision.usesNearestNeighbor, "Scale \(scale) must use high-quality interpolation.")
+        }
+    }
+
     func testHistoryStoreRoundTripsSkipsCorruptionAndEnforcesRetention() async throws {
         let result = try await HistoryTestSupport.exerciseStore()
         XCTAssertEqual(result.initialSummaryCount, 1)

@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-24
+
+### Added
+
+- Add a brief eased entrance transition for window and display screenshot previews, including reduced-motion behavior.
+- Add anchored trackpad pinch zoom for pinned screenshots while preserving their native aspect ratio.
+
+### Changed
+
+- Keep region, window, current-display, selected-display and all-display results available through the pinned-screenshot lifecycle.
+- Redesign the color-picker card around the copy value, RGBA channels, concise metadata and a clearly grouped two-row shortcut guide.
+
+### Fixed
+
+- Capture window surfaces at validated native pixel geometry and use nearest-neighbor sampling only at exact one-to-one presentation, keeping previews crisp without introducing scaled jagged edges.
+- Remove the display-edge dead zone that made pinned screenshots lag behind the pointer while crossing between displays.
+- Reject Pin while a pointer move or resize is still active so output always uses committed geometry.
+
 ## [0.1.6] - 2026-08-15
 
 ### Added
@@ -102,7 +120,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Limited the manual Gatekeeper workaround to removing `com.apple.quarantine` from an official Ushot release instead of clearing every extended attribute.
 - Defined the Sparkle EdDSA private key as release-critical secret material requiring protected storage, an independent encrypted backup and an exercised recovery process.
 
-[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/isCheneycc/ushot/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/isCheneycc/ushot/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/isCheneycc/ushot/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/isCheneycc/ushot/releases/tag/v0.1.4

@@ -31,9 +31,9 @@ Region capture keeps the frozen desktop visible from selection through confirmat
 
 ## What Ushot does
 
-- **Capture precisely.** Capture a region, window, current display, selected display, or every display. Region mode freezes participating displays, snaps to the topmost eligible application window, optionally refines to useful controls with Accessibility permission, and preserves native backing pixels across mixed-scale displays.
+- **Capture precisely.** Capture a region, window, current display, selected display, or every display. Region mode freezes participating displays, snaps to the topmost eligible application window, optionally refines to useful controls with Accessibility permission, and preserves native backing pixels across mixed-scale displays. Window and display previews stay crisp at their original size and enter with a brief eased transition.
 - **Annotate without flattening.** Use shapes, lines, paper-plane arrows, freehand, text, counters, highlight, mosaic, blur, Spotlight, layers, and undo/redo. Start in the quick toolbar and continue in the full Canvas Editor with the same editable document.
-- **Keep a capture within reach.** Pin a movable, proportionally resizable screenshot that stays visible across Spaces and over full-screen apps. Pinned images begin read-only; show the toolbar only when you want to edit.
+- **Keep a capture within reach.** Pin a movable, proportionally resizable screenshot that stays attached to the pointer across display seams, Spaces, and full-screen apps. Pinned images begin read-only, support anchored trackpad zoom, and show the toolbar only when you want to edit.
 - **Inspect colors and dimensions.** Sample colors across displays with managed sRGB, Display P3, Generic RGB, and Adobe RGB (1998) output, or measure in logical points and physical pixels with the screen ruler.
 - **Keep local history on your terms.** Editable history is optional, off by default, and stored as inspectable PNG and versioned JSON records. Export PNG, JPEG, or TIFF with optional source-profile preservation.
 

@@ -113,6 +113,7 @@ final class PinnedShotManager {
         }
         let showsToolbar = captureSettings.showsQuickToolbar
 
+        let replacesCurrentScreenshot = currentController != nil
         if let currentController {
             AppLog.capture.notice(
                 "Replacing current screenshot: previous=\(currentController.identifier.uuidString, privacy: .public), replacement=\(identifier.uuidString, privacy: .public)"
@@ -147,7 +148,9 @@ final class PinnedShotManager {
         } else if canvasEditorLeases[ObjectIdentifier(session)] != nil {
             controller.beginCanvasEditorPresentation(reason: "automatic-editor-already-presented")
         }
-        controller.present()
+        controller.present(
+            entranceStyle: replacesCurrentScreenshot ? .replacement : .initial
+        )
         if captureSettings.automaticallyOpensCanvasEditor {
             presentCanvasEditor(for: session, reason: "automatic-capture-action")
         }
@@ -285,7 +288,7 @@ final class PinnedShotManager {
         controller.onRegionDraftMoveChanged = onMoveChanged
         controller.onRegionDraftMoveEnded = onMoveEnded
         regionDraftController = controller
-        controller.present()
+        controller.present(entranceStyle: .none)
     }
 
     func previewCurrentRegionDraftFrame(
@@ -555,6 +558,12 @@ private enum PinnedShotPresentationMode {
     }
 }
 
+private enum PinnedShotEntranceStyle: String {
+    case initial
+    case replacement
+    case none
+}
+
 private enum PinnedShotCloseReason: String {
     case applicationTermination = "application-termination"
     case copied
@@ -568,6 +577,17 @@ private enum PinnedShotCloseReason: String {
 
 @MainActor
 private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDraggingSource {
+    private struct EntranceAnimation {
+        let identifier: UUID
+        var startedAt: TimeInterval
+        let style: PinnedShotEntranceStyle
+        let duration: TimeInterval
+        let initialAlpha: CGFloat
+        let imageTargetAlpha: CGFloat
+        let toolbarTargetAlpha: CGFloat?
+        let reducesMotion: Bool
+    }
+
     private enum CopyRequestSource: String {
         case toolbar
         case keyboard
@@ -605,6 +625,14 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         let panelOrigin: CGPoint
     }
 
+    private struct PinchZoomInteraction {
+        let startedAt: TimeInterval
+        let beginPanelFrame: CGRect
+        let anchor: CGPoint
+        let geometry: PinnedShotPresentationGeometry
+        let widthRange: ClosedRange<CGFloat>
+    }
+
     private enum LineWidthEditDisposition: String {
         case commitOrReject = "commit-or-reject"
         case cancel
@@ -626,6 +654,11 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     var onRegionDraftMoveEnded: ((CGPoint) -> Void)?
 
     private var capturedImage: CapturedImage
+    /// Whether the presented base image already carries the real macOS window
+    /// shadow inside its transparent margins (window capture captured with
+    /// "Keep window shadow" enabled). Such an image must not receive the
+    /// panel's own system shadow on top; see `wantsImagePanelShadow`.
+    private let imageIncludesBakedWindowShadow: Bool
     private let session: AnnotationEditingSession
     private let payload: PinnedShotPayload
     private let imagePanel: PinnedShotPanel
@@ -657,13 +690,26 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private var didReleaseRegionToolbar = false
     private var toolbarContextMenuItem: NSMenuItem?
     private var windowMoveInteraction: WindowMoveInteraction?
+    private var pinchZoomInteraction: PinchZoomInteraction?
     private var liveResizeInProgress = false
     private var canvasEditorPresented = false
     private var restoresToolbarAfterCanvasEditor = false
     private var isApplyingEditorSettings = false
+    private var activeEntranceAnimation: EntranceAnimation?
+    private var entranceAnimationTimer: Timer?
 
     var isRegionDraft: Bool { presentationMode.isRegionDraft }
     private var exportInProgress: Bool { activeExportTransaction != nil }
+    /// The pinned image panel draws exactly one shadow around the screenshot.
+    /// A window capture captured with "Keep window shadow" already contains
+    /// that real shadow inside its transparent margins; stacking the panel's
+    /// system shadow on top renders a second rectangular halo around the whole
+    /// image that reads as a strange border. The panel therefore suppresses
+    /// its own shadow exactly when a baked window shadow is present, and keeps
+    /// it for display captures, shadow-free window captures and region pins.
+    private var wantsImagePanelShadow: Bool {
+        !presentationMode.isRegionDraft && !imageIncludesBakedWindowShadow
+    }
     var hasBlockingUpdateActivity: Bool {
         presentationMode.isRegionDraft
             || presentationMode.showsToolbar
@@ -674,6 +720,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             || regionDraftTransitionInProgress
             || regionDraftGeometryUpdateInProgress
             || windowMoveInteraction != nil
+            || pinchZoomInteraction != nil
             || liveResizeInProgress
     }
 
@@ -702,8 +749,21 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         self.admitAppWork = admitAppWork
         self.presentationMode = presentationMode
         self.ownsReusableRegionToolbar = presentationMode.isRegionDraft
+        // The decision must match the fixed image content, not live settings:
+        // a window capture keeps its baked shadow for this panel's lifetime.
+        self.imageIncludesBakedWindowShadow =
+            session.baseImage.sourceMetadata.kind == .window
+                && settingsStore.settings.capture.includesWindowShadow
 
-        let initialSize = Self.initialWindowSize(for: session.baseImage)
+        // The panel is presented near the pointer, so the screen holding the
+        // pointer decides how much of a native-size capture fits unshrunk.
+        let pointerScreen = NSScreen.screens.first {
+            $0.frame.contains(NSEvent.mouseLocation)
+        } ?? NSScreen.main
+        let initialSize = Self.initialWindowSize(
+            for: session.baseImage,
+            fittingIn: pointerScreen?.visibleFrame.size
+        )
         // Prefer the capture desktop frame for region drafts so the panel is
         // born at the same size positionImagePanel will commit, avoiding a
         // content reflow when the window is first ordered front.
@@ -751,7 +811,15 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         }
     }
 
-    func present() {
+    func present(entranceStyle: PinnedShotEntranceStyle) {
+        precondition(
+            !presentationMode.isRegionDraft || entranceStyle == .none,
+            "Region confirmation presentation must remain animation-free."
+        )
+        precondition(
+            presentationMode.isRegionDraft || entranceStyle != .none,
+            "Every non-region screenshot preview requires an entrance style."
+        )
         positionImagePanel()
         if presentationMode.isRegionDraft {
             // Desktop-frame geometry is the authority. Synchronize content
@@ -773,7 +841,19 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             AppLog.capture.notice(
                 "Region draft presentation geometry committed before order-front: selection=\(selectionFrame.debugDescription, privacy: .public), panel=\(self.imagePanel.frame.debugDescription, privacy: .public), canvas=\(self.imageView.frame.debugDescription, privacy: .public)"
             )
+        } else {
+            // Commit the final pixels before ordering the windows. The entrance
+            // then changes only compositor opacity; it never resizes or
+            // resamples screenshot content.
+            if presentationMode.showsToolbar {
+                repositionToolbar()
+                toolbarPanel.contentView?.layoutSubtreeIfNeeded()
+                toolbarPanel.displayIfNeeded()
+            }
+            imagePanel.contentView?.layoutSubtreeIfNeeded()
+            imagePanel.displayIfNeeded()
         }
+        let entranceAnimation = prepareEntranceAnimation(style: entranceStyle)
         NSApplication.shared.activate(ignoringOtherApps: true)
         imagePanel.makeKeyAndOrderFront(nil)
         if presentationMode.showsToolbar {
@@ -784,6 +864,203 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         AppLog.capture.notice(
             "Presented current screenshot: id=\(self.identifier.uuidString, privacy: .public), imageKey=\(self.imagePanel.isKeyWindow, privacy: .public), toolbarVisible=\(self.presentationMode.showsToolbar, privacy: .public), regionDraft=\(self.presentationMode.isRegionDraft, privacy: .public)"
         )
+        if !presentationMode.isRegionDraft {
+            logScreenshotSampling(reason: "initial-presentation")
+        }
+        if let entranceAnimation {
+            startEntranceAnimation(entranceAnimation)
+        }
+    }
+
+    private func prepareEntranceAnimation(
+        style: PinnedShotEntranceStyle
+    ) -> EntranceAnimation? {
+        guard !presentationMode.isRegionDraft else { return nil }
+        let reducesMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let duration: TimeInterval
+        let initialAlpha: CGFloat
+        switch (style, reducesMotion) {
+        case (.initial, false):
+            duration = 0.14
+            initialAlpha = 0
+        case (.replacement, false):
+            duration = 0.10
+            initialAlpha = 0.82
+        case (.initial, true):
+            duration = 0.08
+            initialAlpha = 0.82
+        case (.replacement, true):
+            duration = 0.06
+            initialAlpha = 0.92
+        case (.none, _):
+            preconditionFailure("A non-region screenshot cannot disable its entrance transition.")
+        }
+        let imageTargetAlpha = imagePanel.alphaValue
+        let toolbarTargetAlpha = presentationMode.showsToolbar
+            ? toolbarPanel.alphaValue
+            : nil
+        let animation = EntranceAnimation(
+            identifier: UUID(),
+            startedAt: ProcessInfo.processInfo.systemUptime,
+            style: style,
+            duration: duration,
+            initialAlpha: initialAlpha,
+            imageTargetAlpha: imageTargetAlpha,
+            toolbarTargetAlpha: toolbarTargetAlpha,
+            reducesMotion: reducesMotion
+        )
+        imagePanel.alphaValue = imageTargetAlpha * initialAlpha
+        if let toolbarTargetAlpha {
+            toolbarPanel.alphaValue = toolbarTargetAlpha * initialAlpha
+        }
+        return animation
+    }
+
+    private func startEntranceAnimation(_ animation: EntranceAnimation) {
+        precondition(
+            activeEntranceAnimation == nil,
+            "A screenshot preview may own only one entrance animation."
+        )
+        activeEntranceAnimation = animation
+        performEntranceAnimation(animation)
+    }
+
+    private func performEntranceAnimation(_ animation: EntranceAnimation) {
+        var animation = animation
+        animation.startedAt = ProcessInfo.processInfo.systemUptime
+        activeEntranceAnimation = animation
+        AppLog.capture.notice(
+            "Started screenshot preview entrance after order-front: id=\(self.identifier.uuidString, privacy: .public), animation=\(animation.identifier.uuidString, privacy: .public), style=\(animation.style.rawValue, privacy: .public), durationMs=\(animation.duration * 1_000, privacy: .public), initialAlpha=\(animation.initialAlpha, privacy: .public), reducedMotion=\(animation.reducesMotion, privacy: .public), toolbarAnimated=\(animation.toolbarTargetAlpha != nil, privacy: .public)"
+        )
+        let timer = Timer(
+            timeInterval: 1 / 120,
+            target: self,
+            selector: #selector(advanceEntranceAnimation(_:)),
+            userInfo: animation.identifier,
+            repeats: true
+        )
+        timer.tolerance = 1 / 480
+        entranceAnimationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func advanceEntranceAnimation(_ timer: Timer) {
+        guard let identifier = timer.userInfo as? UUID,
+              let animation = activeEntranceAnimation,
+              animation.identifier == identifier
+        else {
+            timer.invalidate()
+            if entranceAnimationTimer === timer {
+                entranceAnimationTimer = nil
+            }
+            return
+        }
+
+        let elapsed = ProcessInfo.processInfo.systemUptime - animation.startedAt
+        let linearProgress = min(max(elapsed / animation.duration, 0), 1)
+        let easedProgress = Self.entranceEaseOutProgress(linearProgress)
+        imagePanel.alphaValue = Self.interpolatedAlpha(
+            target: animation.imageTargetAlpha,
+            initialFraction: animation.initialAlpha,
+            progress: easedProgress
+        )
+        if let toolbarTargetAlpha = animation.toolbarTargetAlpha {
+            toolbarPanel.alphaValue = Self.interpolatedAlpha(
+                target: toolbarTargetAlpha,
+                initialFraction: animation.initialAlpha,
+                progress: easedProgress
+            )
+        }
+        guard linearProgress >= 1 else { return }
+
+        timer.invalidate()
+        entranceAnimationTimer = nil
+        activeEntranceAnimation = nil
+        imagePanel.alphaValue = animation.imageTargetAlpha
+        if let toolbarTargetAlpha = animation.toolbarTargetAlpha {
+            toolbarPanel.alphaValue = toolbarTargetAlpha
+        }
+        AppLog.capture.notice(
+            "Completed screenshot preview entrance: id=\(self.identifier.uuidString, privacy: .public), animation=\(animation.identifier.uuidString, privacy: .public), style=\(animation.style.rawValue, privacy: .public), durationMs=\(elapsed * 1_000, privacy: .public)"
+        )
+    }
+
+    private static func interpolatedAlpha(
+        target: CGFloat,
+        initialFraction: CGFloat,
+        progress: Double
+    ) -> CGFloat {
+        target * (initialFraction + (1 - initialFraction) * CGFloat(progress))
+    }
+
+    /// Samples cubic-bezier(0.23, 1, 0.32, 1). The binary inversion maps
+    /// elapsed wall time through the curve's X axis instead of treating its
+    /// control-point parameter as time.
+    private static func entranceEaseOutProgress(_ linearProgress: Double) -> Double {
+        guard linearProgress > 0 else { return 0 }
+        guard linearProgress < 1 else { return 1 }
+        var lower = 0.0
+        var upper = 1.0
+        var parameter = linearProgress
+        for _ in 0 ..< 12 {
+            let x = cubicBezierCoordinate(
+                parameter,
+                firstControlPoint: 0.23,
+                secondControlPoint: 0.32
+            )
+            if x < linearProgress {
+                lower = parameter
+            } else {
+                upper = parameter
+            }
+            parameter = (lower + upper) / 2
+        }
+        return cubicBezierCoordinate(
+            parameter,
+            firstControlPoint: 1,
+            secondControlPoint: 1
+        )
+    }
+
+    private static func cubicBezierCoordinate(
+        _ parameter: Double,
+        firstControlPoint: Double,
+        secondControlPoint: Double
+    ) -> Double {
+        let inverse = 1 - parameter
+        return 3 * inverse * inverse * parameter * firstControlPoint
+            + 3 * inverse * parameter * parameter * secondControlPoint
+            + parameter * parameter * parameter
+    }
+
+    private func finishEntranceAnimationImmediately(
+        imageTargetAlpha: CGFloat,
+        reason: String
+    ) {
+        guard let animation = activeEntranceAnimation else { return }
+        activeEntranceAnimation = nil
+        stopEntranceAnimationTimer()
+        imagePanel.alphaValue = imageTargetAlpha
+        if let toolbarTargetAlpha = animation.toolbarTargetAlpha {
+            toolbarPanel.alphaValue = toolbarTargetAlpha
+        }
+        AppLog.capture.notice(
+            "Interrupted screenshot preview entrance: id=\(self.identifier.uuidString, privacy: .public), animation=\(animation.identifier.uuidString, privacy: .public), style=\(animation.style.rawValue, privacy: .public), reason=\(reason, privacy: .public), elapsedMs=\((ProcessInfo.processInfo.systemUptime - animation.startedAt) * 1_000, privacy: .public)"
+        )
+    }
+
+    private func abandonEntranceAnimation(reason: String) {
+        guard let animation = activeEntranceAnimation else { return }
+        activeEntranceAnimation = nil
+        stopEntranceAnimationTimer()
+        AppLog.capture.debug(
+            "Abandoned screenshot preview entrance: id=\(self.identifier.uuidString, privacy: .public), animation=\(animation.identifier.uuidString, privacy: .public), style=\(animation.style.rawValue, privacy: .public), reason=\(reason, privacy: .public), elapsedMs=\((ProcessInfo.processInfo.systemUptime - animation.startedAt) * 1_000, privacy: .public)"
+        )
+    }
+
+    private func stopEntranceAnimationTimer() {
+        entranceAnimationTimer?.invalidate()
+        entranceAnimationTimer = nil
     }
 
     func releaseRebuildableCaches() {
@@ -1080,6 +1357,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
 
     func runReadOnlyWindowPressCursorRegression() {
         imageView.runReadOnlyWindowPressCursorRegression()
+        imagePanel.runAppControlledCrossScreenMovementRegression()
     }
 
     func runInlineTextStabilityRegression() {
@@ -1100,6 +1378,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     func close(reason: PinnedShotCloseReason) {
         guard closeReason == nil else { return }
         cancelActiveExport(reason: "close-\(reason.rawValue)")
+        abandonEntranceAnimation(reason: "close-\(reason.rawValue)")
         closeReason = reason
         disableAnnotationEditing(reason: "close-\(reason.rawValue)")
         AppLog.capture.notice(
@@ -1117,6 +1396,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     }
 
     func windowWillClose(_ notification: Notification) {
+        abandonEntranceAnimation(reason: "window-will-close")
         cancelActiveExport(reason: "window-will-close")
         disableAnnotationEditing(reason: "window-will-close")
         let externalDragCloseReason = closeReason?.rawValue ?? "window-without-explicit-reason"
@@ -1272,7 +1552,10 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         imagePanel.animationBehavior = .none
         imagePanel.hidesOnDeactivate = false
         imagePanel.isReleasedWhenClosed = false
-        imagePanel.hasShadow = !presentationMode.isRegionDraft
+        imagePanel.hasShadow = wantsImagePanelShadow
+        AppLog.capture.notice(
+            "Configured pinned surface shadow: hasShadow=\(self.imagePanel.hasShadow, privacy: .public), regionDraft=\(self.presentationMode.isRegionDraft, privacy: .public), bakedWindowShadow=\(self.imageIncludesBakedWindowShadow, privacy: .public)"
+        )
         imagePanel.backgroundColor = .clear
         imagePanel.isOpaque = false
         if presentationMode.isRegionDraft {
@@ -1327,6 +1610,14 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             imageView.frame = NSRect(origin: .zero, size: initialSize)
             imageView.autoresizingMask = [.width, .height]
         }
+        // Trackpad pinch zoom. The recognizer is attached in both presentation
+        // modes but its handler is gated to pinned presentations, so a region
+        // confirmation never resizes and the same controller can keep zooming
+        // after Pin converts it into a pinned screenshot.
+        imageView.addGestureRecognizer(NSMagnificationGestureRecognizer(
+            target: self,
+            action: #selector(handlePinchZoom(_:))
+        ))
         imageView.onWindowDragBegan = { [weak self] event in
             guard let self else { return }
             precondition(
@@ -1346,6 +1637,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 "A pinned screenshot cannot begin a second window move before pointer-up."
             )
             guard self.admitUpdateSensitiveAction("move-window") else { return }
+            self.imagePanel.beginAppControlledPointerDrag()
             let panelOrigin = self.imagePanel.frame.origin
             self.windowMoveInteraction = WindowMoveInteraction(
                 startedAt: ProcessInfo.processInfo.systemUptime,
@@ -1372,24 +1664,19 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 x: interaction.panelOrigin.x + pointer.x - interaction.pointerOrigin.x,
                 y: interaction.panelOrigin.y + pointer.y - interaction.pointerOrigin.y
             )
-            self.imagePanel.setFrameOrigin(updatedOrigin)
+            self.imagePanel.setAppControlledPointerDragOrigin(updatedOrigin)
             NSCursor.closedHand.set()
         }
-        imageView.onWindowDragEnded = { [weak self] in
+        imageView.onWindowDragEnded = { [weak self] reason in
             guard let self else { return }
             if self.presentationMode.isRegionDraft {
                 self.onRegionDraftMoveEnded?(NSEvent.mouseLocation)
                 AppLog.capture.notice(
-                    "Region confirmation canvas move ended: id=\(self.identifier.uuidString, privacy: .public)"
+                    "Region confirmation canvas move ended: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public)"
                 )
                 return
             }
-            guard let interaction = self.windowMoveInteraction else { return }
-            self.windowMoveInteraction = nil
-            let finalOrigin = self.imagePanel.frame.origin
-            AppLog.capture.notice(
-                "Pinned screenshot app-controlled move ended: id=\(self.identifier.uuidString, privacy: .public), deltaX=\(finalOrigin.x - interaction.panelOrigin.x, privacy: .public), deltaY=\(finalOrigin.y - interaction.panelOrigin.y, privacy: .public), durationMs=\((ProcessInfo.processInfo.systemUptime - interaction.startedAt) * 1_000, privacy: .public)"
-            )
+            self.finishPinnedWindowMove(reason: reason)
         }
         imageView.onExternalDrag = { [weak self] event in
             self?.beginExternalDrag(event: event)
@@ -1458,6 +1745,21 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         }
     }
 
+    private func finishPinnedWindowMove(reason: String) {
+        guard let interaction = windowMoveInteraction else { return }
+        imagePanel.endAppControlledPointerDrag()
+        windowMoveInteraction = nil
+        let pointer = NSEvent.mouseLocation
+        let expectedOrigin = CGPoint(
+            x: interaction.panelOrigin.x + pointer.x - interaction.pointerOrigin.x,
+            y: interaction.panelOrigin.y + pointer.y - interaction.pointerOrigin.y
+        )
+        let finalOrigin = imagePanel.frame.origin
+        AppLog.capture.notice(
+            "Pinned screenshot app-controlled move ended: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public), deltaX=\(finalOrigin.x - interaction.panelOrigin.x, privacy: .public), deltaY=\(finalOrigin.y - interaction.panelOrigin.y, privacy: .public), trackingErrorX=\(finalOrigin.x - expectedOrigin.x, privacy: .public), trackingErrorY=\(finalOrigin.y - expectedOrigin.y, privacy: .public), bypassedScreenConstraint=\(self.imagePanel.didBypassAppKitConstraintDuringCurrentDrag, privacy: .public), durationMs=\((ProcessInfo.processInfo.systemUptime - interaction.startedAt) * 1_000, privacy: .public)"
+        )
+    }
+
     func windowWillStartLiveResize(_ notification: Notification) {
         guard notification.object as? NSWindow === imagePanel else { return }
         liveResizeInProgress = true
@@ -1475,9 +1777,77 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     func windowDidEndLiveResize(_ notification: Notification) {
         guard notification.object as? NSWindow === imagePanel else { return }
         liveResizeInProgress = false
-        AppLog.capture.debug(
-            "Pinned screenshot live resize ended: id=\(self.identifier.uuidString, privacy: .public)"
+        logScreenshotSampling(reason: "live-resize-ended")
+    }
+
+    // MARK - Trackpad pinch zoom
+
+    @objc private func handlePinchZoom(_ gesture: NSMagnificationGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            // A region confirmation surface is locked to the selected desktop
+            // frame and must never resize; after Pin the same controller is a
+            // pinned screenshot and zooming becomes valid. A temporarily
+            // hidden image has no visible geometry to zoom.
+            guard !presentationMode.isRegionDraft, !imageIsHidden else { return }
+            resolveActiveLineWidthEdit(.commitOrReject, reason: "pinch-zoom-began")
+            _ = endTextEditingForGeometryChange()
+            guard admitUpdateSensitiveAction("pinch-zoom") else { return }
+            precondition(
+                pinchZoomInteraction == nil,
+                "A pinned screenshot cannot begin a second pinch zoom before gesture end."
+            )
+            let screen = imagePanel.screen ?? NSScreen.main
+            let visibleWidth = screen?.visibleFrame.width ?? imagePanel.frame.width
+            let minimumWidth = max(imagePanel.minSize.width, 48)
+            let currentImage = payload.currentImage()
+            // The capture's logical size is the user-visible 100% size. It is
+            // already pixel exact on the capture display (including Retina
+            // half points), while a move to a differently scaled display must
+            // keep its apparent size and use high-quality resampling.
+            let geometry = PinnedShotPresentationGeometry(
+                nativeSize: currentImage.logicalSize
+            )
+            let maximumWidth = max(
+                minimumWidth + 1,
+                visibleWidth * 2,
+                geometry.nativeSize.width * 2
+            )
+            pinchZoomInteraction = PinchZoomInteraction(
+                startedAt: ProcessInfo.processInfo.systemUptime,
+                beginPanelFrame: imagePanel.frame,
+                anchor: NSEvent.mouseLocation,
+                geometry: geometry,
+                widthRange: minimumWidth ... maximumWidth
+            )
+            AppLog.capture.notice(
+                "Pinned screenshot pinch zoom began: id=\(self.identifier.uuidString, privacy: .public), frame=\(self.imagePanel.frame.debugDescription, privacy: .public)"
+            )
+        case .changed:
+            applyPinchZoom(magnification: gesture.magnification)
+        default:
+            guard let interaction = pinchZoomInteraction else { return }
+            pinchZoomInteraction = nil
+            // Do not independently round width and height here. On Retina a
+            // half point is a complete physical pixel, and four-axis rounding
+            // would break the canonical aspect ratio restored on every frame.
+            logScreenshotSampling(reason: "pinch-zoom-ended")
+            AppLog.capture.notice(
+                "Pinned screenshot pinch zoom ended: id=\(self.identifier.uuidString, privacy: .public), state=\(gesture.state.rawValue, privacy: .public), frame=\(self.imagePanel.frame.debugDescription, privacy: .public), durationMs=\((ProcessInfo.processInfo.systemUptime - interaction.startedAt) * 1_000, privacy: .public)"
+            )
+        }
+    }
+
+    private func applyPinchZoom(magnification: CGFloat) {
+        guard let interaction = pinchZoomInteraction else { return }
+        let targetFrame = interaction.geometry.zoomedFrame(
+            from: interaction.beginPanelFrame,
+            anchoredAt: interaction.anchor,
+            cumulativeMagnification: magnification,
+            widthRange: interaction.widthRange
         )
+        guard targetFrame != imagePanel.frame else { return }
+        imagePanel.setFrame(targetFrame, display: true)
     }
 
     private func wireActions() {
@@ -1498,6 +1868,10 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         toolbarController.onOpacityChange = { [weak self] value in
             guard let self else { return }
             self.resolveActiveLineWidthEdit(.commitOrReject, reason: "opacity-change")
+            self.finishEntranceAnimationImmediately(
+                imageTargetAlpha: value,
+                reason: "opacity-control"
+            )
             self.imagePanel.alphaValue = value
         }
         toolbarController.onToggleClickThrough = { [weak self] enabled in
@@ -1829,6 +2203,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             NSSound.beep()
             return
         }
+        guard admitPointerIdleOutput(action: "pin") else { return }
         disableAnnotationEditing(reason: "region-pin")
         regionDraftTransitionInProgress = true
         regionDraftImageIgnoredMouseEvents = imagePanel.ignoresMouseEvents
@@ -1859,7 +2234,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 self.imageView.syncPresentationContentCornerRadius(
                     for: currentImage.logicalSize
                 )
-                self.imagePanel.hasShadow = true
+                // A pinned region crop is opaque desktop pixels, so this
+                // resolves to true; the property keeps one shadow owner.
+                self.imagePanel.hasShadow = self.wantsImagePanelShadow
                 self.toolbarPanel.orderOut(nil)
                 self.toolbarPanel.setAccessibilityIdentifier("pinned.toolbar.window")
                 self.toolbarPanel.level = .floating
@@ -2254,13 +2631,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             NSSound.beep()
             return nil
         }
-        guard NSEvent.pressedMouseButtons == 0 else {
-            AppLog.export.notice(
-                "Rejected screenshot output during an active pointer interaction: action=\(action.rawValue, privacy: .public), pressedButtons=\(NSEvent.pressedMouseButtons, privacy: .public)"
-            )
-            NSSound.beep()
-            return nil
-        }
+        guard admitPointerIdleOutput(action: action.rawValue) else { return nil }
 
         let transaction = ExportTransaction(
             identifier: UUID(),
@@ -2278,6 +2649,17 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             "Began screenshot output transaction: id=\(transaction.identifier.uuidString, privacy: .public), action=\(action.rawValue, privacy: .public), regionConfirmation=\(transaction.beganAsRegionDraft, privacy: .public), inputFrozen=true"
         )
         return transaction
+    }
+
+    private func admitPointerIdleOutput(action: String) -> Bool {
+        guard NSEvent.pressedMouseButtons == 0 else {
+            AppLog.export.notice(
+                "Rejected screenshot output during an active pointer interaction: action=\(action, privacy: .public), pressedButtons=\(NSEvent.pressedMouseButtons, privacy: .public)"
+            )
+            NSSound.beep()
+            return false
+        }
+        return true
     }
 
     @discardableResult
@@ -2350,20 +2732,31 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 return
             }
             self.payload.update(capturedImage: currentImage)
-            var target = currentImage.logicalSize
-            if let visible = self.imagePanel.screen?.visibleFrame {
-                let ratio = min(1, visible.width / target.width, visible.height / target.height)
-                target = CGSize(width: target.width * ratio, height: target.height * ratio)
+            let targetSize = currentImage.logicalSize
+            var targetFrame = CGRect(
+                x: self.imagePanel.frame.midX - targetSize.width / 2,
+                y: self.imagePanel.frame.midY - targetSize.height / 2,
+                width: targetSize.width,
+                height: targetSize.height
+            )
+            if let visible = self.imagePanel.screen?.visibleFrame,
+               targetSize.width <= visible.width,
+               targetSize.height <= visible.height {
+                targetFrame = PinnedShotPresentationGeometry.clampedFrame(
+                    targetFrame,
+                    within: visible
+                )
             }
-            self.imagePanel.setContentSize(target)
+            self.imagePanel.setFrame(targetFrame, display: true)
             self.repositionToolbar()
+            self.logScreenshotSampling(reason: "restore-original-size")
         }
     }
 
     private func toggleImageVisibility() {
         imageIsHidden.toggle()
         imageView.isHidden = imageIsHidden
-        imagePanel.hasShadow = !imageIsHidden
+        imagePanel.hasShadow = !imageIsHidden && wantsImagePanelShadow
         toolbarController.setImageHidden(imageIsHidden)
     }
 
@@ -2477,11 +2870,13 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     }
 
     private func disableAnnotationEditing(reason: String) {
+        finishPinnedWindowMove(reason: "annotation-editing-disabled-\(reason)")
         resolveActiveLineWidthEdit(.cancel, reason: reason)
         imageView.setAnnotationEditingEnabled(false)
     }
 
     private func suspendAnnotationEditingForCanvasEditor(reason: String) {
+        finishPinnedWindowMove(reason: "annotation-editing-suspended-\(reason)")
         resolveActiveLineWidthEdit(.cancel, reason: reason)
         imageView.suspendAnnotationEditingForExternalOwner(reason: reason)
     }
@@ -2656,22 +3051,38 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         }
     }
 
-    private static func initialWindowSize(for image: CapturedImage) -> CGSize {
+    private func logScreenshotSampling(reason: String) {
+        precondition(
+            !presentationMode.isRegionDraft,
+            "Region confirmation draws against its frozen desktop and has no scaled screenshot preview."
+        )
+        let sourcePixelSize = payload.currentImage().pixelSize
+        let destinationPixelSize = imageView.convertToBacking(imageView.bounds).size
+        guard destinationPixelSize.width > 0, destinationPixelSize.height > 0 else {
+            AppLog.capture.fault(
+                "Pinned screenshot resolved an empty backing destination: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public), destination=\(destinationPixelSize.debugDescription, privacy: .public)"
+            )
+            return
+        }
+        let decision = ScreenshotSamplingPolicy.decision(
+            sourcePixelSize: sourcePixelSize,
+            destinationPixelSize: destinationPixelSize
+        )
+        AppLog.capture.notice(
+            "Pinned screenshot sampling resolved: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public), mode=\(decision.mode.rawValue, privacy: .public), source=\(sourcePixelSize.debugDescription, privacy: .public), destination=\(destinationPixelSize.debugDescription, privacy: .public), scaleX=\(decision.horizontalScale, privacy: .public), scaleY=\(decision.verticalScale, privacy: .public)"
+        )
+    }
+
+    private static func initialWindowSize(
+        for image: CapturedImage,
+        fittingIn visibleSize: CGSize?
+    ) -> CGSize {
         let logical = image.logicalSize
         if image.sourceMetadata.kind == .region {
             return logical
         }
-        let maximum = CGSize(width: 720, height: 520)
-        let maximumRatio = min(maximum.width / logical.width, maximum.height / logical.height)
-        let baseRatio = min(1, maximumRatio)
-        let minimumUsableRatio = max(160 / logical.width, 100 / logical.height)
-        let ratio = minimumUsableRatio <= maximumRatio
-            ? max(baseRatio, minimumUsableRatio)
-            : maximumRatio
-        return CGSize(
-            width: logical.width * ratio,
-            height: logical.height * ratio
-        )
+        let geometry = PinnedShotPresentationGeometry(nativeSize: logical)
+        return visibleSize.map { geometry.fittedSize(within: $0) } ?? geometry.nativeSize
     }
 
     private static func minimumWindowSize(for aspect: CGSize) -> CGSize {
@@ -2948,9 +3359,131 @@ private final class PinnedShotPanel: NSPanel {
     var onEscape: (() -> Void)?
     var shouldAcceptLeftMouseDown: (() -> Bool)?
     var inputRole = "unconfigured"
+    private var isAppControlledPointerDragActive = false
+    private var isApplyingAppControlledPointerDragOrigin = false
+    private var didReportAppControlledTrackingMismatch = false
+    private(set) var didBypassAppKitConstraintDuringCurrentDrag = false
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    func beginAppControlledPointerDrag() {
+        precondition(
+            !isAppControlledPointerDragActive && !isApplyingAppControlledPointerDragOrigin,
+            "A pinned screenshot cannot begin a second pointer drag or begin one during a frame update."
+        )
+        isAppControlledPointerDragActive = true
+        didBypassAppKitConstraintDuringCurrentDrag = false
+        didReportAppControlledTrackingMismatch = false
+    }
+
+    func endAppControlledPointerDrag() {
+        precondition(
+            isAppControlledPointerDragActive && !isApplyingAppControlledPointerDragOrigin,
+            "A pinned screenshot pointer drag must end exactly once and outside a frame update."
+        )
+        isAppControlledPointerDragActive = false
+    }
+
+    func setAppControlledPointerDragOrigin(_ origin: NSPoint) {
+        precondition(
+            isAppControlledPointerDragActive && !isApplyingAppControlledPointerDragOrigin,
+            "A pinned screenshot can update its origin only during one active pointer drag."
+        )
+        isApplyingAppControlledPointerDragOrigin = true
+        defer { isApplyingAppControlledPointerDragOrigin = false }
+
+        setFrameOrigin(origin)
+        let trackingError = CGPoint(
+            x: frame.minX - origin.x,
+            y: frame.minY - origin.y
+        )
+        guard (abs(trackingError.x) > 1 || abs(trackingError.y) > 1),
+              !didReportAppControlledTrackingMismatch
+        else { return }
+        didReportAppControlledTrackingMismatch = true
+        AppLog.capture.fault(
+            "Pinned screenshot lost 1:1 pointer tracking after bypassing AppKit constraint: requested=\(origin.debugDescription, privacy: .public), actual=\(self.frame.origin.debugDescription, privacy: .public), error=\(trackingError.debugDescription, privacy: .public)"
+        )
+    }
+
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        // AppKit can ask to constrain a window again on a later run-loop turn
+        // when its backing screen changes. Keep direct manipulation 1:1 for
+        // the complete mouse-down...mouse-up lifecycle, not just while the
+        // immediate setFrame call is on the stack.
+        guard isAppControlledPointerDragActive else {
+            return super.constrainFrameRect(frameRect, to: screen)
+        }
+        let systemConstrainedFrame = super.constrainFrameRect(frameRect, to: screen)
+        if systemConstrainedFrame != frameRect,
+           !didBypassAppKitConstraintDuringCurrentDrag {
+            didBypassAppKitConstraintDuringCurrentDrag = true
+            AppLog.capture.notice(
+                "Bypassed AppKit screen-edge constraint during pinned screenshot drag: screen=\(screen?.localizedName ?? "unknown", privacy: .public), requested=\(frameRect.debugDescription, privacy: .public), systemConstrained=\(systemConstrainedFrame.debugDescription, privacy: .public)"
+            )
+        }
+        return frameRect
+    }
+
+#if DEBUG
+    func runAppControlledCrossScreenMovementRegression() {
+        guard let targetScreen = NSScreen.screens.min(by: { $0.frame.minY < $1.frame.minY }) else {
+            preconditionFailure("Pinned cross-screen movement regression requires a display.")
+        }
+        let originalFrame = frame
+        let probeFrame = CGRect(
+            x: targetScreen.visibleFrame.midX - originalFrame.width / 2,
+            y: targetScreen.visibleFrame.maxY - originalFrame.height / 2,
+            width: originalFrame.width,
+            height: originalFrame.height
+        )
+        let systemConstrainedFrame = super.constrainFrameRect(probeFrame, to: targetScreen)
+        precondition(
+            systemConstrainedFrame.origin != probeFrame.origin,
+            "Pinned cross-screen movement regression requires a frame AppKit would constrain."
+        )
+        precondition(
+            constrainFrameRect(probeFrame, to: targetScreen) == systemConstrainedFrame,
+            "Pinned screenshot constraints must remain enabled outside app-controlled body movement."
+        )
+        let midpoint = CGPoint(
+            x: (probeFrame.minX + systemConstrainedFrame.minX) / 2,
+            y: (probeFrame.minY + systemConstrainedFrame.minY) / 2
+        )
+        let proposedOrigins = [
+            probeFrame.origin,
+            midpoint,
+            systemConstrainedFrame.origin,
+            midpoint,
+            probeFrame.origin
+        ]
+        beginAppControlledPointerDrag()
+        defer {
+            endAppControlledPointerDrag()
+            setFrame(originalFrame, display: true, animate: false)
+        }
+        precondition(
+            constrainFrameRect(probeFrame, to: targetScreen) == probeFrame,
+            "Pinned screenshot movement must also bypass a delayed AppKit constraint while the press remains active."
+        )
+        for proposedOrigin in proposedOrigins {
+            setAppControlledPointerDragOrigin(proposedOrigin)
+            precondition(
+                abs(frame.minX - proposedOrigin.x) <= 0.5
+                    && abs(frame.minY - proposedOrigin.y) <= 0.5,
+                "Pinned screenshot movement must track every proposed cross-screen origin without a dead zone."
+            )
+        }
+        precondition(
+            didBypassAppKitConstraintDuringCurrentDrag,
+            "Pinned cross-screen movement regression must exercise the AppKit constraint bypass."
+        )
+        AppLog.capture.notice(
+            "Pinned cross-screen movement regression passed: samples=\(proposedOrigins.count, privacy: .public), forwardAndReverse=true, trackingError=0, targetScreen=\(targetScreen.localizedName, privacy: .public)"
+        )
+    }
+#endif
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown {

@@ -975,13 +975,17 @@ private final class ColorPickerOverlayView: NSView {
 private final class ColorPickerCardView: NSView {
     static let cardSize = CGSize(width: 430, height: 330)
 
-    private struct DetailRow {
-        let text: String
-        let font: NSFont
-        let color: NSColor
-        let height: CGFloat
-        let spacingAfter: CGFloat
-        let wraps: Bool
+    private enum Layout {
+        static let horizontalInset: CGFloat = 14
+        static let contentWidth: CGFloat = 402
+        static let magnifierRect = CGRect(x: 14, y: 162, width: 154, height: 154)
+        static let detailX: CGFloat = 184
+        static let detailWidth: CGFloat = 232
+        static let swatchRect = CGRect(x: 184, y: 276, width: 232, height: 40)
+        static let mainDividerY: CGFloat = 152.5
+        static let shortcutDividerY: CGFloat = 70.5
+        static let metadataColumnWidth: CGFloat = 193
+        static let metadataRightX: CGFloat = 223
     }
 
     private var state: ColorPickerCardState?
@@ -992,15 +996,26 @@ private final class ColorPickerCardView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
-#if DEBUG
+        layer?.cornerRadius = 14
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.22
+        layer?.shadowRadius = 12
+        layer?.shadowOffset = CGSize(width: 0, height: -3)
+        layer?.shadowPath = CGPath(
+            roundedRect: bounds,
+            cornerWidth: 14,
+            cornerHeight: 14,
+            transform: nil
+        )
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
+#if DEBUG
         setAccessibilityIdentifier("colorPicker.card")
-        setAccessibilityLabel(NSLocalizedString("Color picker details", comment: "Color picker detail card"))
-        setAccessibilityValue("state=waiting")
-#else
-        setAccessibilityElement(false)
 #endif
+        setAccessibilityLabel(NSLocalizedString("Color picker details", comment: "Color picker detail card"))
+        setAccessibilityValue(
+            NSLocalizedString("Waiting for a color sample", comment: "Color picker accessibility waiting state")
+        )
     }
 
     @available(*, unavailable)
@@ -1010,19 +1025,22 @@ private final class ColorPickerCardView: NSView {
 
     func update(state: ColorPickerCardState) {
         self.state = state
+        let accessibilitySummary = accessibilitySummary(for: state)
 #if DEBUG
         setAccessibilityValue(
-            "colorSpace=\(state.sample.colorSpace.rawValue); pixel=\(Int(state.sample.pixelPoint.x)),\(Int(state.sample.pixelPoint.y)); copy=\(state.sample.copyRepresentation(format: state.copyFormat))"
+            "hierarchy=copy,channels,metadata,shortcuts; shortcutLayout=three-plus-two; presentation=\(copyPresentationTitle(for: state)); \(accessibilitySummary)"
         )
+#else
+        setAccessibilityValue(accessibilitySummary)
 #endif
         needsDisplay = true
     }
 
     func clear() {
         state = nil
-#if DEBUG
-        setAccessibilityValue("state=waiting")
-#endif
+        setAccessibilityValue(
+            NSLocalizedString("Waiting for a color sample", comment: "Color picker accessibility waiting state")
+        )
         needsDisplay = true
     }
 
@@ -1030,26 +1048,32 @@ private final class ColorPickerCardView: NSView {
         guard let state else { return }
         let card = bounds
 
-        NSColor.windowBackgroundColor.withAlphaComponent(0.97).setFill()
+        NSColor.windowBackgroundColor.setFill()
         NSBezierPath(roundedRect: card, xRadius: 14, yRadius: 14).fill()
         NSColor.separatorColor.setStroke()
         NSBezierPath(roundedRect: card.insetBy(dx: 0.5, dy: 0.5), xRadius: 14, yRadius: 14).stroke()
 
-        drawMagnifier(
-            state.magnifier,
-            in: CGRect(x: 14, y: card.maxY - 168, width: 154, height: 154)
-        )
-        drawSwatch(
-            state.sample,
-            in: CGRect(x: 184, y: card.maxY - 54, width: 232, height: 40)
-        )
-        drawDetails(state)
-        drawInstructions()
+        drawMagnifier(state.magnifier, in: Layout.magnifierRect)
+        drawSwatch(state.sample, in: Layout.swatchRect)
+        drawCopyValue(state)
+        drawChannels(state.sample)
+        drawDivider(at: Layout.mainDividerY)
+        drawMetadata(state.sample)
+        drawDivider(at: Layout.shortcutDividerY)
+        drawShortcuts()
     }
 
     private func drawMagnifier(_ magnifier: PixelMagnifier, in rect: CGRect) {
-        NSColor.black.setFill()
-        NSBezierPath(roundedRect: rect.insetBy(dx: -3, dy: -3), xRadius: 8, yRadius: 8).fill()
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.24)
+        shadow.shadowBlurRadius = 7
+        shadow.shadowOffset = CGSize(width: 0, height: -2)
+        shadow.set()
+        NSColor.controlBackgroundColor.setFill()
+        NSBezierPath(roundedRect: rect.insetBy(dx: -1, dy: -1), xRadius: 7, yRadius: 7).fill()
+        NSGraphicsContext.restoreGraphicsState()
+
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).addClip()
         NSGraphicsContext.current?.imageInterpolation = .none
@@ -1088,6 +1112,23 @@ private final class ColorPickerCardView: NSView {
         inner.lineWidth = 1
         inner.stroke()
         NSGraphicsContext.restoreGraphicsState()
+
+        let outerKeyline = NSBezierPath(
+            roundedRect: rect.insetBy(dx: -0.5, dy: -0.5),
+            xRadius: 6,
+            yRadius: 6
+        )
+        NSColor.labelColor.withAlphaComponent(0.28).setStroke()
+        outerKeyline.lineWidth = 1
+        outerKeyline.stroke()
+        let innerKeyline = NSBezierPath(
+            roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: 5,
+            yRadius: 5
+        )
+        NSColor.white.withAlphaComponent(0.46).setStroke()
+        innerKeyline.lineWidth = 1
+        innerKeyline.stroke()
     }
 
     private func drawSwatch(_ sample: ColorSample, in rect: CGRect) {
@@ -1107,115 +1148,242 @@ private final class ColorPickerCardView: NSView {
         NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7).stroke()
     }
 
-    private func drawDetails(_ state: ColorPickerCardState) {
-        let sample = state.sample
-        let regularFont = AppKitDrawingFonts.colorPickerDetail
-        let compactFont = AppKitDrawingFonts.compactChrome
-        let rows = [
-            DetailRow(
-                text: sample.displayName,
-                font: .systemFont(ofSize: 12, weight: .semibold),
-                color: .labelColor,
-                height: 18,
-                spacingAfter: 2,
-                wraps: false
-            ),
-            DetailRow(
-                text: "Screen \(Int(sample.globalPoint.x)), \(Int(sample.globalPoint.y)) pt",
-                font: regularFont,
-                color: .labelColor,
-                height: 15,
-                spacingAfter: 2,
-                wraps: false
-            ),
-            DetailRow(
-                text: "Pixel \(Int(sample.pixelPoint.x)), \(Int(sample.pixelPoint.y))",
-                font: regularFont,
-                color: .labelColor,
-                height: 15,
-                spacingAfter: 5,
-                wraps: false
-            ),
-            DetailRow(
-                text: sample.colorSpace.title,
-                font: regularFont,
-                color: .controlAccentColor,
-                height: 15,
-                spacingAfter: 3,
-                wraps: false
-            ),
-            DetailRow(
-                text: "Source: \(sample.sourceColorSpaceName)",
-                font: regularFont,
-                color: .labelColor,
-                height: 30,
-                spacingAfter: 3,
-                wraps: true
-            ),
-            DetailRow(
-                text: String(format: "R %.4f  G %.4f", sample.components.red, sample.components.green),
-                font: regularFont,
-                color: .labelColor,
-                height: 15,
-                spacingAfter: 2,
-                wraps: false
-            ),
-            DetailRow(
-                text: String(format: "B %.4f  A %.4f", sample.components.blue, sample.components.alpha),
-                font: regularFont,
-                color: .labelColor,
-                height: 15,
-                spacingAfter: 3,
-                wraps: false
-            ),
-            DetailRow(
-                text: sample.colorSpace == .sRGB
-                    ? sample.hexString
-                    : (sample.displayP3CSSString ?? sample.componentString),
-                font: compactFont,
-                color: .labelColor,
-                height: 30,
-                spacingAfter: 7,
-                wraps: true
-            ),
-            DetailRow(
-                text: "Copy: \(sample.copyRepresentation(format: state.copyFormat))",
-                font: compactFont,
-                color: .labelColor,
-                height: 30,
-                spacingAfter: 0,
-                wraps: true
-            )
-        ]
-        var top = bounds.maxY - 64
-        for row in rows {
-            let rect = CGRect(x: 184, y: top - row.height, width: 232, height: row.height)
-            drawText(
-                row.text,
-                in: rect,
-                font: row.font,
-                color: row.color,
-                wraps: row.wraps
-            )
-            top = rect.minY - row.spacingAfter
-        }
-    }
-
-    private func drawInstructions() {
-        let font = NSFont.systemFont(ofSize: 9)
+    private func drawCopyValue(_ state: ColorPickerCardState) {
+        let copyValue = state.sample.copyRepresentation(format: state.copyFormat)
         drawText(
-            "Click / ⌘C: copy & close    Tab: color space",
-            in: CGRect(x: 14, y: 30, width: bounds.width - 28, height: 14),
-            font: font,
+            NSLocalizedString("Copy value", comment: "Color picker primary value label"),
+            in: CGRect(x: Layout.detailX, y: 252, width: 146, height: 14),
+            font: .systemFont(ofSize: 9.5, weight: .medium),
             color: .secondaryLabelColor,
             wraps: false
         )
         drawText(
-            "↑↓←→: 1 px    ⇧↑↓←→: 10 px    Esc: close",
-            in: CGRect(x: 14, y: 13, width: bounds.width - 28, height: 14),
-            font: font,
+            copyPresentationTitle(for: state),
+            in: CGRect(x: 330, y: 252, width: 86, height: 14),
+            font: .systemFont(ofSize: 9.5, weight: .semibold),
+            color: .secondaryLabelColor,
+            wraps: false,
+            alignment: .right
+        )
+
+        let isShortValue = copyValue.count <= 12 && !copyValue.contains(where: \.isWhitespace)
+        drawText(
+            copyValue,
+            in: CGRect(
+                x: Layout.detailX,
+                y: isShortValue ? 216 : 211,
+                width: Layout.detailWidth,
+                height: isShortValue ? 31 : 38
+            ),
+            font: isShortValue
+                ? AppKitDrawingFonts.colorPickerPrimaryValue
+                : AppKitDrawingFonts.colorPickerLongValue,
+            color: .labelColor,
+            wraps: !isShortValue
+        )
+    }
+
+    private func drawChannels(_ sample: ColorSample) {
+        drawText(
+            NSLocalizedString("Channels", comment: "Color picker RGBA channel section"),
+            in: CGRect(x: Layout.detailX, y: 197, width: Layout.detailWidth, height: 13),
+            font: .systemFont(ofSize: 9.5, weight: .medium),
             color: .secondaryLabelColor,
             wraps: false
+        )
+
+        let channels: [(label: String, value: CGFloat)] = [
+            ("R", sample.components.red),
+            ("G", sample.components.green),
+            ("B", sample.components.blue),
+            ("A", sample.components.alpha)
+        ]
+        let cellWidth = Layout.detailWidth / CGFloat(channels.count)
+        for (index, channel) in channels.enumerated() {
+            let cellX = Layout.detailX + CGFloat(index) * cellWidth
+            drawText(
+                channel.label,
+                in: CGRect(x: cellX, y: 174, width: 10, height: 16),
+                font: .systemFont(ofSize: 9.5, weight: .semibold),
+                color: .secondaryLabelColor,
+                wraps: false
+            )
+            drawText(
+                channelValue(channel.value),
+                in: CGRect(x: cellX + 11, y: 173, width: cellWidth - 11, height: 17),
+                font: AppKitDrawingFonts.colorPickerChannelValue,
+                color: .labelColor,
+                wraps: false
+            )
+        }
+    }
+
+    private func drawMetadata(_ sample: ColorSample) {
+        drawMetadataItem(
+            label: NSLocalizedString("Display", comment: "Color picker display label"),
+            value: sample.displayName,
+            x: Layout.horizontalInset,
+            labelY: 133,
+            valueY: 115,
+            valueFont: .systemFont(ofSize: 11.5, weight: .medium)
+        )
+        drawMetadataItem(
+            label: NSLocalizedString("Output color space", comment: "Color picker output color-space label"),
+            value: sample.colorSpace.title,
+            x: Layout.metadataRightX,
+            labelY: 133,
+            valueY: 115,
+            valueFont: .systemFont(ofSize: 11.5, weight: .medium)
+        )
+        drawMetadataItem(
+            label: NSLocalizedString("Screen", comment: "Color picker screen-coordinate label"),
+            value: "\(Int(sample.globalPoint.x)), \(Int(sample.globalPoint.y)) pt",
+            x: Layout.horizontalInset,
+            labelY: 96,
+            valueY: 78,
+            valueFont: AppKitDrawingFonts.colorPickerLongValue
+        )
+        drawMetadataItem(
+            label: NSLocalizedString("Pixel", comment: "Color picker pixel-coordinate label"),
+            value: "\(Int(sample.pixelPoint.x)), \(Int(sample.pixelPoint.y))",
+            x: Layout.metadataRightX,
+            labelY: 96,
+            valueY: 78,
+            valueFont: AppKitDrawingFonts.colorPickerLongValue
+        )
+
+    }
+
+    private func drawMetadataItem(
+        label: String,
+        value: String,
+        x: CGFloat,
+        labelY: CGFloat,
+        valueY: CGFloat,
+        valueFont: NSFont
+    ) {
+        drawText(
+            label,
+            in: CGRect(x: x, y: labelY, width: Layout.metadataColumnWidth, height: 13),
+            font: .systemFont(ofSize: 9.5, weight: .medium),
+            color: .secondaryLabelColor,
+            wraps: false
+        )
+        drawText(
+            value,
+            in: CGRect(x: x, y: valueY, width: Layout.metadataColumnWidth, height: 17),
+            font: valueFont,
+            color: .labelColor,
+            wraps: false
+        )
+    }
+
+    private func drawDivider(at y: CGFloat) {
+        let divider = NSBezierPath()
+        divider.move(to: CGPoint(x: Layout.horizontalInset, y: y))
+        divider.line(to: CGPoint(x: bounds.maxX - Layout.horizontalInset, y: y))
+        divider.lineWidth = 1
+        NSColor.separatorColor.withAlphaComponent(0.38).setStroke()
+        divider.stroke()
+    }
+
+    private func copyPresentationTitle(for state: ColorPickerCardState) -> String {
+        switch (state.copyFormat, state.sample.colorSpace) {
+        case (.hex, .sRGB):
+            return "HEX"
+        case (.hex, .displayP3), (.css, .sRGB), (.css, .displayP3):
+            return "CSS"
+        case (.hex, .genericRGB), (.hex, .adobeRGB1998),
+             (.css, .genericRGB), (.css, .adobeRGB1998),
+             (.components, _):
+            return NSLocalizedString("Components", comment: "Color copy format")
+        }
+    }
+
+    private func accessibilitySummary(for state: ColorPickerCardState) -> String {
+        let sample = state.sample
+        let channels = [
+            "R \(channelValue(sample.components.red))",
+            "G \(channelValue(sample.components.green))",
+            "B \(channelValue(sample.components.blue))",
+            "A \(channelValue(sample.components.alpha))"
+        ]
+        .joined(separator: ", ")
+        return [
+            "\(NSLocalizedString("Copy value", comment: "Color picker primary value label")): \(sample.copyRepresentation(format: state.copyFormat))",
+            "\(NSLocalizedString("Channels", comment: "Color picker RGBA channel section")): \(channels)",
+            "\(NSLocalizedString("Display", comment: "Color picker display label")): \(sample.displayName)",
+            "\(NSLocalizedString("Output color space", comment: "Color picker output color-space label")): \(sample.colorSpace.title)",
+            "\(NSLocalizedString("Screen", comment: "Color picker screen-coordinate label")): \(Int(sample.globalPoint.x)), \(Int(sample.globalPoint.y)) pt",
+            "\(NSLocalizedString("Pixel", comment: "Color picker pixel-coordinate label")): \(Int(sample.pixelPoint.x)), \(Int(sample.pixelPoint.y))"
+        ]
+        .joined(separator: ". ")
+    }
+
+    private func channelValue(_ component: CGFloat) -> String {
+        String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), component)
+    }
+
+    private func drawShortcuts() {
+        drawText(
+            NSLocalizedString("Shortcuts", comment: "Color picker shortcut section"),
+            in: CGRect(x: Layout.horizontalInset, y: 52, width: Layout.contentWidth, height: 13),
+            font: .systemFont(ofSize: 9.5, weight: .medium),
+            color: .secondaryLabelColor,
+            wraps: false
+        )
+
+        drawShortcut(
+            key: "⌘C",
+            action: NSLocalizedString("Copy", comment: "Color picker shortcut action"),
+            in: CGRect(x: 14, y: 31, width: 104, height: 16)
+        )
+        drawShortcut(
+            key: "Tab",
+            action: NSLocalizedString("Color space", comment: "Color picker shortcut action"),
+            in: CGRect(x: 130, y: 31, width: 176, height: 16)
+        )
+        drawShortcut(
+            key: "Esc",
+            action: NSLocalizedString("Close", comment: "Color picker shortcut action"),
+            in: CGRect(x: 318, y: 31, width: 98, height: 16)
+        )
+        drawShortcut(
+            key: "↑↓←→",
+            action: NSLocalizedString("Move 1 px", comment: "Color picker shortcut action"),
+            in: CGRect(x: 14, y: 11, width: 182, height: 16)
+        )
+        drawShortcut(
+            key: "⇧ ↑↓←→",
+            action: NSLocalizedString("Move 10 px", comment: "Color picker shortcut action"),
+            in: CGRect(x: 212, y: 11, width: 204, height: 16)
+        )
+    }
+
+    private func drawShortcut(key: String, action: String, in rect: CGRect) {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byTruncatingTail
+        let attributed = NSMutableAttributedString(
+            string: key,
+            attributes: [
+                .font: AppKitDrawingFonts.colorPickerChannelValue,
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraphStyle
+            ]
+        )
+        attributed.append(
+            NSAttributedString(
+                string: "  \(action)",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 9.5, weight: .regular),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                    .paragraphStyle: paragraphStyle
+                ]
+            )
+        )
+        attributed.draw(
+            with: rect,
+            options: [.usesLineFragmentOrigin, .usesFontLeading, .truncatesLastVisibleLine]
         )
     }
 
@@ -1224,10 +1392,12 @@ private final class ColorPickerCardView: NSView {
         in rect: CGRect,
         font: NSFont,
         color: NSColor,
-        wraps: Bool
+        wraps: Bool,
+        alignment: NSTextAlignment = .left
     ) {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineBreakMode = wraps ? .byWordWrapping : .byTruncatingTail
+        paragraphStyle.alignment = alignment
         let attributed = NSAttributedString(
             string: text,
             attributes: [
