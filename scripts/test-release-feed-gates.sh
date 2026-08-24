@@ -504,6 +504,9 @@ case "${1:-}" in
       printf '%s\n' '/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit (compatibility version 1.0.0, current version 1.0.0)'
     else
       printf '%s\n' '/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit (compatibility version 1.0.0, current version 1.0.0, weak)'
+      if [[ -n "${MOCK_SCREEN_CAPTURE_KIT_DUPLICATE_FRAMEWORK:-}" ]]; then
+        printf '%s\n' '/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit (compatibility version 1.0.0, current version 1.0.0)'
+      fi
     fi
     ;;
   -l)
@@ -600,6 +603,11 @@ validate_strong_framework_capture_app() {
     PATH="$APP_MOCK_BIN:$PATH" \
     release_validate_app_identity "$TEST_APP" "0.1.7" "8"
 }
+validate_duplicate_framework_capture_app() {
+  MOCK_SCREEN_CAPTURE_KIT_DUPLICATE_FRAMEWORK=1 \
+    PATH="$APP_MOCK_BIN:$PATH" \
+    release_validate_app_identity "$TEST_APP" "0.1.7" "8"
+}
 validate_strong_class_capture_app() {
   MOCK_SCREEN_CAPTURE_KIT_STRONG_CLASS=1 \
     PATH="$APP_MOCK_BIN:$PATH" \
@@ -617,6 +625,10 @@ expect_failure_containing \
   "built-app gate rejects strong-linked macOS 26 ScreenCaptureKit classes" \
   "must weak-link ScreenCaptureKit" \
   validate_strong_framework_capture_app
+expect_failure_containing \
+  "built-app gate rejects mixed weak and strong ScreenCaptureKit load commands" \
+  "must weak-link ScreenCaptureKit" \
+  validate_duplicate_framework_capture_app
 expect_failure_containing \
   "built-app gate rejects strong-imported macOS 26 ScreenCaptureKit classes" \
   "must weak-import macOS 26 ScreenCaptureKit class" \
@@ -1569,6 +1581,22 @@ expect_success \
   "credential-free runtime validation reuses the immutable reviewed helper without compilation" \
   assert_runtime_validation_reuses_reviewed_helper_artifact
 
+assert_reviewed_release_common_hashes_match() {
+  local actual_sha256
+
+  actual_sha256="$(release_sha256 "$SCRIPT_DIR/release-common.sh")"
+  [[ "$actual_sha256" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$(grep -Fc "EXPECTED_RELEASE_COMMON_SCRIPT_SHA256='$actual_sha256'" "$RELEASE_WORKFLOW")" == "1" ]]
+  [[ "$(grep -Fc "readonly EXPECTED_RELEASE_COMMON_SHA256=\"$actual_sha256\"" \
+      "$SCRIPT_DIR/verify-update-transition.sh")" == "1" ]]
+  [[ "$(grep -Fc "EXPECTED_RELEASE_COMMON_SHA256 = \"$actual_sha256\"" \
+      "$SCRIPT_DIR/serve-update-transition-loopback.sh")" == "1" ]]
+}
+
+expect_success \
+  "reviewed release-common hashes match every protected signing and transition boundary" \
+  assert_reviewed_release_common_hashes_match
+
 workflow_job_runner() {
   local workflow="$1"
   local job="$2"
@@ -1580,19 +1608,28 @@ workflow_job_runner() {
   ' "$workflow"
 }
 
-workflow_job_selects_xcode_26_3() {
+workflow_job_body() {
   local workflow="$1"
   local job="$2"
 
   awk -v job="  $job:" '
-    $0 == job { in_job = 1; next }
-    in_job && /^  [A-Za-z0-9_-]+:$/ { exit }
+    $0 == job { in_job = 1 }
+    in_job && $0 != job && /^  [A-Za-z0-9_-]+:$/ { exit }
     in_job { print }
-  ' "$workflow" | grep -Fq \
+  ' "$workflow"
+}
+
+workflow_job_selects_xcode_26_3() {
+  local workflow="$1"
+  local job="$2"
+
+  workflow_job_body "$workflow" "$job" | grep -Fq \
     'DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer'
 }
 
 assert_sdk_runner_boundaries() {
+  local compatibility_job
+
   [[ "$(workflow_job_runner "$CI_WORKFLOW" release-metadata)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$CI_WORKFLOW" unit-tests)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$CI_WORKFLOW" public-build-gate)" == "macos-15" ]]
@@ -1606,6 +1643,20 @@ assert_sdk_runner_boundaries() {
   workflow_job_selects_xcode_26_3 "$CI_WORKFLOW" unit-tests
   workflow_job_selects_xcode_26_3 "$CI_WORKFLOW" public-build-gate
   workflow_job_selects_xcode_26_3 "$RELEASE_WORKFLOW" build-artifacts
+
+  compatibility_job="$(workflow_job_body "$CI_WORKFLOW" macos-14-launch-smoke)"
+  [[ -n "$compatibility_job" ]]
+  grep -Fq 'needs: public-build-gate' <<< "$compatibility_job"
+  grep -Fq 'compatibility_artifact_id' <<< "$compatibility_job"
+  grep -Fq 'compatibility_artifact_digest' <<< "$compatibility_job"
+  grep -Fq '.workflow_run.id == $run_id' <<< "$compatibility_job"
+  grep -Fq 'digest-mismatch: error' <<< "$compatibility_job"
+  grep -Fq 'otool -L "$BINARY"' <<< "$compatibility_job"
+  grep -Fq 'nm -m "$BINARY"' <<< "$compatibility_job"
+  grep -Fq 'dyld_info -imports "$BINARY"' <<< "$compatibility_job"
+  grep -Fq 'dyld_info -fixups "$BINARY"' <<< "$compatibility_job"
+  grep -Fq '"$BINARY" >"$ROOT/launch.log" 2>&1 &' <<< "$compatibility_job"
+  grep -Fq 'kill -0 "$APP_PID"' <<< "$compatibility_job"
 }
 
 expect_success \

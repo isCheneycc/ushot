@@ -528,9 +528,13 @@ release_validate_screen_capture_kit_runtime_compatibility() {
   otool -L "$executable" | awk '
     $1 == "/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit" {
       found = 1
-      if ($0 ~ /, weak\)$/) { weak = 1 }
+      if ($0 ~ /, weak\)$/) {
+        weak = 1
+      } else {
+        unsafe = 1
+      }
     }
-    END { exit(found && weak ? 0 : 1) }
+    END { exit(found && weak && !unsafe ? 0 : 1) }
   ' || release_die "Built app must weak-link ScreenCaptureKit for supported pre-macOS-26 systems."
 
   for class_symbol in \
