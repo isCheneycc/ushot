@@ -261,6 +261,15 @@ private struct CaptureSettingsView: View {
                 settingToggle("Copy automatically", \AppSettings.capture.automaticallyCopies)
                 settingToggle("Save automatically", \AppSettings.capture.automaticallySaves)
                 settingToggle("Open Canvas Editor automatically", \AppSettings.capture.automaticallyOpensCanvasEditor)
+                VStack(alignment: .leading, spacing: 4) {
+                    settingToggle(
+                        "Double-click region to copy",
+                        \AppSettings.capture.copiesRegionOnDoubleClick
+                    )
+                    .accessibilityIdentifier("settings.capture.copiesRegionOnDoubleClick")
+                    Text("After region confirmation, double-click empty space inside the selection to copy and close. Resize handles, annotations and mouse-up are unchanged.")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Capture Options") {

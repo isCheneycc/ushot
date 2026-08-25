@@ -697,6 +697,85 @@ final class UshotAppUITests: XCTestCase {
     }
 
     @MainActor
+    func testRegionDoubleClickCopiesOnSecondPointerUpAndRespectsSetting() {
+        NSPasteboard.general.clearContents()
+        let enabledChangeCount = NSPasteboard.general.changeCount
+        var app = launch(arguments: ["--uitest-reset-settings", "--uitest-region-selection"])
+        defer { app.terminate() }
+
+        var overlay = app.groups["capture.region.overlay"]
+        XCTAssertTrue(overlay.waitForExistence(timeout: 5))
+        overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.28, dy: 0.32))
+            .press(
+                forDuration: 0.1,
+                thenDragTo: overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.62, dy: 0.60))
+            )
+
+        var canvas = app.groups["pinned.canvas"]
+        XCTAssertTrue(canvas.waitForExistence(timeout: 3))
+        let emptyInterior = canvas.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.82, dy: 0.78)
+        )
+        emptyInterior.click()
+        XCTAssertEqual(
+            NSPasteboard.general.changeCount,
+            enabledChangeCount,
+            "The first pointer-up must retain region confirmation without writing output."
+        )
+        XCTAssertTrue(overlay.exists)
+        emptyInterior.click()
+
+        waitForPasteboardPNG(after: enabledChangeCount)
+        XCTAssertTrue(overlay.waitForNonExistence(timeout: 3))
+        app.terminate()
+
+        app = launch(arguments: ["--uitest-settings"])
+        XCTAssertTrue(app.windows["settings.window"].waitForExistence(timeout: 5))
+        let captureSection = app.descendants(matching: .any)["settings.sidebar.capture"]
+        XCTAssertTrue(captureSection.waitForExistence(timeout: 3))
+        captureSection.click()
+        let doubleClickToggle = app.switches["settings.capture.copiesRegionOnDoubleClick"]
+        XCTAssertTrue(doubleClickToggle.waitForExistence(timeout: 3))
+        XCTAssertEqual((doubleClickToggle.value as? NSNumber)?.intValue, 1)
+        doubleClickToggle.click()
+        XCTAssertEqual((doubleClickToggle.value as? NSNumber)?.intValue, 0)
+        app.terminate()
+
+        NSPasteboard.general.clearContents()
+        let disabledChangeCount = NSPasteboard.general.changeCount
+        app = launch(arguments: ["--uitest-region-selection"])
+
+        overlay = app.groups["capture.region.overlay"]
+        XCTAssertTrue(overlay.waitForExistence(timeout: 5))
+        overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.28, dy: 0.32))
+            .press(
+                forDuration: 0.1,
+                thenDragTo: overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.62, dy: 0.60))
+            )
+        canvas = app.groups["pinned.canvas"]
+        XCTAssertTrue(canvas.waitForExistence(timeout: 3))
+        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.78)).doubleClick()
+
+        let unexpectedPasteboardWrite = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                NSPasteboard.general.changeCount != disabledChangeCount
+            },
+            object: nil
+        )
+        unexpectedPasteboardWrite.isInverted = true
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [unexpectedPasteboardWrite], timeout: 3),
+            .completed
+        )
+        XCTAssertEqual(
+            NSPasteboard.general.changeCount,
+            disabledChangeCount,
+            "Turning the setting off must keep a region double-click from writing output."
+        )
+        XCTAssertTrue(overlay.exists)
+    }
+
+    @MainActor
     func testRegionCommandCopyWithSelectedAnnotationEndsCapture() {
         NSPasteboard.general.clearContents()
         let pasteboardChangeCount = NSPasteboard.general.changeCount
@@ -867,7 +946,19 @@ final class UshotAppUITests: XCTestCase {
             marker: "textLineOrigin="
         )
         XCTAssertGreaterThanOrEqual(newTextEditor.frame.width, 200)
-        newTextEditor.typeText("First中文")
+        // XCUIAutomation can block while synthesizing Unicode key events that
+        // have no direct key-code mapping. Keep the physical-key coverage for
+        // Latin input, then use the native paste path for the mixed-script
+        // glyphs. IME marked-text composition is covered by the app's dedicated
+        // inline TextKit regression fixture.
+        newTextEditor.typeText("First")
+        NSPasteboard.general.clearContents()
+        XCTAssertTrue(
+            NSPasteboard.general.setString("中文", forType: .string),
+            "The UI test must be able to stage mixed-script text on the pasteboard."
+        )
+        newTextEditor.typeKey("v", modifierFlags: .command)
+        waitForValue(of: canvas, containing: "textCharacters=7")
         waitForValue(of: canvas, containing: "textBaselineError=0.00,0.00")
         waitForValue(of: canvas, containing: "textGeometryConfigurations=1")
         let currentLineOrigin = try serializedPoint(

@@ -28,8 +28,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     private enum InlineTextEditorMetrics {
         static let minimumViewportWidth: CGFloat = 240
         static let maximumViewportWidth: CGFloat = 520
-        static let horizontalPadding: CGFloat = 8
-        static let verticalPadding: CGFloat = 4
+        static let horizontalPadding = AnnotationTextLayout.horizontalChromePadding
+        static let verticalPadding = AnnotationTextLayout.verticalChromePadding
     }
 
     private enum PinnedWindowCursorMetrics {
@@ -51,6 +51,50 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         var anchor: CGPoint
         var style: AnnotationStyle
         let transform: AnnotationTransform
+        let originalItem: AnnotationItem?
+
+        init(
+            itemID: UUID?,
+            anchor: CGPoint,
+            style: AnnotationStyle,
+            transform: AnnotationTransform,
+            originalItem: AnnotationItem? = nil
+        ) {
+            self.itemID = itemID
+            self.anchor = anchor
+            self.style = style
+            self.transform = transform
+            self.originalItem = originalItem
+        }
+
+        var chromeMode: AnnotationTextLayoutPayload.ChromeMode {
+            if let originalItem {
+                return originalItem.textLayout?.chromeMode ?? .legacyTight
+            }
+            return .uniformPadded
+        }
+    }
+
+    private struct TextEditorFontRequest: Equatable {
+        let fontName: String?
+        let fontWeight: AnnotationFontWeight
+        let pointSize: CGFloat
+
+        init(style: AnnotationStyle) {
+            fontName = style.fontName
+            fontWeight = style.fontWeight
+            pointSize = style.fontSize
+        }
+    }
+
+    /// Last renderer-ready generation accepted by the live editor. Revalidating
+    /// it before authoring the next generation turns a removed, unreadable or
+    /// replaced font source into a typed capability failure instead of silently
+    /// rebasing an active edit onto different font bytes.
+    private struct TextEditorRendererGeneration {
+        let text: String
+        let style: AnnotationStyle
+        let payload: AnnotationTextLayoutPayload
     }
 
     private enum TextEditingDisposition: Equatable {
@@ -63,6 +107,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         let initialFontSize: CGFloat
         let minimumFontSize: CGFloat
         let maximumFontSize: CGFloat
+        /// Persisted TextKit-container width at pointer-down. The interaction
+        /// scales this semantic owner directly; the capped viewport is only a
+        /// window onto it and must never be inverted back into document state.
+        let initialCanonicalWrapWidthInDocument: CGFloat
         let initialViewportWidth: CGFloat
         let initialAnchor: CGPoint
         let fieldAnchorResidualInDocument: CGSize
@@ -95,7 +143,39 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         let frame: CGRect
         let containerFrame: CGRect
         let documentBaseOrigin: CGPoint
+        /// View-space extent of the scaled document host. The viewport and
+        /// deterministic scroll lifecycle operate exclusively on this size.
         let documentSize: CGSize
+        /// Canonical, untransformed document extent owned by TextKit. The
+        /// document host maps these bounds into `documentSize`; NSTextView
+        /// never recomputes typography at presentation scale.
+        let canonicalDocumentSize: CGSize
+    }
+
+    private struct InlineTextEditorLineSnapshot {
+        let utf16Range: NSRange
+        let consumedUTF16Range: NSRange
+        let originInView: CGPoint
+    }
+
+    private struct InlineTextKitCapabilityLineSnapshot {
+        let utf16Range: NSRange
+        let consumedUTF16Range: NSRange
+        let usedRectMinX: CGFloat
+        let baselineY: CGFloat
+        let baselineOffsetInFragment: CGFloat
+        let isExtraLineFragment: Bool
+    }
+
+    private struct InlineTextKitEditingCapabilityError: LocalizedError {
+        let diagnostic: String
+
+        var errorDescription: String? {
+            NSLocalizedString(
+                "This text cannot be edited on this Mac because its saved layout does not match the available text engine. The annotation was left unchanged.",
+                comment: "Inline text editing is rejected when the live TextKit stack cannot reproduce a saved layout"
+            )
+        }
     }
 
     private struct RegionDraftViewport {
@@ -161,11 +241,18 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     var onWindowDragEnded: ((String) -> Void)?
     var onExternalDrag: ((NSEvent) -> Void)?
     var onCopyFinalImage: (() -> Void)?
+    var onRegionSelectionDoubleClickCopy: (() -> Void)?
     var onPreviewChange: ((CapturedImage) -> Void)?
     var onEditingContextWillChange: ((String) -> Void)?
 
     private let session: AnnotationEditingSession
     private let vectorRenderer = AnnotationVectorRenderer()
+    /// Drawing is demand-driven and may repeat many times for one document
+    /// generation. Keep deterministic vector failures visible without
+    /// presenting the same error on every AppKit display pass.
+    private var reportedVectorRenderFailureItems: [UUID: AnnotationItem] = [:]
+    private var reportedProvisionalVectorRenderFailureDescriptions: Set<String> = []
+    private var lastTextLayoutAuthoringFailureFingerprint: String?
     private let effectRenderer = AnnotationEffectRenderer()
     private let selectionGeometry = AnnotationSelectionGeometry()
     private var drawsBaseImage: Bool
@@ -188,9 +275,27 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     private var textEditorFrameView: InlineAnnotationTextEditorFrameView?
     private var selectedTextFrameView: InlineAnnotationTextEditorFrameView?
     private var textEditorPreferredViewportWidthInDocument: CGFloat?
+    /// Semantic untransformed content width. Unlike the visible field frame,
+    /// this never absorbs interaction minimums or edge clamps.
+    private var textEditorCanonicalWrapWidthInDocument: CGFloat?
+    /// Complete persisted layout owner for the current semantic generation.
+    /// A published legacy item remains nil during an exact no-op; its first
+    /// real layout mutation materializes a versioned payload with overhangs.
+    private var textEditorLayoutPayload: AnnotationTextLayoutPayload?
+    /// True after direct manipulation has taken ownership of the semantic wrap
+    /// width. Text/font changes may grow an untouched width, but they must not
+    /// overwrite a width explicitly chosen by the resize gesture.
+    private var textEditorCanonicalWrapWidthWasExplicitlyResized = false
     private var textEditorFieldPlacementAnchorInDocument: CGPoint?
     private var textEditorLayoutBounds: CGRect?
+    private var textEditorDocumentScaleInView: CGSize?
     private var textEditorSessionFont: NSFont?
+    private var textEditorSessionFontRequest: TextEditorFontRequest?
+    private var textEditorRendererGeneration: TextEditorRendererGeneration?
+    /// Fixed TextKit paragraph advance for the current canonical layout plan.
+    /// This is text-dependent because fallback glyphs can increase the plan's
+    /// shared line height without changing the annotation's primary font.
+    private var textEditorCanonicalLineAdvance: CGFloat?
     private var textEditorSessionBaselineOffset: CGFloat?
     private var textEditorPresentationLayout: TextEditorPresentationLayout?
     private var textEditorGeometryConfigurationCount = 0
@@ -207,6 +312,11 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     private var isAnnotationEditingEnabled = true
     private var isReadOnlyWindowDragArmed = false
     private var isWindowDragInProgress = false
+    private var pendingRegionBodyMoveMouseDown: NSEvent?
+    private var regionBodyMoveStartScreenPoint: CGPoint?
+    private var regionBodyMoveHasDragged = false
+    private var pendingRegionDoubleClickCopy = false
+    private var lastEmptyRegionClick: (timestamp: TimeInterval, screenPoint: CGPoint)?
     private var windowDragObservationGeneration: UInt = 0
     private var selectionMoveCursorObservationGeneration: UInt = 0
     private var regionDraftViewport: RegionDraftViewport?
@@ -220,6 +330,58 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     var hasActiveLineWidthEditing: Bool { lineWidthEditingState != nil }
 
 #if DEBUG
+    private func requiredTextEditorFontForRegression(
+        _ state: TextEditingState
+    ) -> NSFont {
+        do {
+            return try textEditorFont(for: state)
+        } catch {
+            preconditionFailure(
+                "Text regression fixture could not resolve its required font: \(error)"
+            )
+        }
+    }
+
+    private func requiredRendererReadyTextLayoutForRegression(
+        baselineAnchor: CGPoint,
+        text: String,
+        style: AnnotationStyle,
+        maximumWrapWidth: CGFloat? = nil
+    ) -> AnnotationTextLayoutResolution {
+        do {
+            return try AnnotationTextLayout.newTextLayout(
+                baselineAnchor: baselineAnchor,
+                text: text,
+                style: style,
+                maximumWrapWidth: maximumWrapWidth
+            )
+        } catch {
+            preconditionFailure(
+                "Text regression fixture could not resolve renderer-ready layout: \(error)"
+            )
+        }
+    }
+
+    private func requiredRendererReadyTextPayloadForRegression(
+        text: String,
+        style: AnnotationStyle,
+        proposedWrapWidth: CGFloat,
+        chromeMode: AnnotationTextLayoutPayload.ChromeMode
+    ) -> AnnotationTextLayoutPayload {
+        do {
+            return try AnnotationTextLayout.safeLayoutPayload(
+                for: text,
+                style: style,
+                proposedWrapWidth: proposedWrapWidth,
+                chromeMode: chromeMode
+            )
+        } catch {
+            preconditionFailure(
+                "Text regression fixture could not resolve renderer-ready payload: \(error)"
+            )
+        }
+    }
+
     var debugIsAnnotationEditingEnabled: Bool { isAnnotationEditingEnabled }
     var debugPresentedSelectionHandleCount: Int {
         guard isAnnotationEditingEnabled else { return 0 }
@@ -660,35 +822,69 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         guard let overflowLineOrigin = textEditorLineOriginInView(editor),
               let documentView = textEditorDocumentView,
               let presentation = textEditorPresentationLayout,
-              let insertionX = textEditorInsertionX(editor)
+              let overflowFrameView = textEditorFrameView,
+              let insertionX = textEditorInsertionX(editor),
+              let overflowEditingState = textEditingState
         else {
-            preconditionFailure("Text stability regression could not inspect horizontal overflow.")
+            preconditionFailure("Text stability regression could not inspect wrapping of long inline text.")
+        }
+        guard let wrapWidth = textEditorCanonicalWrapWidthInDocument else {
+            preconditionFailure("Text stability regression lost its canonical wrap width.")
         }
         precondition(
             abs(overflowLineOrigin.y - initialLineOrigin.y) < 0.01,
-            "Horizontal text overflow changed the calibrated baseline."
+            "Wrapping long inline text changed the calibrated first-line baseline."
+        )
+        let horizontalScrollOffset = presentation.documentBaseOrigin.x
+            - documentView.frame.minX
+        let overflowFieldFrame = overflowFrameView.fieldFrame(in: self)
+        precondition(
+            overflowLineOrigin.x >= overflowFieldFrame.minX - 0.5
+                && overflowLineOrigin.x <= overflowFieldFrame.maxX + 0.5,
+            "Wrapping must keep the first line reachable inside the viewport."
         )
         precondition(
-            documentView.frame.minX < presentation.documentBaseOrigin.x - 1,
-            "Long inline text did not enter deterministic horizontal scrolling."
+            overflowFrameView.fieldFrame(in: self).height > initialFrame.height + 1,
+            "Long inline text must grow the field downward when it wraps."
         )
         let visibleInsertionX = documentView.frame.minX + insertionX
+        let insertionInset = textEditorChromeInsetsInView(
+            for: overflowEditingState
+        ).width
         precondition(
-            visibleInsertionX >= InlineTextEditorMetrics.horizontalPadding - 0.5
+            visibleInsertionX >= insertionInset - 0.5
                 && visibleInsertionX <= container.bounds.maxX
-                    - InlineTextEditorMetrics.horizontalPadding + 0.5,
-            "Horizontal scrolling did not keep the insertion point visible: visibleX=\(visibleInsertionX), documentX=\(documentView.frame.minX), insertionX=\(insertionX), viewportWidth=\(container.bounds.width)."
+                    - insertionInset + 0.5,
+            "Wrapping did not keep the insertion point visible: visibleX=\(visibleInsertionX), documentX=\(documentView.frame.minX), insertionX=\(insertionX), viewportWidth=\(container.bounds.width)."
         )
-        guard let overflowEditingState = textEditingState else {
-            preconditionFailure("Text stability regression lost its canonical overflow state.")
-        }
+        precondition(
+            AnnotationTextLayout.visualLineCount(
+                in: editor.string,
+                style: overflowEditingState.style,
+                wrapWidth: wrapWidth
+            ) > 1,
+            "Long inline text must wrap onto additional visible lines."
+        )
         let lineOriginBeforeCommit = renderedTextLineOriginInView(
             state: overflowEditingState,
-            text: editor.string
+            text: editor.string,
+            layout: textEditorLayoutPayload
         )
         precondition(
-            abs(overflowLineOrigin.x - lineOriginBeforeCommit.x) > 1,
-            "Overflow commit regression requires a visibly scrolled editor origin."
+            abs(
+                overflowLineOrigin.x
+                    + horizontalScrollOffset
+                    - lineOriginBeforeCommit.x
+            ) < 0.01
+                && abs(overflowLineOrigin.y - lineOriginBeforeCommit.y) < 0.01,
+            "Wrapped editor origin must match the renderer after explicit scroll conversion."
+        )
+        assertTextEditorLinesMatchRenderer(
+            editor,
+            state: overflowEditingState,
+            layout: textEditorLayoutPayload,
+            canonicalHorizontalOffset: horizontalScrollOffset,
+            context: "wrapped mixed-script text"
         )
         let baselineCorrections = textEditorBaselineCorrectionCount
         precondition(
@@ -707,14 +903,17 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             itemID: committedItem.id,
             anchor: AnnotationTextLayout.alignmentAnchor(
                 in: committedRect,
-                style: committedItem.style
+                text: committedText,
+                style: committedItem.style,
+                layout: committedItem.textLayout
             ),
             style: committedItem.style,
             transform: committedItem.transform
         )
         let committedLineOrigin = renderedTextLineOriginInView(
             state: committedState,
-            text: committedText
+            text: committedText,
+            layout: committedItem.textLayout
         )
         precondition(
             max(
@@ -763,14 +962,19 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             replacementRange: NSRange(location: activeOverflowStart, length: 0)
         )
         guard let activeOverflowDocumentView = textEditorDocumentView,
-              let activeOverflowPresentation = textEditorPresentationLayout
+              let activeOverflowPresentation = textEditorPresentationLayout,
+              let activeOverflowState = textEditingState
         else {
             preconditionFailure("Active resize overflow regression lost its document viewport.")
         }
-        precondition(
-            activeOverflowDocumentView.frame.minX
-                < activeOverflowPresentation.documentBaseOrigin.x - 1,
-            "Active resize regression requires horizontally scrolled text."
+        let activeOverflowScroll = activeOverflowPresentation.documentBaseOrigin.x
+            - activeOverflowDocumentView.frame.minX
+        assertTextEditorLinesMatchRenderer(
+            existingEditor,
+            state: activeOverflowState,
+            layout: textEditorLayoutPayload,
+            canonicalHorizontalOffset: activeOverflowScroll,
+            context: "active-resize wrapped overflow"
         )
         let fontSizeAfterSouthEast = runActiveTextResizeRegression(
             handle: .southEast,
@@ -816,7 +1020,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         }
         let activeLineOriginBeforeCommit = renderedTextLineOriginInView(
             state: activeEditingStateBeforeCommit,
-            text: existingEditor.string
+            text: existingEditor.string,
+            layout: textEditorLayoutPayload
         )
         _ = endTextEditingIfNeeded(reason: .focusChange)
         guard let activeResizedItem = session.controller.document.annotations.first(where: {
@@ -830,14 +1035,17 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             itemID: activeResizedItem.id,
             anchor: AnnotationTextLayout.alignmentAnchor(
                 in: activeResizedRect,
-                style: activeResizedItem.style
+                text: activeResizedText,
+                style: activeResizedItem.style,
+                layout: activeResizedItem.textLayout
             ),
             style: activeResizedItem.style,
             transform: activeResizedItem.transform
         )
         let activeLineOriginAfterCommit = renderedTextLineOriginInView(
             state: activeResizedState,
-            text: activeResizedText
+            text: activeResizedText,
+            layout: activeResizedItem.textLayout
         )
         precondition(
             hypot(
@@ -1021,16 +1229,24 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         let expectedSubpointFontSize = committedItem.style.fontSize
             * bounds.height / visible.height
             * subpointScale
-        let subpointFont = textEditorFont(for: subpointState)
+        let subpointFont = requiredTextEditorFontForRegression(subpointState)
         precondition(
             expectedSubpointFontSize < 1
-                && abs(subpointFont.pointSize - expectedSubpointFontSize) < 0.000_1,
-            "Inline TextKit typography must reproduce renderer font sizes below one presentation point."
+                && abs(subpointFont.pointSize - committedItem.style.fontSize) < 0.000_1
+                && abs(
+                    textEditorFieldHeightInView(
+                        fromUntransformedDocumentHeight: subpointFont.pointSize,
+                        state: subpointState
+                    ) - expectedSubpointFontSize
+                ) < 0.000_1,
+            "Inline TextKit must keep canonical typography while the document host projects it below one presentation point."
         )
         runInitiallyOverflowingTextAlignmentRegression(style: committedItem.style)
+        runLegacyOverhangNoOpTextResizeRegression(eventNumberBase: 1_200)
+        runInlineTextPointerAndLineBreakRegression()
         runInlineTextEditorAdmissionRegression()
         AppLog.capture.notice(
-            "Inline text stability regression passed: characters=7, background=clear, origin=\(initialLineOrigin.x, privacy: .public),\(initialLineOrigin.y, privacy: .public), baselineCorrections=\(baselineCorrections, privacy: .public), commitError=\(self.lastTextCommitBaselineError?.y ?? .infinity, privacy: .public), activeResizeHandles=3, activeResizeFrames=58, selectedResizeHandles=3, selectedDeleteControls=1, selectedMoveCursorCycles=2, initialOverflowAlignments=3, uniformScaleInputCases=6"
+            "Inline text stability regression passed: characters=7, background=clear, origin=\(initialLineOrigin.x, privacy: .public),\(initialLineOrigin.y, privacy: .public), baselineCorrections=\(baselineCorrections, privacy: .public), commitError=\(self.lastTextCommitBaselineError?.y ?? .infinity, privacy: .public), activeResizeHandles=3, activeResizeFrames=58, selectedResizeHandles=3, selectedDeleteControls=1, selectedMoveCursorCycles=2, initialOverflowAlignments=3, fractionalScaleMultilineCases=12"
         )
     }
 
@@ -1227,11 +1443,24 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         let overflowText = String(repeating: "W中", count: 48)
         let appendedOverflowText = "宽W"
 
+        func encodedItem(_ item: AnnotationItem) -> Data {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            do {
+                return try encoder.encode(item)
+            } catch {
+                preconditionFailure(
+                    "Initial-overflow regression could not encode its no-op fixture: \(error)"
+                )
+            }
+        }
+
         func assertCanonicalPresentation(
             context: String,
             expectedAnchor: CGPoint,
             expectedFieldFrame: CGRect,
-            requiresOverflow: Bool?
+            requiresOverflow: Bool?,
+            allowsViewportGrowth: Bool = false
         ) -> CGPoint {
             updateTextEditorFrame(scrollsToInsertionPoint: true)
             updateTextEditorLayout(scrollsToInsertionPoint: true)
@@ -1243,16 +1472,22 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                   let documentView = textEditorDocumentView,
                   let presentation = textEditorPresentationLayout,
                   let state = textEditingState,
-                  let font = textEditorSessionFont,
                   let visibleLineOrigin = textEditorLineOriginInView(editor)
             else {
                 preconditionFailure(
                     "Initial-overflow regression lost editor geometry during \(context)."
                 )
             }
+            guard let wrapWidthInDocument = textEditorCanonicalWrapWidthInDocument else {
+                preconditionFailure(
+                    "Initial-overflow regression lost semantic wrap ownership during \(context)."
+                )
+            }
+            let wrapWidth = wrapWidthInDocument
             let renderedLineOrigin = renderedTextLineOriginInView(
                 state: state,
-                text: editor.string
+                text: editor.string,
+                layout: textEditorLayoutPayload
             )
             let horizontalScrollOffset = presentation.documentBaseOrigin.x
                 - documentView.frame.minX
@@ -1267,6 +1502,13 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 ) < 0.01,
                 "TextKit and Core Text lost their canonical origin during \(context): textKit=\(canonicalTextKitOrigin), renderer=\(renderedLineOrigin), scroll=\(horizontalScrollOffset)."
             )
+            assertTextEditorLinesMatchRenderer(
+                editor,
+                state: state,
+                layout: textEditorLayoutPayload,
+                canonicalHorizontalOffset: horizontalScrollOffset,
+                context: context
+            )
             precondition(
                 hypot(
                     state.anchor.x - expectedAnchor.x,
@@ -1274,71 +1516,88 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 ) < 0.001,
                 "Canonical text anchor changed during \(context)."
             )
+            let currentField = frameView.fieldFrame(in: self)
+            if allowsViewportGrowth {
+                let anchoredEdgeError: CGFloat
+                switch state.style.textAlignment {
+                case .leading:
+                    anchoredEdgeError = abs(expectedFieldFrame.minX - currentField.minX)
+                case .center:
+                    anchoredEdgeError = abs(expectedFieldFrame.midX - currentField.midX)
+                case .trailing:
+                    anchoredEdgeError = abs(expectedFieldFrame.maxX - currentField.maxX)
+                }
+                precondition(
+                    currentField.width + 0.001 >= expectedFieldFrame.width
+                        && anchoredEdgeError < 0.001
+                        && abs(expectedFieldFrame.maxY - currentField.maxY) < 0.001,
+                    "Growing text must expand its viewport monotonically around the same placement anchor during \(context)."
+                )
+            } else {
+                precondition(
+                    abs(expectedFieldFrame.minX - currentField.minX) < 0.001
+                        && abs(expectedFieldFrame.width - currentField.width) < 0.001
+                        && abs(expectedFieldFrame.maxY - currentField.maxY) < 0.001,
+                    "Wrapping must keep the field's leading edge, width and first-line top fixed during \(context)."
+                )
+            }
             precondition(
-                maxFrameDelta(expectedFieldFrame, frameView.fieldFrame(in: self)) < 0.001,
-                "Stable text field changed while its content changed during \(context)."
+                frameView.fieldFrame(in: self).width
+                    <= min(
+                        InlineTextEditorMetrics.maximumViewportWidth,
+                        availableFieldBounds.width
+                    ) + 0.01,
+                "The interaction viewport exceeded its usability bound during \(context)."
             )
-            let measuredWidth = AnnotationTextLayout.lineMetrics(
+            precondition(
+                abs((editor.textContainer?.containerSize.width ?? 0) - wrapWidth) < 0.01,
+                "TextKit did not retain the persisted semantic wrap width during \(context)."
+            )
+            let measuredWidth = AnnotationTextLayout.maximumLineWidth(
                 for: editor.string,
-                style: state.style,
-                size: font.pointSize
-            ).width
+                style: state.style
+            )
             if requiresOverflow == true {
                 precondition(
-                    measuredWidth
-                        > container.bounds.width
-                            - InlineTextEditorMetrics.horizontalPadding * 2,
-                    "Regression text must remain overflowed during \(context)."
+                    measuredWidth > wrapWidth + 0.01,
+                    "Regression text must remain wider than the wrap width during \(context)."
                 )
-                guard let insertionX = textEditorInsertionX(editor) else {
-                    preconditionFailure(
-                        "Initial-overflow regression lost the insertion point during \(context)."
-                    )
-                }
-                let visibleInsertionX = documentView.frame.minX + insertionX
                 precondition(
-                    visibleInsertionX
-                        >= InlineTextEditorMetrics.horizontalPadding - 0.5
-                        && visibleInsertionX
-                            <= container.bounds.maxX
-                                - InlineTextEditorMetrics.horizontalPadding + 0.5,
-                    "Overflow scrolling lost the insertion point during \(context): visibleX=\(visibleInsertionX), viewport=\(container.bounds)."
+                    AnnotationTextLayout.visualLineCount(
+                        in: editor.string,
+                        style: state.style,
+                        wrapWidth: wrapWidth
+                    ) > 1,
+                    "Overlong text must wrap onto additional lines during \(context)."
                 )
             } else if requiresOverflow == false {
                 precondition(
-                    measuredWidth
-                        <= container.bounds.width
-                            - InlineTextEditorMetrics.horizontalPadding * 2,
-                    "Regression text must fit the viewport during \(context)."
+                    measuredWidth <= wrapWidth + 0.5,
+                    "Regression text must fit the wrap width during \(context)."
                 )
-                precondition(
-                    abs(horizontalScrollOffset) < 0.01,
-                    "A fitting line retained horizontal scroll during \(context): offset=\(horizontalScrollOffset), base=\(presentation.documentBaseOrigin.x), visibleOrigin=\(documentView.frame.minX), width=\(measuredWidth), viewport=\(container.bounds.width)."
-                )
-            } else if abs(horizontalScrollOffset) > 0.01 {
-                guard let insertionX = textEditorInsertionX(editor) else {
-                    preconditionFailure(
-                        "Scaled text regression lost the insertion point during \(context)."
-                    )
-                }
+            }
+            if let insertionX = textEditorInsertionX(editor) {
                 let visibleInsertionX = documentView.frame.minX + insertionX
+                let insertionInset = textEditorChromeInsetsInView(
+                    for: state
+                ).width
                 precondition(
                     visibleInsertionX
-                        >= InlineTextEditorMetrics.horizontalPadding - 0.5
+                        >= insertionInset - 0.5
                         && visibleInsertionX
                             <= container.bounds.maxX
-                                - InlineTextEditorMetrics.horizontalPadding + 0.5,
-                    "Scaled text scrolling lost the insertion point during \(context)."
+                                - insertionInset + 0.5,
+                    "Wrapping lost the insertion point during \(context): visibleX=\(visibleInsertionX), viewport=\(container.bounds)."
                 )
             }
             return renderedLineOrigin
         }
 
-        for alignment in [
+        for (alignmentIndex, alignment) in [
             AnnotationTextAlignment.leading,
             .center,
             .trailing
-        ] {
+        ].enumerated() {
             var style = sourceStyle
             style.fontName = "Menlo-Regular"
             style.fontSize = 18
@@ -1360,18 +1619,22 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 x: anchorXInView,
                 y: availableFieldBounds.midY
             ))
+            let layout = requiredRendererReadyTextLayoutForRegression(
+                baselineAnchor: anchor,
+                text: overflowText,
+                style: style
+            )
             let item = AnnotationItem(
                 kind: .text,
                 zIndex: session.controller.document.annotations.count,
-                geometry: .rect(AnnotationTextLayout.annotationRect(
-                    baselineAnchor: anchor,
-                    text: overflowText,
-                    style: style
-                )),
+                geometry: .rect(layout.rect),
                 style: style,
-                text: overflowText
+                text: overflowText,
+                textLayout: layout.payload
             )
             session.controller.add(item)
+            let itemBytesBeforeEditing = encodedItem(item)
+            let undoCountBeforeEditing = session.controller.undoStack.count
             beginTextEditing(item: item)
             guard let editor = textEditor,
                   let frameView = textEditorFrameView,
@@ -1386,7 +1649,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             if alignment == .leading {
                 let contentAnchor = textEditorAlignmentAnchor(
                     for: state,
-                    text: editor.string
+                    text: editor.string,
+                    layout: textEditorLayoutPayload
                 )
                 let fieldPlacementAnchor = viewPoint(
                     fromDocumentPoint: fieldPlacementAnchorInDocument
@@ -1404,7 +1668,21 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 context: "initial \(alignment) overflow",
                 expectedAnchor: anchor,
                 expectedFieldFrame: initialFieldFrame,
-                requiresOverflow: true
+                requiresOverflow: false
+            )
+            editor.setSelectedRange(NSRange(location: 0, length: 0))
+            _ = assertCanonicalPresentation(
+                context: "initial \(alignment) overflow at first caret",
+                expectedAnchor: anchor,
+                expectedFieldFrame: initialFieldFrame,
+                requiresOverflow: false
+            )
+            editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
+            _ = assertCanonicalPresentation(
+                context: "initial \(alignment) overflow at final caret",
+                expectedAnchor: anchor,
+                expectedFieldFrame: initialFieldFrame,
+                requiresOverflow: false
             )
 
             editor.insertText(
@@ -1430,7 +1708,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 context: "shrinking but still-overflowed \(alignment) text",
                 expectedAnchor: anchor,
                 expectedFieldFrame: initialFieldFrame,
-                requiresOverflow: true
+                requiresOverflow: false
             )
             _ = endTextEditingIfNeeded(reason: .focusChange)
             guard let committedItem = session.controller.document.annotations.first(where: {
@@ -1444,7 +1722,9 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             }
             let committedAnchor = AnnotationTextLayout.alignmentAnchor(
                 in: committedRect,
-                style: committedItem.style
+                text: committedText,
+                style: committedItem.style,
+                layout: committedItem.textLayout
             )
             let committedState = TextEditingState(
                 itemID: committedItem.id,
@@ -1454,10 +1734,14 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             )
             let lineOriginAfterCommit = renderedTextLineOriginInView(
                 state: committedState,
-                text: committedText
+                text: committedText,
+                layout: committedItem.textLayout
             )
             precondition(
-                committedText == overflowText
+                committedItem == item
+                    && encodedItem(committedItem) == itemBytesBeforeEditing
+                    && session.controller.undoStack.count == undoCountBeforeEditing
+                    && committedText == overflowText
                     && hypot(
                         committedAnchor.x - anchor.x,
                         committedAnchor.y - anchor.y
@@ -1470,7 +1754,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                         abs(lastTextCommitBaselineError?.x ?? .infinity),
                         abs(lastTextCommitBaselineError?.y ?? .infinity)
                     ) < 0.01,
-                "Focus-change commit moved initially overflowing \(alignment) text."
+                "No-op focus-change commit changed initially overflowing \(alignment) text or its undo history."
             )
 
             if alignment == .trailing {
@@ -1513,7 +1797,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     context: "trailing fit-to-overflow transition",
                     expectedAnchor: anchor,
                     expectedFieldFrame: transitionFieldFrame,
-                    requiresOverflow: true
+                    requiresOverflow: false
                 )
                 _ = endTextEditingIfNeeded(reason: .focusChange)
                 precondition(
@@ -1525,6 +1809,63 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 )
             }
 
+            guard let wideItem = session.controller.document.annotations.first(where: {
+                $0.id == item.id
+            }) else {
+                preconditionFailure("Wide semantic resize regression lost its probe item.")
+            }
+            beginTextEditing(item: wideItem)
+            guard let wideStateBeforeResize = textEditingState,
+                  let wideViewportBeforeResize = textEditorContainer,
+                  let wideCanonicalBeforeResize = textEditorCanonicalWrapWidthInDocument
+            else {
+                preconditionFailure("Wide semantic resize regression lost its editor state.")
+            }
+            let wideViewportWidthBeforeResize = wideViewportBeforeResize.bounds.width
+            let wideFontBeforeResize = wideStateBeforeResize.style.fontSize
+            let wideFontAfterResize = runActiveTextResizeRegression(
+                handle: .southEast,
+                pointerDelta: CGPoint(x: 16, y: -8),
+                steps: 4,
+                eventNumberBase: 800 + alignmentIndex * 20
+            )
+            guard let wideCanonicalAfterResize = textEditorCanonicalWrapWidthInDocument,
+                  let wideViewportAfterResize = textEditorContainer,
+                  let widePayloadAfterResize = textEditorLayoutPayload
+            else {
+                preconditionFailure("Wide semantic resize regression lost resized ownership.")
+            }
+            let expectedWideCanonical = wideCanonicalBeforeResize
+                * wideFontAfterResize / wideFontBeforeResize
+            let completeWidePresentationWidth = AnnotationTextLayout.presentationFieldWidth(
+                layout: widePayloadAfterResize,
+                canvasScale: textEditorCanvasScaleX,
+                uniformTransformScale: abs(wideStateBeforeResize.transform.scaleX)
+            )
+            precondition(
+                abs(wideCanonicalAfterResize - expectedWideCanonical) < 0.01
+                    && wideViewportWidthBeforeResize
+                        <= InlineTextEditorMetrics.maximumViewportWidth + 0.01
+                    && wideViewportAfterResize.bounds.width
+                        <= InlineTextEditorMetrics.maximumViewportWidth + 0.01
+                    && completeWidePresentationWidth
+                        > wideViewportAfterResize.bounds.width + 0.01,
+                "Wide \(alignment) resize must scale semantic width while keeping the viewport capped."
+            )
+            _ = endTextEditingIfNeeded(reason: .focusChange)
+            guard let resizedWideItem = session.controller.document.annotations.first(where: {
+                $0.id == item.id
+            }) else {
+                preconditionFailure("Wide semantic resize regression lost its committed item.")
+            }
+            precondition(
+                abs(
+                    AnnotationTextLayout.canonicalWrapWidth(for: resizedWideItem)
+                        - wideCanonicalAfterResize
+                ) < 0.01,
+                "Wide semantic resize commit replaced canonical width with the capped viewport."
+            )
+
             session.controller.selectedItemIDs = [item.id]
             session.controller.deleteSelection()
             precondition(
@@ -1533,9 +1874,17 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             )
         }
 
-        let scaledText = "Scale中"
+        // Include a raw form-feed followed by more text. TextKit's default
+        // action changes containers, whereas the canonical planner treats it
+        // as an LF without changing document UTF-16 ranges.
+        let scaledText = "Scale中 first\u{000C}Second mixed 行\nThird line 文"
         let scaledAppend = "WWWWWW"
-        for uniformScale in [CGFloat(0.5), 1.5] {
+        for uniformScale in [
+            CGFloat(0.75),
+            CGFloat(1.25),
+            CGFloat(4) / 3,
+            CGFloat(1.5)
+        ] {
             for alignment in [
                 AnnotationTextAlignment.leading,
                 .center,
@@ -1560,19 +1909,23 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     scaleX: uniformScale,
                     scaleY: uniformScale
                 )
+                let layout = requiredRendererReadyTextLayoutForRegression(
+                    baselineAnchor: anchor,
+                    text: scaledText,
+                    style: style
+                )
                 let item = AnnotationItem(
                     kind: .text,
                     zIndex: session.controller.document.annotations.count,
-                    geometry: .rect(AnnotationTextLayout.annotationRect(
-                        baselineAnchor: anchor,
-                        text: scaledText,
-                        style: style
-                    )),
+                    geometry: .rect(layout.rect),
                     style: style,
                     transform: transform,
-                    text: scaledText
+                    text: scaledText,
+                    textLayout: layout.payload
                 )
                 session.controller.add(item)
+                let itemBytesBeforeEditing = encodedItem(item)
+                let undoCountBeforeEditing = session.controller.undoStack.count
                 beginTextEditing(item: item)
                 guard let editor = textEditor,
                       let frameView = textEditorFrameView,
@@ -1582,10 +1935,41 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                         "Could not open uniformly scaled \(alignment) text at \(uniformScale)x."
                     )
                 }
+                guard let scaledWrapWidth = textEditorCanonicalWrapWidthInDocument else {
+                    preconditionFailure(
+                        "Uniform-scale multiline regression lost its canonical wrap width."
+                    )
+                }
+                let scaledPlan = AnnotationTextLayout.layoutPlan(
+                    in: editor.string,
+                    style: initialState.style,
+                    wrapWidth: scaledWrapWidth
+                )
+                let scaledTextKitLines = textEditorLineSnapshotsInView(editor)
+                let expectedBaselineAdvanceInView = textEditorFieldHeightInView(
+                    fromUntransformedDocumentHeight: scaledPlan.lineAdvance,
+                    state: initialState
+                )
+                precondition(
+                    scaledTextKitLines.count >= 3
+                        && zip(
+                            scaledTextKitLines,
+                            scaledTextKitLines.dropFirst()
+                        ).allSatisfy { pair in
+                            let (upper, lower) = pair
+                            return abs(
+                                upper.originInView.y
+                                    - lower.originInView.y
+                                    - expectedBaselineAdvanceInView
+                            ) < 0.01
+                        },
+                    "Uniform-scale fixture must expose at least three live TextKit baselines at the canonical line advance for \(alignment) at \(uniformScale)x."
+                )
                 let initialFieldFrame = frameView.fieldFrame(in: self)
                 let initialContentAnchor = textEditorAlignmentAnchor(
                     for: initialState,
-                    text: editor.string
+                    text: editor.string,
+                    layout: textEditorLayoutPayload
                 )
                 let initialRectWidth = AnnotationTextLayout.annotationRect(
                     baselineAnchor: anchor,
@@ -1595,7 +1979,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 editor.setSelectedRange(
                     NSRange(location: editor.string.utf16.count, length: 0)
                 )
-                _ = assertCanonicalPresentation(
+                let initialLineOrigin = assertCanonicalPresentation(
                     context: "initial \(uniformScale)x \(alignment) text",
                     expectedAnchor: anchor,
                     expectedFieldFrame: initialFieldFrame,
@@ -1613,7 +1997,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     context: "wider \(uniformScale)x \(alignment) text",
                     expectedAnchor: anchor,
                     expectedFieldFrame: initialFieldFrame,
-                    requiresOverflow: nil
+                    requiresOverflow: nil,
+                    allowsViewportGrowth: true
                 )
                 guard let widenedState = textEditingState else {
                     preconditionFailure(
@@ -1622,7 +2007,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 }
                 let widenedContentAnchor = textEditorAlignmentAnchor(
                     for: widenedState,
-                    text: editor.string
+                    text: editor.string,
+                    layout: textEditorLayoutPayload
                 )
                 let widenedRectWidth = AnnotationTextLayout.annotationRect(
                     baselineAnchor: anchor,
@@ -1654,6 +2040,77 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     "Uniform-scale presentation anchor did not follow renderer geometry for \(alignment) at \(uniformScale)x."
                 )
 
+                editor.insertText(
+                    "",
+                    replacementRange: NSRange(
+                        location: editor.string.utf16.count - scaledAppend.utf16.count,
+                        length: scaledAppend.utf16.count
+                    )
+                )
+                editor.setSelectedRange(
+                    NSRange(location: editor.string.utf16.count, length: 0)
+                )
+                let restoredLineOrigin = assertCanonicalPresentation(
+                    context: "restored \(uniformScale)x \(alignment) no-op text",
+                    expectedAnchor: anchor,
+                    expectedFieldFrame: initialFieldFrame,
+                    requiresOverflow: nil,
+                    allowsViewportGrowth: true
+                )
+                _ = endTextEditingIfNeeded(reason: .focusChange)
+                guard let restoredItem = session.controller.document.annotations.first(where: {
+                    $0.id == item.id
+                }) else {
+                    preconditionFailure(
+                        "Uniform-scale no-op regression lost \(alignment) text."
+                    )
+                }
+                precondition(
+                    restoredItem == item
+                        && encodedItem(restoredItem) == itemBytesBeforeEditing
+                        && session.controller.undoStack.count == undoCountBeforeEditing
+                        && hypot(
+                            restoredLineOrigin.x - initialLineOrigin.x,
+                            restoredLineOrigin.y - initialLineOrigin.y
+                        ) < 0.01
+                        && max(
+                            abs(lastTextCommitBaselineError?.x ?? .infinity),
+                            abs(lastTextCommitBaselineError?.y ?? .infinity)
+                        ) < 0.01,
+                    "Uniform-scale grow-and-restore changed \(alignment) bytes or undo history at \(uniformScale)x."
+                )
+
+                beginTextEditing(item: restoredItem)
+                guard let reopenedEditor = textEditor else {
+                    preconditionFailure(
+                        "Uniform-scale regression could not reopen \(alignment) text after no-op."
+                    )
+                }
+                reopenedEditor.setSelectedRange(
+                    NSRange(location: reopenedEditor.string.utf16.count, length: 0)
+                )
+                reopenedEditor.insertText(
+                    scaledAppend,
+                    replacementRange: NSRange(location: NSNotFound, length: 0)
+                )
+                reopenedEditor.setSelectedRange(
+                    NSRange(location: reopenedEditor.string.utf16.count, length: 0)
+                )
+                let finalLineOriginBeforeCommit = assertCanonicalPresentation(
+                    context: "reopened wider \(uniformScale)x \(alignment) text",
+                    expectedAnchor: anchor,
+                    expectedFieldFrame: initialFieldFrame,
+                    requiresOverflow: nil,
+                    allowsViewportGrowth: true
+                )
+                precondition(
+                    hypot(
+                        finalLineOriginBeforeCommit.x - lineOriginBeforeCommit.x,
+                        finalLineOriginBeforeCommit.y - lineOriginBeforeCommit.y
+                    ) < 0.01,
+                    "Reopening uniformly scaled text changed its widened renderer origin."
+                )
+
                 _ = endTextEditingIfNeeded(reason: .focusChange)
                 guard let committedItem = session.controller.document.annotations.first(where: {
                     $0.id == item.id
@@ -1666,7 +2123,9 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 }
                 let committedAnchor = AnnotationTextLayout.alignmentAnchor(
                     in: committedRect,
-                    style: committedItem.style
+                    text: committedText,
+                    style: committedItem.style,
+                    layout: committedItem.textLayout
                 )
                 let committedState = TextEditingState(
                     itemID: committedItem.id,
@@ -1676,15 +2135,16 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 )
                 let lineOriginAfterCommit = renderedTextLineOriginInView(
                     state: committedState,
-                    text: committedText
+                    text: committedText,
+                    layout: committedItem.textLayout
                 )
                 precondition(
                     committedText == scaledText + scaledAppend
                         && committedAnchor == anchor
                         && committedItem.transform == transform
                         && hypot(
-                            lineOriginAfterCommit.x - lineOriginBeforeCommit.x,
-                            lineOriginAfterCommit.y - lineOriginBeforeCommit.y
+                            lineOriginAfterCommit.x - finalLineOriginBeforeCommit.x,
+                            lineOriginAfterCommit.y - finalLineOriginBeforeCommit.y
                         ) < 0.01
                         && max(
                             abs(lastTextCommitBaselineError?.x ?? .infinity),
@@ -1711,17 +2171,19 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             scaleX: 1.5,
             scaleY: 1.5
         )
+        let resizeLayout = requiredRendererReadyTextLayoutForRegression(
+            baselineAnchor: resizeAnchor,
+            text: "ResizeScale",
+            style: resizeStyle
+        )
         let resizeItem = AnnotationItem(
             kind: .text,
             zIndex: session.controller.document.annotations.count,
-            geometry: .rect(AnnotationTextLayout.annotationRect(
-                baselineAnchor: resizeAnchor,
-                text: "ResizeScale",
-                style: resizeStyle
-            )),
+            geometry: .rect(resizeLayout.rect),
             style: resizeStyle,
             transform: resizeTransform,
-            text: "ResizeScale"
+            text: "ResizeScale",
+            textLayout: resizeLayout.payload
         )
         session.controller.add(resizeItem)
         beginTextEditing(item: resizeItem)
@@ -1772,14 +2234,17 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             itemID: committedResizeItem.id,
             anchor: AnnotationTextLayout.alignmentAnchor(
                 in: committedResizeRect,
-                style: committedResizeItem.style
+                text: committedResizeText,
+                style: committedResizeItem.style,
+                layout: committedResizeItem.textLayout
             ),
             style: committedResizeItem.style,
             transform: committedResizeItem.transform
         )
         let resizedLineOriginAfterCommit = renderedTextLineOriginInView(
             state: committedResizeState,
-            text: committedResizeText
+            text: committedResizeText,
+            layout: committedResizeItem.textLayout
         )
         precondition(
             committedResizeText == resizedText
@@ -1802,6 +2267,92 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         syncSelectedTextChrome()
     }
 
+    private func runInlineTextPointerAndLineBreakRegression() {
+        _ = endTextEditingIfNeeded(reason: .externalAction)
+        var style = session.defaultStyle(for: .text)
+        style.fontName = "Menlo-Regular"
+        style.fontSize = 18
+        let anchor = documentPoint(fromViewPoint: CGPoint(
+            x: bounds.midX,
+            y: bounds.midY
+        ))
+        installTextEditor(
+            text: "AB",
+            state: TextEditingState(
+                itemID: nil,
+                anchor: anchor,
+                style: style,
+                transform: AnnotationTransform()
+            )
+        )
+        guard let editor = textEditor,
+              let frameView = textEditorFrameView,
+              let initialLineOrigin = textEditorLineOriginInView(editor)
+        else {
+            preconditionFailure("Pointer and line-break regression could not start the inline editor.")
+        }
+        let initialField = frameView.fieldFrame(in: self)
+        let clickPoint = CGPoint(x: initialField.midX, y: initialField.midY)
+        let framePoint = frameView.convert(clickPoint, from: self)
+        let fieldHit = frameView.hitTest(framePoint)
+        precondition(
+            fieldHit === editor,
+            "Clicking the active text field must hit the NSTextView, not \(String(describing: fieldHit.map { type(of: $0) }))."
+        )
+        let canvasHit = hitTest(clickPoint)
+        precondition(
+            canvasHit === editor,
+            "Canvas hit testing must route field clicks to the NSTextView, not \(String(describing: canvasHit.map { type(of: $0) }))."
+        )
+
+        editor.insertNewlineIgnoringFieldEditor(nil)
+        updateTextEditorLayout(scrollsToInsertionPoint: true)
+        layoutSubtreeIfNeeded()
+        window?.displayIfNeeded()
+        guard let brokenLineOrigin = textEditorLineOriginInView(editor) else {
+            preconditionFailure("Pointer and line-break regression lost the first-line origin after inserting a newline.")
+        }
+        precondition(
+            editor.string.contains("\n"),
+            "Shift-Return must insert a hard line break instead of committing the annotation."
+        )
+        precondition(
+            AnnotationTextLayout.lineCount(in: editor.string) == 2,
+            "A single line break must produce exactly two visual lines."
+        )
+        precondition(
+            abs(brokenLineOrigin.x - initialLineOrigin.x) < 0.01
+                && abs(brokenLineOrigin.y - initialLineOrigin.y) < 0.01,
+            "Inserting a line break moved the first-line origin from \(initialLineOrigin) to \(brokenLineOrigin)."
+        )
+        let grownField = frameView.fieldFrame(in: self)
+        precondition(
+            grownField.height > initialField.height + 1,
+            "A line break must grow the text field. initial=\(initialField.height), grown=\(grownField.height)."
+        )
+        precondition(
+            abs(grownField.maxY - initialField.maxY) < 0.51,
+            "A line break must keep the first-line top edge fixed. initialMaxY=\(initialField.maxY), grownMaxY=\(grownField.maxY)."
+        )
+
+        _ = endTextEditingIfNeeded(reason: .focusChange)
+        guard let committedItem = session.controller.document.annotations.last,
+              committedItem.kind == .text,
+              let committedText = committedItem.text
+        else {
+            preconditionFailure("Pointer and line-break regression did not commit the multiline annotation.")
+        }
+        precondition(
+            committedText.contains("\n"),
+            "Committing inline text must preserve hard line breaks instead of flattening them to spaces."
+        )
+        session.controller.selectedItemIDs = [committedItem.id]
+        session.controller.deleteSelection()
+        AppLog.capture.notice(
+            "Inline text pointer and line-break regression passed: fieldHit=editor, firstLineOriginStable=true, fieldGrewDownward=true, committedNewline=true"
+        )
+    }
+
     private func runInlineTextEditorAdmissionRegression() {
         precondition(textEditor == nil, "Canvas admission regression requires no active editor.")
         let originalBounds = bounds
@@ -1818,6 +2369,67 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             )
         }
         bounds = originalBounds
+
+        var probeStyle = session.defaultStyle(for: .text)
+        probeStyle.fontName = "Menlo-Regular"
+        probeStyle.fontSize = 18
+        probeStyle.textAlignment = .center
+        let probeText = "Probe first\u{000C}Probe second\u{000B}Probe third\n"
+        let probeLayout = requiredRendererReadyTextLayoutForRegression(
+            baselineAnchor: .zero,
+            text: probeText,
+            style: probeStyle,
+            maximumWrapWidth: 240
+        )
+        let probePlan: AnnotationTextLayoutPlan
+        do {
+            probePlan = try AnnotationTextLayout.persistedPlan(
+                text: probeText,
+                style: probeStyle,
+                payload: probeLayout.payload
+            )
+            try validateInlineTextKitEditingCapability(
+                text: probeText,
+                style: probeStyle,
+                payload: probeLayout.payload,
+                plan: probePlan
+            )
+        } catch {
+            preconditionFailure(
+                "The native offscreen TextKit admission fixture did not reproduce its persisted plan: \(error)"
+            )
+        }
+        precondition(
+            probePlan.lineCount >= 4
+                && probePlan.lines.last?.utf16Range.length == 0
+                && probePlan.lines.last?.consumedUTF16Range.length == 0,
+            "The native offscreen TextKit admission fixture must cover three drawable lines and the terminal extra line."
+        )
+        let selectionBeforeRejectedProbe = session.controller.selectedItemIDs
+        let chromeBeforeRejectedProbe = selectedTextFrameView
+        var rejectedMismatchedText = false
+        do {
+            try validateInlineTextKitEditingCapability(
+                text: probeText + "X",
+                style: probeStyle,
+                payload: probeLayout.payload,
+                plan: probePlan
+            )
+        } catch is InlineTextKitEditingCapabilityError {
+            rejectedMismatchedText = true
+        } catch {
+            preconditionFailure(
+                "The native offscreen TextKit mismatch fixture returned an unexpected error: \(error)"
+            )
+        }
+        precondition(
+            rejectedMismatchedText
+                && textEditor == nil
+                && textEditingState == nil
+                && session.controller.selectedItemIDs == selectionBeforeRejectedProbe
+                && selectedTextFrameView === chromeBeforeRejectedProbe,
+            "A rejected offscreen TextKit capability probe must leave editor, selection and chrome state unchanged."
+        )
         syncSelectedTextChrome()
         updateAccessibilitySummary(
             document: session.controller.document,
@@ -1849,24 +2461,29 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     style: candidateStyle,
                     transform: AnnotationTransform()
                 )
-                let font = textEditorFont(for: candidateState)
+                let font = requiredTextEditorFontForRegression(candidateState)
                 let targetFrame = CGRect(
                     x: availableFieldBounds.minX + 90,
                     y: availableFieldBounds.minY + 70,
                     width: 287,
-                    height: textEditorFieldHeight(font: font)
+                    height: textEditorFieldHeight(
+                        font: font,
+                        state: candidateState
+                    )
                 )
                 let alignmentAnchor = textFieldAlignmentAnchor(
                     for: targetFrame,
                     font: font,
-                    alignment: alignment
+                    alignment: alignment,
+                    state: candidateState
                 )
                 let resolvedFrame = resolvedTextFieldFrame(
                     alignmentAnchor: alignmentAnchor,
                     font: font,
                     preferredViewportWidth: targetFrame.width,
                     availableFieldBounds: availableFieldBounds,
-                    alignment: alignment
+                    alignment: alignment,
+                    state: candidateState
                 )
                 precondition(
                     maxFrameDelta(targetFrame, resolvedFrame) < 0.001,
@@ -1890,7 +2507,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 style: candidateStyle,
                 transform: AnnotationTransform()
             )
-            let font = textEditorFont(for: candidateState)
+            let font = requiredTextEditorFontForRegression(candidateState)
             for canonicalAnchor in [
                 CGPoint(x: availableFieldBounds.minX + 2, y: availableFieldBounds.minY + 2),
                 CGPoint(x: availableFieldBounds.maxX - 2, y: availableFieldBounds.minY + 2),
@@ -1902,12 +2519,14 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     font: font,
                     preferredViewportWidth: 287,
                     availableFieldBounds: availableFieldBounds,
-                    alignment: alignment
+                    alignment: alignment,
+                    state: candidateState
                 )
                 let fieldAnchor = textFieldAlignmentAnchor(
                     for: initialFrame,
                     font: font,
-                    alignment: alignment
+                    alignment: alignment,
+                    state: candidateState
                 )
                 let residual = CGSize(
                     width: canonicalAnchor.x - fieldAnchor.x,
@@ -1933,7 +2552,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     let targetFieldAnchor = textFieldAlignmentAnchor(
                         for: identicalTarget,
                         font: font,
-                        alignment: alignment
+                        alignment: alignment,
+                        state: candidateState
                     )
                     let reconstructedCanonicalAnchor = CGPoint(
                         x: targetFieldAnchor.x + residual.width,
@@ -1960,10 +2580,13 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
               let editor = textEditor,
               let frameView = textEditorFrameView,
               var edgeState = textEditingState,
-              let preferredViewportWidthInDocument = textEditorPreferredViewportWidthInDocument
+              let preferredViewportWidthInDocument = textEditorPreferredViewportWidthInDocument,
+              let canonicalWrapWidthInDocument = textEditorCanonicalWrapWidthInDocument
         else {
             preconditionFailure("Edge-clamped text resize regression requires an active editor.")
         }
+        let initialLayoutPayload = textEditorLayoutPayload
+        let initialExplicitResizeState = textEditorCanonicalWrapWidthWasExplicitlyResized
         edgeState.anchor.x = documentPoint(fromViewPoint: CGPoint(
             x: bounds.maxX - InlineAnnotationTextEditorFrameView.chromeOutset - 2,
             y: bounds.midY
@@ -1979,7 +2602,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         }
         let contentAnchor = textEditorAlignmentAnchor(
             for: edgeState,
-            text: editor.string
+            text: editor.string,
+            layout: textEditorLayoutPayload
         )
         let fieldPlacementAnchor = viewPoint(
             fromDocumentPoint: fieldPlacementAnchorInDocument
@@ -2071,9 +2695,134 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 (textEditorPreferredViewportWidthInDocument ?? .infinity)
                     - preferredViewportWidthInDocument
             ) < 0.001
+                && abs(
+                    (textEditorCanonicalWrapWidthInDocument ?? .infinity)
+                        - canonicalWrapWidthInDocument
+                ) < 0.001
+                && textEditorLayoutPayload == initialLayoutPayload
+                && textEditorCanonicalWrapWidthWasExplicitlyResized
+                    == initialExplicitResizeState
                 && window.firstResponder === editor,
-            "A perpendicular edge-clamped drag must preserve viewport width and focus."
+            "A perpendicular edge-clamped drag must preserve viewport and semantic layout ownership."
         )
+    }
+
+    private func runLegacyOverhangNoOpTextResizeRegression(eventNumberBase: Int) {
+        precondition(
+            textEditor == nil && textEditingState == nil,
+            "Legacy overhang resize regression requires an idle inline editor."
+        )
+        func encodedProbeItem(_ item: AnnotationItem) -> Data {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            do {
+                return try encoder.encode(item)
+            } catch {
+                preconditionFailure(
+                    "Legacy overhang regression could not encode its no-op fixture: \(error)"
+                )
+            }
+        }
+
+        let originalSelection = session.controller.selectedItemIDs
+        let originalStyle = session.currentStyle
+        let originalStyleOrigin = session.currentStyleOrigin
+        var style = originalStyle
+        style.fontName = "Zapfino"
+        style.fontSize = 18
+        style.fontWeight = .regular
+        style.textAlignment = .leading
+        let text = "Zapfino fj Ág"
+        let canonicalWrapWidth: CGFloat = 140
+        let legacyRect = CGRect(
+            x: documentPoint(fromViewPoint: CGPoint(
+                x: bounds.maxX - InlineAnnotationTextEditorFrameView.chromeOutset - 2,
+                y: bounds.midY
+            )).x,
+            y: visibleDocumentRect().midY - 13.5,
+            width: canonicalWrapWidth,
+            height: 27
+        )
+        let safePayload = requiredRendererReadyTextPayloadForRegression(
+            text: text,
+            style: style,
+            proposedWrapWidth: canonicalWrapWidth,
+            chromeMode: .legacyTight
+        )
+        precondition(
+            safePayload.leadingOverhang + safePayload.trailingOverhang > 0.01
+                && abs(
+                    safePayload.leadingOverhang - safePayload.trailingOverhang
+                ) > 0.01,
+            "Legacy overhang regression requires asymmetric Zapfino glyph bearings."
+        )
+        let transform = AnnotationTransform(scaleX: 1.5, scaleY: 1.5)
+        let item = AnnotationItem(
+            kind: .text,
+            zIndex: session.controller.document.annotations.count,
+            geometry: .rect(legacyRect),
+            style: style,
+            transform: transform,
+            text: text,
+            textLayout: nil
+        )
+        session.controller.add(item)
+        let encodedItemBeforeEditing = encodedProbeItem(item)
+        let undoCountBeforeEditing = session.controller.undoStack.count
+        let originalAnchor = AnnotationTextLayout.alignmentAnchor(
+            in: legacyRect,
+            text: text,
+            style: style,
+            layout: nil
+        )
+
+        beginTextEditing(item: item)
+        guard let container = textEditorContainer,
+              let documentView = textEditorDocumentView,
+              let activeState = textEditingState,
+              let activeCanonicalWrapWidth = textEditorCanonicalWrapWidthInDocument
+        else {
+            preconditionFailure("Legacy overhang regression could not open its probe item.")
+        }
+        precondition(
+            textEditorLayoutPayload == nil
+                && abs(activeCanonicalWrapWidth - canonicalWrapWidth) < 0.001
+                && documentView.frame.width > container.bounds.width + 0.01
+                && activeState.transform == transform,
+            "A legacy nil layout must keep semantic width while its overhang scrolls inside the viewport."
+        )
+        runEdgeClampedNoOpTextResizeRegression(eventNumberBase: eventNumberBase)
+        guard let finalState = textEditingState else {
+            preconditionFailure("Legacy overhang regression lost its active state after resize.")
+        }
+        precondition(
+            hypot(
+                finalState.anchor.x - originalAnchor.x,
+                finalState.anchor.y - originalAnchor.y
+            ) < 0.001
+                && finalState.style.fontSize == style.fontSize
+                && textEditorLayoutPayload == nil
+                && !textEditorCanonicalWrapWidthWasExplicitlyResized,
+            "A projected scale-one drag must preserve the complete legacy text owner."
+        )
+        _ = endTextEditingIfNeeded(reason: .focusChange)
+        guard let committedItem = session.controller.document.annotations.first(where: {
+            $0.id == item.id
+        }) else {
+            preconditionFailure("Legacy overhang regression lost its committed probe item.")
+        }
+        precondition(
+            committedItem == item
+                && encodedProbeItem(committedItem) == encodedItemBeforeEditing
+                && session.controller.undoStack.count == undoCountBeforeEditing,
+            "A projected scale-one legacy resize must remain byte- and undo-equivalent."
+        )
+
+        session.controller.selectedItemIDs = [item.id]
+        session.controller.deleteSelection()
+        session.adoptCurrentStyle(originalStyle, origin: originalStyleOrigin)
+        session.controller.selectedItemIDs = originalSelection
+        syncSelectedTextChrome()
     }
 
     private func runTextResizeCancellationRegression(eventNumberBase: Int) {
@@ -2234,6 +2983,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
               let editor = textEditor,
               let frameView = textEditorFrameView,
               let initialState = textEditingState,
+              let initialCanonicalWrapWidth = textEditorCanonicalWrapWidthInDocument,
               initialState.itemID != nil
         else {
             preconditionFailure("Active text resize regression requires existing inline text in a window.")
@@ -2241,14 +2991,24 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         let initialText = editor.string
         let initialSelection = editor.selectedRange()
         let initialFieldFrame = frameView.fieldFrame(in: self)
+        let initialLayoutPlan = AnnotationTextLayout.layoutPlan(
+            in: editor.string,
+            style: initialState.style,
+            wrapWidth: initialCanonicalWrapWidth
+        )
         let initialFieldAnchor = textFieldAlignmentAnchor(
             for: initialFieldFrame,
-            font: textEditorFont(for: initialState),
-            alignment: initialState.style.textAlignment
+            font: requiredTextEditorFontForRegression(initialState),
+            alignment: initialState.style.textAlignment,
+            lineCount: initialLayoutPlan.lineCount,
+            layoutPlan: initialLayoutPlan,
+            layoutPayload: textEditorLayoutPayload,
+            state: initialState
         )
         let initialContentAnchor = textEditorAlignmentAnchor(
             for: initialState,
-            text: editor.string
+            text: editor.string,
+            layout: textEditorLayoutPayload
         )
         let initialContentToFieldResidual = documentOffset(
             fromViewOffset: CGSize(
@@ -2335,19 +3095,31 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 ) < 0.01,
                 "Active text resize moved its fixed corner during frame \(step) for \(handle.rawValue)."
             )
-            guard let currentState = textEditingState else {
+            guard let currentState = textEditingState,
+                  let currentCanonicalWrapWidth = textEditorCanonicalWrapWidthInDocument
+            else {
                 preconditionFailure(
                     "Active text resize lost its canonical state during frame \(step)."
                 )
             }
+            let currentLayoutPlan = AnnotationTextLayout.layoutPlan(
+                in: editor.string,
+                style: currentState.style,
+                wrapWidth: currentCanonicalWrapWidth
+            )
             let currentFieldAnchor = textFieldAlignmentAnchor(
                 for: frameView.fieldFrame(in: self),
-                font: textEditorFont(for: currentState),
-                alignment: currentState.style.textAlignment
+                font: requiredTextEditorFontForRegression(currentState),
+                alignment: currentState.style.textAlignment,
+                lineCount: currentLayoutPlan.lineCount,
+                layoutPlan: currentLayoutPlan,
+                layoutPayload: textEditorLayoutPayload,
+                state: currentState
             )
             let currentContentAnchor = textEditorAlignmentAnchor(
                 for: currentState,
-                text: editor.string
+                text: editor.string,
+                layout: textEditorLayoutPayload
             )
             let currentContentToFieldResidual = documentOffset(
                 fromViewOffset: CGSize(
@@ -2388,12 +3160,15 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                let container = textEditorContainer
             {
                 let visibleInsertionX = documentView.frame.minX + insertionX
+                let insertionInset = textEditorChromeInsetsInView(
+                    for: currentState
+                ).width
                 precondition(
                     visibleInsertionX
-                        >= InlineTextEditorMetrics.horizontalPadding - 0.5
+                        >= insertionInset - 0.5
                         && visibleInsertionX
                             <= container.bounds.maxX
-                                - InlineTextEditorMetrics.horizontalPadding + 0.5,
+                                - insertionInset + 0.5,
                     "Active text resize moved the insertion point outside the viewport during frame \(step): visibleX=\(visibleInsertionX), viewport=\(container.bounds), document=\(documentView.frame), font=\(textEditingState?.style.fontSize ?? -1)."
                 )
             }
@@ -2533,8 +3308,14 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     self.lineWidthEditingState == nil,
                     "Changing annotation tools requires the active line-width edit to be resolved first."
                 )
-                if currentTool != .text {
-                    self.endTextEditingIfNeeded(reason: .toolChange)
+                if currentTool != .text, self.isTextEditing,
+                   !self.endTextEditingIfNeeded(reason: .toolChange)
+                {
+                    AppLog.capture.notice(
+                        "Restored the Text tool because active text could not commit"
+                    )
+                    self.session.currentTool = .text
+                    return
                 }
                 self.cancelProvisionalDrawing()
                 self.syncSelectedTextChrome()
@@ -2651,6 +3432,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         reason: String
     ) {
         if !enabled {
+            pendingRegionBodyMoveMouseDown = nil
+            regionBodyMoveStartScreenPoint = nil
+            regionBodyMoveHasDragged = false
+            pendingRegionDoubleClickCopy = false
             finishWindowDragIfNeeded(reason: "annotation-editing-disabled-\(reason)")
         }
         guard isAnnotationEditingEnabled != enabled else { return }
@@ -3234,6 +4019,11 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     private func finishWindowDragIfNeeded(reason: String) {
+        pendingRegionBodyMoveMouseDown = nil
+        regionBodyMoveStartScreenPoint = nil
+        if isWindowDragInProgress {
+            pendingRegionDoubleClickCopy = false
+        }
         guard isWindowDragInProgress else { return }
         AppLog.capture.debug(
             "Pinned canvas body move ending: reason=\(reason, privacy: .public)"
@@ -3359,6 +4149,30 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        if let editor = textEditor, let frameView = textEditorFrameView {
+            let fieldFrame = frameView.fieldFrame(in: self)
+            if fieldFrame.contains(viewPoint) {
+                AppLog.capture.notice(
+                    "Routed pointer into the active inline text field instead of stealing first responder: x=\(viewPoint.x, privacy: .public), y=\(viewPoint.y, privacy: .public), characters=\(editor.string.utf16.count, privacy: .public)"
+                )
+                if window?.firstResponder !== editor {
+                    guard window?.makeFirstResponder(editor) == true else {
+                        preconditionFailure("Clicking the inline text field must keep the editor as first responder.")
+                    }
+                }
+                editor.mouseDown(with: event)
+                return
+            }
+        }
+        if textEditor != nil {
+            guard endTextEditingIfNeeded(reason: .focusChange) else {
+                AppLog.capture.notice(
+                    "Rejected canvas pointer interaction because active text could not commit"
+                )
+                return
+            }
+        }
         if isAnnotationEditingEnabled {
             onEditingContextWillChange?("canvas-pointer-down")
             precondition(
@@ -3367,6 +4181,9 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             )
         }
         window?.makeFirstResponder(self)
+        if armRegionDoubleClickCopyIfNeeded(from: event) {
+            return
+        }
         guard isAnnotationEditingEnabled else {
             guard !event.modifierFlags.contains(.option) else {
                 isReadOnlyWindowDragArmed = false
@@ -3407,7 +4224,16 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             isReadOnlyWindowDragArmed = true
             window?.invalidateCursorRects(for: self)
             NSCursor.closedHand.set()
-            onWindowDragBegan?(event)
+            if isRegionConfirmationCanvas {
+                pendingRegionBodyMoveMouseDown = event
+                regionBodyMoveStartScreenPoint = screenPoint(from: event)
+                regionBodyMoveHasDragged = false
+                AppLog.capture.debug(
+                    "Armed region confirmation body press without moving yet so a physical double-click can complete."
+                )
+            } else {
+                onWindowDragBegan?(event)
+            }
         case .text:
             session.controller.selectedItemIDs.removeAll()
         case .counter:
@@ -3426,9 +4252,18 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             updateSelectionInteraction(to: point)
             return
         }
-        if isWindowDragInProgress {
+        if pendingRegionDoubleClickCopy {
             NSCursor.closedHand.set()
-            onWindowDragChanged?(event)
+            if beginRegionBodyMoveIfNeeded(with: event) {
+                onWindowDragChanged?(event)
+            }
+            return
+        }
+        if isWindowDragInProgress || pendingRegionBodyMoveMouseDown != nil {
+            NSCursor.closedHand.set()
+            if beginRegionBodyMoveIfNeeded(with: event) {
+                onWindowDragChanged?(event)
+            }
             return
         }
         if event.modifierFlags.contains(.option) {
@@ -3445,7 +4280,9 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         if session.currentTool == .select {
             guard isReadOnlyWindowDragArmed else { return }
             NSCursor.closedHand.set()
-            onWindowDragChanged?(event)
+            if beginRegionBodyMoveIfNeeded(with: event) {
+                onWindowDragChanged?(event)
+            }
             return
         }
 
@@ -3479,6 +4316,33 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 captured: session.previewImage
             )
         }
+        if finishRegionDoubleClickCopyIfNeeded(from: event) {
+            pendingRegionBodyMoveMouseDown = nil
+            regionBodyMoveStartScreenPoint = nil
+            regionBodyMoveHasDragged = false
+            return
+        }
+        if isRegionConfirmationCanvas,
+           session.currentTool == .select,
+           !regionBodyMoveHasDragged,
+           !completesWindowDrag
+        {
+            let end = documentPoint(fromViewPoint: convert(event.locationInWindow, from: nil))
+            if shouldCopyRegionOnDoubleClick(at: end) {
+                lastEmptyRegionClick = (
+                    timestamp: event.timestamp,
+                    screenPoint: screenPoint(from: event)
+                )
+            } else {
+                lastEmptyRegionClick = nil
+            }
+        } else if regionBodyMoveHasDragged || completesWindowDrag {
+            lastEmptyRegionClick = nil
+        }
+        pendingRegionBodyMoveMouseDown = nil
+        regionBodyMoveStartScreenPoint = nil
+        regionBodyMoveHasDragged = false
+        pendingRegionDoubleClickCopy = false
         guard !completesWindowDrag else { return }
         let end = documentPoint(fromViewPoint: convert(event.locationInWindow, from: nil))
 
@@ -3520,7 +4384,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        if isWindowDragInProgress || (!isAnnotationEditingEnabled && isReadOnlyWindowDragArmed) {
+        if isWindowDragInProgress
+            || pendingRegionBodyMoveMouseDown != nil
+            || (!isAnnotationEditingEnabled && isReadOnlyWindowDragArmed)
+        {
             addCursorRect(bounds, cursor: .closedHand)
             return
         }
@@ -3621,11 +4488,33 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             endTextEditingIfNeeded(reason: .escape)
             return true
         }
+        if commandSelector == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))
+            || commandSelector == #selector(NSResponder.insertLineBreak(_:))
+        {
+            AppLog.capture.notice(
+                "Accepted inline text line break command: selector=\(NSStringFromSelector(commandSelector), privacy: .public), characters=\(textView.string.utf16.count, privacy: .public), lines=\(AnnotationTextLayout.lineCount(in: textView.string), privacy: .public)"
+            )
+            return false
+        }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            if let event = NSApp.currentEvent, isShiftReturnLineBreakEvent(event) {
+                AppLog.capture.notice(
+                    "Accepted Shift-Return as an inline text line break: characters=\(textView.string.utf16.count, privacy: .public), lines=\(AnnotationTextLayout.lineCount(in: textView.string), privacy: .public)"
+                )
+                return false
+            }
             endTextEditingIfNeeded(reason: .returnKey)
             return true
         }
         return false
+    }
+
+    private func isShiftReturnLineBreakEvent(_ event: NSEvent) -> Bool {
+        guard event.keyCode == 36 || event.keyCode == 76 else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        return modifiers.contains(.shift)
+            && !modifiers.contains(.command)
+            && !modifiers.contains(.control)
     }
 
     private func commit(tool: AnnotationTool, start: CGPoint, end: CGPoint) {
@@ -3739,30 +4628,161 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         guard let frameView = textEditorFrameView, textEditorContainer != nil else {
             preconditionFailure("The inline annotation editor lost its viewport hierarchy before commit.")
         }
+        let text = editor.string
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let containsVisibleText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if disposition == .commit, containsVisibleText {
+            // Focus changes can finalize IME marked text immediately before
+            // NSTextView sends textDidEndEditing. Reconcile that final glyph
+            // run against the canonical document baseline before measuring or
+            // removing the editor, even if no later textDidChange arrives.
+            guard updateTextEditorLayout(scrollsToInsertionPoint: false) else {
+                window?.makeFirstResponder(editor)
+                return false
+            }
+            restoreTextEditorCanonicalHorizontalOriginForCommit()
+        }
+        let editedItemID = editingState.itemID
+        guard let fieldWrapWidthInDocument = textEditorCanonicalWrapWidthInDocument else {
+            preconditionFailure(
+                "Inline text commit requires an explicit canonical wrap-width owner."
+            )
+        }
+        let commitLayout: AnnotationTextLayoutResolution?
+        let isExistingLayoutNoOp: Bool
+        let preservesExistingLayoutPayload: Bool
+        do {
+        if disposition == .delete {
+            commitLayout = nil
+            isExistingLayoutNoOp = false
+            preservesExistingLayoutPayload = false
+        } else if containsVisibleText, let originalItem = editingState.originalItem {
+            guard case .rect(let originalRect) = originalItem.geometry else {
+                preconditionFailure("An existing inline text editor lost its original text rectangle.")
+            }
+            let originalAnchor = AnnotationTextLayout.alignmentAnchor(
+                in: originalRect,
+                text: originalItem.text ?? "",
+                style: originalItem.style,
+                layout: originalItem.textLayout
+            )
+            let typographyUnchanged = originalItem.style.fontSize == editingState.style.fontSize
+                && originalItem.style.fontName == editingState.style.fontName
+                && originalItem.style.fontWeight == editingState.style.fontWeight
+                && originalItem.style.textAlignment == editingState.style.textAlignment
+            let originalCanonicalWrapWidth = AnnotationTextLayout.canonicalWrapWidth(
+                for: originalItem
+            )
+            preservesExistingLayoutPayload = originalItem.text == text
+                && typographyUnchanged
+                && !textEditorCanonicalWrapWidthWasExplicitlyResized
+                && abs(fieldWrapWidthInDocument - originalCanonicalWrapWidth) < 0.001
+                && textEditorLayoutPayload == originalItem.textLayout
+                && hypot(
+                    originalAnchor.x - editingState.anchor.x,
+                    originalAnchor.y - editingState.anchor.y
+                ) < 0.000_001
+            isExistingLayoutNoOp = preservesExistingLayoutPayload
+                && originalItem.style == editingState.style
+            if preservesExistingLayoutPayload {
+                // A schema-1 no-op must persist `nil`, but the transient
+                // commit measurement still needs a complete current plan.
+                let payload: AnnotationTextLayoutPayload
+                if let existingPayload = originalItem.textLayout {
+                    payload = existingPayload
+                } else {
+                    payload = try AnnotationTextLayout.safeLayoutPayload(
+                        for: text,
+                        style: editingState.style,
+                        proposedWrapWidth: originalCanonicalWrapWidth,
+                        chromeMode: .legacyTight,
+                        resolvedFont: try textEditorFont(for: editingState)
+                    )
+                }
+                commitLayout = AnnotationTextLayoutResolution(
+                    rect: originalRect,
+                    payload: payload
+                )
+            } else {
+                let canonicalWrapWidth = fieldWrapWidthInDocument
+                let payload = try AnnotationTextLayout.safeLayoutPayload(
+                    for: text,
+                    style: editingState.style,
+                    proposedWrapWidth: canonicalWrapWidth,
+                    chromeMode: originalItem.textLayout?.chromeMode ?? .legacyTight,
+                    resolvedFont: try textEditorFont(for: editingState)
+                )
+                guard textEditorLayoutPayload == payload else {
+                    throw inlineTextKitEditingCapabilityError(
+                        "inline commit did not match the active renderer-ready layout generation"
+                    )
+                }
+                commitLayout = AnnotationTextLayoutResolution(
+                    rect: AnnotationTextLayout.annotationRect(
+                        baselineAnchor: editingState.anchor,
+                        text: text,
+                        style: editingState.style,
+                        layout: payload
+                    ),
+                    payload: payload
+                )
+            }
+        } else if containsVisibleText {
+            isExistingLayoutNoOp = false
+            preservesExistingLayoutPayload = false
+            let payload = try AnnotationTextLayout.safeLayoutPayload(
+                for: text,
+                style: editingState.style,
+                proposedWrapWidth: fieldWrapWidthInDocument,
+                chromeMode: .uniformPadded,
+                resolvedFont: try textEditorFont(for: editingState)
+            )
+            guard textEditorLayoutPayload == payload else {
+                throw inlineTextKitEditingCapabilityError(
+                    "new inline commit did not match the active renderer-ready layout generation"
+                )
+            }
+            commitLayout = AnnotationTextLayoutResolution(
+                rect: AnnotationTextLayout.annotationRect(
+                    baselineAnchor: editingState.anchor,
+                    text: text,
+                    style: editingState.style,
+                    layout: payload
+                ),
+                payload: payload
+            )
+        } else {
+            isExistingLayoutNoOp = false
+            preservesExistingLayoutPayload = false
+            commitLayout = nil
+        }
+        } catch {
+            reportTextLayoutAuthoringFailure(
+                error,
+                operation: "inline-text-commit",
+                itemID: editedItemID
+            )
+            return false
+        }
+        if disposition == .commit {
+            clearTextLayoutAuthoringFailure()
+        }
         var committedStyleForSession: AnnotationStyle?
         defer {
             session.finalizeTextEditingStyle(committedStyle: committedStyleForSession)
         }
         cancelTextResize(reason: "editor-ending-\(reason.rawValue)")
-        if disposition == .commit {
-            // Focus changes can finalize IME marked text immediately before
-            // NSTextView sends textDidEndEditing. Reconcile that final glyph
-            // run against the canonical document baseline before measuring or
-            // removing the editor, even if no later textDidChange arrives.
-            updateTextEditorLayout(scrollsToInsertionPoint: false)
-            restoreTextEditorCanonicalHorizontalOriginForCommit()
-        }
-        let text = editor.string
-            .components(separatedBy: .newlines)
-            .joined(separator: " ")
-        let containsVisibleText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let editedItemID = editingState.itemID
-        if containsVisibleText,
+        if disposition == .commit,
+           containsVisibleText,
            let editorLineOrigin = textEditorLineOriginInView(editor)
         {
             let committedLineOrigin = renderedTextLineOriginInView(
                 state: editingState,
-                text: text
+                text: text,
+                layout: preservesExistingLayoutPayload
+                    ? editingState.originalItem?.textLayout
+                    : commitLayout?.payload
             )
             let transitionError = CGPoint(
                 x: committedLineOrigin.x - editorLineOrigin.x,
@@ -3782,37 +4802,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             lastTextCommitBaselineError = nil
         }
 
-        textEditor = nil
-        textEditorContainer = nil
-        textEditorDocumentView = nil
-        textEditorFrameView = nil
-        textEditorPreferredViewportWidthInDocument = nil
-        textEditorFieldPlacementAnchorInDocument = nil
-        textEditorLayoutBounds = nil
-        textEditorSessionFont = nil
-        textEditorSessionBaselineOffset = nil
-        textEditorPresentationLayout = nil
-        textEditorGeometryConfigurationCount = 0
-        textEditorPostConfigurationViewportMutationCount = 0
-        textEditorPostConfigurationLineOriginDriftCount = 0
-        textEditorPreventedFrameMutationCount = 0
-        textEditorBaselineCorrectionCount = 0
-        textEditorBaselineError = nil
-        textEditingState = nil
-        textResizeInteraction = nil
-        textResizeFixedCornerError = 0
-        editor.delegate = nil
-        editor.onMarkedTextChange = nil
-        editor.onEscape = nil
-        editor.onRejectedPresentationFrameChange = nil
-        frameView.onResizeBegan = nil
-        frameView.onResizeChanged = nil
-        frameView.onResizeEnded = nil
-        frameView.onDelete = nil
-        if window?.firstResponder === editor {
-            window?.makeFirstResponder(self)
-        }
-        frameView.removeFromSuperview()
+        dismantleInlineTextEditor(editor: editor, frameView: frameView)
 
         let outcome: String
         if disposition == .delete {
@@ -3833,13 +4823,12 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 outcome = "discarded"
             }
         } else if containsVisibleText {
-            let rect = AnnotationTextLayout.annotationRect(
-                baselineAnchor: editingState.anchor,
-                text: text,
-                style: editingState.style
-            )
+            guard let commitLayout else {
+                preconditionFailure("Visible inline text must resolve committed layout state.")
+            }
+            let rect = commitLayout.rect
             AppLog.capture.debug(
-                "Resolved inline text commit geometry: baseline=(\(editingState.anchor.x, privacy: .public),\(editingState.anchor.y, privacy: .public)), rect=(\(rect.minX, privacy: .public),\(rect.minY, privacy: .public),\(rect.width, privacy: .public),\(rect.height, privacy: .public)), font=\(AnnotationTextLayout.font(style: editingState.style).fontName, privacy: .public)"
+                "Resolved inline text commit geometry: baseline=(\(editingState.anchor.x, privacy: .public),\(editingState.anchor.y, privacy: .public)), rect=(\(rect.minX, privacy: .public),\(rect.minY, privacy: .public),\(rect.width, privacy: .public),\(rect.height, privacy: .public)), layoutVersion=\(commitLayout.payload.version, privacy: .public), chrome=\(commitLayout.payload.chromeMode.rawValue, privacy: .public), wrapWidth=\(commitLayout.payload.wrapWidth, privacy: .public), font=\(editingState.style.fontName ?? "system", privacy: .public)"
             )
             if let editedItemID {
                 guard session.controller.document.annotations.contains(where: { $0.id == editedItemID }) else {
@@ -3850,10 +4839,19 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     updateAccessibilitySummary(document: session.controller.document, captured: session.previewImage)
                     return true
                 }
-                session.controller.updateItem(id: editedItemID) { item in
-                    item.text = text
-                    item.geometry = .rect(rect)
-                    item.style = editingState.style
+                if !isExistingLayoutNoOp {
+                    session.controller.updateItem(id: editedItemID) { item in
+                        item.text = text
+                        item.geometry = .rect(rect)
+                        item.style = editingState.style
+                        item.textLayout = preservesExistingLayoutPayload
+                            ? editingState.originalItem?.textLayout
+                            : commitLayout.payload
+                    }
+                } else {
+                    AppLog.capture.debug(
+                        "Preserved byte-equivalent legacy/current text item after no-op re-edit: id=\(editedItemID.uuidString, privacy: .public)"
+                    )
                 }
                 session.controller.selectedItemIDs = [editedItemID]
                 committedStyleForSession = editingState.style
@@ -3863,7 +4861,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     zIndex: session.controller.document.annotations.count,
                     geometry: .rect(rect),
                     style: editingState.style,
-                    text: text
+                    text: text,
+                    textLayout: commitLayout.payload
                 )
                 session.controller.add(item)
                 committedStyleForSession = editingState.style
@@ -3888,6 +4887,51 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             "Ended inline text editing: mode=\(editedItemID == nil ? "new" : "existing", privacy: .public), id=\(editedItemID?.uuidString ?? "none", privacy: .public), reason=\(reason.rawValue, privacy: .public), outcome=\(outcome, privacy: .public), characters=\(text.count, privacy: .public)"
         )
         return true
+    }
+
+    private func dismantleInlineTextEditor(
+        editor: InlineAnnotationTextView,
+        frameView: InlineAnnotationTextEditorFrameView
+    ) {
+        textEditor = nil
+        textEditorContainer = nil
+        textEditorDocumentView = nil
+        textEditorFrameView = nil
+        textEditorPreferredViewportWidthInDocument = nil
+        textEditorCanonicalWrapWidthInDocument = nil
+        textEditorLayoutPayload = nil
+        textEditorCanonicalWrapWidthWasExplicitlyResized = false
+        textEditorFieldPlacementAnchorInDocument = nil
+        textEditorLayoutBounds = nil
+        textEditorDocumentScaleInView = nil
+        textEditorSessionFont = nil
+        textEditorSessionFontRequest = nil
+        textEditorRendererGeneration = nil
+        textEditorCanonicalLineAdvance = nil
+        textEditorSessionBaselineOffset = nil
+        textEditorPresentationLayout = nil
+        textEditorGeometryConfigurationCount = 0
+        textEditorPostConfigurationViewportMutationCount = 0
+        textEditorPostConfigurationLineOriginDriftCount = 0
+        textEditorPreventedFrameMutationCount = 0
+        textEditorBaselineCorrectionCount = 0
+        textEditorBaselineError = nil
+        textEditingState = nil
+        textResizeInteraction = nil
+        textResizeFixedCornerError = 0
+        editor.delegate = nil
+        editor.onMarkedTextChange = nil
+        editor.onEscape = nil
+        editor.onShiftReturnLineBreak = nil
+        editor.onRejectedPresentationFrameChange = nil
+        frameView.onResizeBegan = nil
+        frameView.onResizeChanged = nil
+        frameView.onResizeEnded = nil
+        frameView.onDelete = nil
+        if window?.firstResponder === editor {
+            window?.makeFirstResponder(self)
+        }
+        frameView.removeFromSuperview()
     }
 
     private func syncSelectedTextChrome(
@@ -4057,7 +5101,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             x: currentPointer.x - interaction.initialPointerInView.x,
             y: currentPointer.y - interaction.initialPointerInView.y
         )
-        if abs(pointerDelta.x) < 0.001 && abs(pointerDelta.y) < 0.001 {
+        if abs(pointerDelta.x) < 0.001,
+           abs(pointerDelta.y) < 0.001,
+           interaction.previewItem == interaction.initialItem
+        {
             return true
         }
         let initialVector = CGPoint(
@@ -4082,11 +5129,22 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             maximumFontSize,
             max(minimumFontSize, interaction.initialFontSize * projectedScale)
         )
-        interaction.previewItem = resizedSelectedTextItem(
-            interaction.initialItem,
-            fontSize: fontSize,
-            fixedCorner: handle.fixedCorner
-        )
+        do {
+            interaction.previewItem = try resizedSelectedTextItem(
+                interaction.initialItem,
+                fontSize: fontSize,
+                fixedCorner: handle.fixedCorner
+            )
+            clearTextLayoutAuthoringFailure()
+        } catch {
+            reportTextLayoutAuthoringFailure(
+                error,
+                operation: "update-selected-text-resize",
+                itemID: interaction.itemID
+            )
+            cancelSelectedTextResize(reason: "layout-capability-failed")
+            return false
+        }
         selectedTextResizeInteraction = interaction
         syncSelectedTextChrome()
         let resolvedFixedCorner = frameView.fieldPoint(corner: handle.fixedCorner, in: self)
@@ -4173,26 +5231,21 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         _ item: AnnotationItem,
         fontSize: CGFloat,
         fixedCorner: InlineAnnotationTextFrameCorner
-    ) -> AnnotationItem {
+    ) throws -> AnnotationItem {
         guard item.kind == .text,
-              case .rect(let initialRect) = item.geometry,
+              case .rect = item.geometry,
               let text = item.text
         else {
             preconditionFailure("Font-size resizing requires a text annotation with rectangle geometry.")
         }
         let initialBounds = selectionGeometry.transformedBounds(for: item)
         let fixedPoint = textFramePoint(corner: fixedCorner, in: initialBounds)
-        let baselineAnchor = AnnotationTextLayout.alignmentAnchor(
-            in: initialRect,
-            style: item.style
-        )
-        var resized = item
-        resized.style.fontSize = fontSize
-        resized.geometry = .rect(AnnotationTextLayout.annotationRect(
-            baselineAnchor: baselineAnchor,
+        var resized = try AnnotationTextLayout.reflowedTextItem(
+            item,
             text: text,
-            style: resized.style
-        ))
+            fontSize: fontSize,
+            wrapWidthStrategy: .scaleWithFont
+        )
         let resizedBounds = selectionGeometry.transformedBounds(for: resized)
         let resizedFixedPoint = textFramePoint(corner: fixedCorner, in: resizedBounds)
         resized.transform.translation.width += fixedPoint.x - resizedFixedPoint.x
@@ -4400,6 +5453,33 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
 
     private func beginTextEditing(at point: CGPoint) {
         let style = session.defaultStyle(for: .text)
+        let admittedFont: NSFont
+        do {
+            admittedFont = try AnnotationTextLayout.resolvedFont(style: style)
+            _ = try AnnotationTextLayout.safeLayoutPayload(
+                for: "",
+                style: style,
+                proposedWrapWidth: 1,
+                chromeMode: .uniformPadded,
+                resolvedFont: admittedFont
+            )
+            clearTextLayoutAuthoringFailure()
+        } catch {
+            NSSound.beep()
+            reportVectorRenderFailure(
+                error,
+                item: AnnotationItem(
+                    kind: .text,
+                    zIndex: session.controller.document.annotations.count,
+                    geometry: .rect(CGRect(origin: point, size: CGSize(width: 1, height: 1))),
+                    style: style,
+                    text: ""
+                ),
+                isProvisional: true,
+                operation: "new-inline-text-admission"
+            )
+            return
+        }
         session.adoptCurrentStyle(style, origin: .newTextDraft)
         installTextEditor(
             text: "",
@@ -4408,7 +5488,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 anchor: point,
                 style: style,
                 transform: AnnotationTransform()
-            )
+            ),
+            admittedFont: admittedFont
         )
     }
 
@@ -4416,19 +5497,40 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         guard item.kind == .text, case .rect(let rect) = item.geometry else {
             preconditionFailure("Inline text editing requires a text annotation with rectangle geometry.")
         }
-        session.controller.selectedItemIDs = [item.id]
-        session.adoptCurrentStyle(item.style, origin: .existingAnnotation)
+        let admittedFont: NSFont
+        do {
+            try AnnotationTextLayout.validateEditingCapability(
+                text: item.text ?? "",
+                style: item.style,
+                rect: rect,
+                layout: item.textLayout
+            )
+            admittedFont = try validateInlineTextKitEditingCapability(item: item)
+            clearTextLayoutAuthoringFailure()
+        } catch {
+            NSSound.beep()
+            reportVectorRenderFailure(
+                error,
+                item: item,
+                isProvisional: false,
+                operation: "existing-inline-text-admission"
+            )
+            return
+        }
         guard supportsStableInlineTextEditing(transform: item.transform) else {
             NSSound.beep()
-            syncSelectedTextChrome()
             AppLog.capture.error(
                 "Rejected inline text editing for an unsupported presentation transform: id=\(item.id.uuidString, privacy: .public), rotationRadians=\(item.transform.rotationRadians, privacy: .public), scaleX=\(item.transform.scaleX, privacy: .public), scaleY=\(item.transform.scaleY, privacy: .public)"
             )
             return
         }
+        session.controller.selectedItemIDs = [item.id]
+        session.adoptCurrentStyle(item.style, origin: .existingAnnotation)
         let anchor = AnnotationTextLayout.alignmentAnchor(
             in: rect.standardized,
-            style: item.style
+            text: item.text ?? "",
+            style: item.style,
+            layout: item.textLayout
         )
         installTextEditor(
             text: item.text ?? "",
@@ -4436,8 +5538,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 itemID: item.id,
                 anchor: anchor,
                 style: item.style,
-                transform: item.transform
-            )
+                transform: item.transform,
+                originalItem: item
+            ),
+            admittedFont: admittedFont
         )
     }
 
@@ -4464,13 +5568,30 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             && abs(transform.scaleX - transform.scaleY) < representationTolerance
     }
 
-    private func installTextEditor(text: String, state: TextEditingState) {
+    private func installTextEditor(
+        text: String,
+        state: TextEditingState,
+        admittedFont: NSFont? = nil
+    ) {
         let chromeDiameter = InlineAnnotationTextEditorFrameView.chromeOutset * 2
         guard bounds.width > chromeDiameter, bounds.height > chromeDiameter else {
             NSSound.beep()
             syncSelectedTextChrome()
             AppLog.capture.error(
                 "Rejected inline text editing because the canvas cannot contain its controls: mode=\(state.itemID == nil ? "new" : "existing", privacy: .public), id=\(state.itemID?.uuidString ?? "none", privacy: .public), canvasWidth=\(self.bounds.width, privacy: .public), canvasHeight=\(self.bounds.height, privacy: .public), requiredExtent=\(chromeDiameter, privacy: .public)"
+            )
+            return
+        }
+        let transformedTextInsets = textEditorChromeInsetsInView(for: state)
+        let maximumFieldWidth = min(
+            InlineTextEditorMetrics.maximumViewportWidth,
+            bounds.width - chromeDiameter
+        )
+        guard maximumFieldWidth > transformedTextInsets.width * 2 + 1 else {
+            NSSound.beep()
+            syncSelectedTextChrome()
+            AppLog.capture.error(
+                "Rejected inline text editing because transformed chrome leaves no content width: mode=\(state.itemID == nil ? "new" : "existing", privacy: .public), id=\(state.itemID?.uuidString ?? "none", privacy: .public), maximumFieldWidth=\(maximumFieldWidth, privacy: .public), horizontalInset=\(transformedTextInsets.width, privacy: .public), scaleX=\(state.transform.scaleX, privacy: .public)"
             )
             return
         }
@@ -4481,9 +5602,16 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 && textEditorFrameView == nil
                 && textEditorDocumentView == nil
                 && textEditorPreferredViewportWidthInDocument == nil
+                && textEditorCanonicalWrapWidthInDocument == nil
+                && textEditorLayoutPayload == nil
+                && !textEditorCanonicalWrapWidthWasExplicitlyResized
                 && textEditorFieldPlacementAnchorInDocument == nil
                 && textEditorLayoutBounds == nil
+                && textEditorDocumentScaleInView == nil
                 && textEditorSessionFont == nil
+                && textEditorSessionFontRequest == nil
+                && textEditorRendererGeneration == nil
+                && textEditorCanonicalLineAdvance == nil
                 && textEditorSessionBaselineOffset == nil
                 && textEditorPresentationLayout == nil
                 && textEditorGeometryConfigurationCount == 0
@@ -4533,7 +5661,15 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         container.autoresizesSubviews = false
         documentView.autoresizesSubviews = false
 
-        let editor = InlineAnnotationTextView(frame: .zero)
+        let textStorage = NSTextStorage()
+        let layoutManager = InlineAnnotationTextLayoutManager()
+        let textContainer = NSTextContainer(size: .zero)
+        textStorage.addLayoutManager(layoutManager)
+        layoutManager.addTextContainer(textContainer)
+        let editor = InlineAnnotationTextView(
+            frame: .zero,
+            textContainer: textContainer
+        )
         editor.delegate = self
         editor.string = text
         editor.isRichText = false
@@ -4549,14 +5685,25 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         editor.autoresizingMask = []
         editor.textColor = annotationColor(state.style.strokeColor)
         editor.insertionPointColor = annotationColor(state.style.strokeColor)
-        editor.alignment = .left
-        editor.textContainerInset = .zero
+        editor.alignment = nsTextAlignment(state.style.textAlignment)
+        let editorChromeInsets = AnnotationTextLayout.chromeInsets(for: state.chromeMode)
+        editor.textContainerInset = editorChromeInsets
         editor.textContainer?.lineFragmentPadding = 0
-        editor.textContainer?.maximumNumberOfLines = 1
-        editor.textContainer?.lineBreakMode = .byClipping
+        editor.textContainer?.maximumNumberOfLines = 0
+        editor.textContainer?.lineBreakMode = .byWordWrapping
         editor.textContainer?.widthTracksTextView = false
-        editor.textContainer?.heightTracksTextView = true
-        editor.textContainer?.containerSize = CGSize(width: CGFloat.greatestFiniteMagnitude, height: 1)
+        editor.textContainer?.heightTracksTextView = false
+        let initialCanonicalFieldWidth = textEditorFieldWidthInDocument(
+            fromViewWidth: InlineTextEditorMetrics.minimumViewportWidth,
+            state: state
+        )
+        editor.textContainer?.containerSize = CGSize(
+            width: max(
+                1,
+                initialCanonicalFieldWidth - editorChromeInsets.width * 2
+            ),
+            height: CGFloat.greatestFiniteMagnitude
+        )
         editor.isAutomaticQuoteSubstitutionEnabled = false
         editor.isAutomaticDashSubstitutionEnabled = false
         editor.isAutomaticTextReplacementEnabled = false
@@ -4568,6 +5715,12 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         }
         editor.onEscape = { [weak self] in
             self?.endTextEditingIfNeeded(reason: .escape)
+        }
+        editor.onShiftReturnLineBreak = { [weak self] in
+            guard let self, let editor = self.textEditor else { return }
+            AppLog.capture.notice(
+                "Inserted inline text line break from Shift-Return: characters=\(editor.string.utf16.count, privacy: .public), lines=\(AnnotationTextLayout.lineCount(in: editor.string), privacy: .public)"
+            )
         }
         editor.onRejectedPresentationFrameChange = { [weak self] proposedFrame, lockedFrame in
             guard let self else { return }
@@ -4581,6 +5734,20 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         }
 
         textEditingState = state
+        textEditorCanonicalWrapWidthInDocument = state.originalItem.map {
+            AnnotationTextLayout.canonicalWrapWidth(for: $0)
+        }
+        textEditorLayoutPayload = state.originalItem?.textLayout
+        if let originalItem = state.originalItem,
+           let payload = originalItem.textLayout
+        {
+            textEditorRendererGeneration = TextEditorRendererGeneration(
+                text: originalItem.text ?? "",
+                style: originalItem.style,
+                payload: payload
+            )
+        }
+        textEditorCanonicalWrapWidthWasExplicitlyResized = false
         lastTextCommitBaselineError = nil
         textEditor = editor
         textEditorContainer = container
@@ -4591,9 +5758,25 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         frameView.installViewport(container)
         addSubview(frameView)
         refreshPreviewExclusions()
-        updateTextEditorFrame()
+        guard updateTextEditorFrame(admittedFont: admittedFont) else {
+            abortInlineTextEditorInstallation(
+                editor: editor,
+                frameView: frameView,
+                state: state,
+                phase: "initial-layout"
+            )
+            return
+        }
         editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
-        updateTextEditorLayout(scrollsToInsertionPoint: true)
+        guard updateTextEditorLayout(scrollsToInsertionPoint: true) else {
+            abortInlineTextEditorInstallation(
+                editor: editor,
+                frameView: frameView,
+                state: state,
+                phase: "insertion-layout"
+            )
+            return
+        }
         NSApplication.shared.activate(ignoringOtherApps: true)
         window?.makeKey()
         guard window?.makeFirstResponder(editor) == true else {
@@ -4605,6 +5788,29 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         )
     }
 
+    private func abortInlineTextEditorInstallation(
+        editor: InlineAnnotationTextView,
+        frameView: InlineAnnotationTextEditorFrameView,
+        state: TextEditingState,
+        phase: String
+    ) {
+        dismantleInlineTextEditor(editor: editor, frameView: frameView)
+        if state.itemID == nil {
+            session.finalizeTextEditingStyle(committedStyle: nil)
+        }
+        refreshPreviewExclusions()
+        syncSelectedTextChrome()
+        needsDisplay = true
+        window?.invalidateCursorRects(for: self)
+        updateAccessibilitySummary(
+            document: session.controller.document,
+            captured: session.previewImage
+        )
+        AppLog.capture.error(
+            "Aborted inline text editor installation after renderer-ready layout failure: phase=\(phase, privacy: .public), mode=\(state.itemID == nil ? "new" : "existing", privacy: .public), id=\(state.itemID?.uuidString ?? "none", privacy: .public)"
+        )
+    }
+
     private func beginTextResize(
         handle: InlineAnnotationTextResizeHandle,
         event: NSEvent
@@ -4613,9 +5819,41 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
               let frameView = textEditorFrameView,
               let container = textEditorContainer,
               let state = textEditingState,
+              let initialCanonicalWrapWidth = textEditorCanonicalWrapWidthInDocument,
               textEditorFieldPlacementAnchorInDocument != nil
         else {
             preconditionFailure("Inline text resizing requires the complete active editor hierarchy.")
+        }
+        let presentationPayload: AnnotationTextLayoutPayload
+        let layoutPlan: AnnotationTextLayoutPlan
+        let font: NSFont
+        do {
+            font = try textEditorFont(for: state)
+            if let activePayload = textEditorLayoutPayload {
+                presentationPayload = activePayload
+            } else {
+                presentationPayload = try AnnotationTextLayout.safeLayoutPayload(
+                    for: editor.string,
+                    style: state.style,
+                    proposedWrapWidth: initialCanonicalWrapWidth,
+                    chromeMode: state.chromeMode,
+                    resolvedFont: font
+                )
+            }
+            layoutPlan = try canonicalTextLayoutPlan(
+                text: editor.string,
+                style: state.style,
+                payload: presentationPayload,
+                context: "beginning inline text resize"
+            )
+            clearTextLayoutAuthoringFailure()
+        } catch {
+            reportTextLayoutAuthoringFailure(
+                error,
+                operation: "begin-inline-text-resize",
+                itemID: state.itemID
+            )
+            return
         }
         if textResizeInteraction != nil {
             cancelTextResize(reason: "superseded-by-new-drag")
@@ -4631,16 +5869,20 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 "Inline text composition must be committed before direct font resizing."
             )
         }
-
         let fieldFrame = frameView.fieldFrame(in: self)
         let currentFieldAnchor = textFieldAlignmentAnchor(
             for: fieldFrame,
-            font: textEditorFont(for: state),
-            alignment: state.style.textAlignment
+            font: font,
+            alignment: state.style.textAlignment,
+            lineCount: layoutPlan.lineCount,
+            layoutPlan: layoutPlan,
+            layoutPayload: presentationPayload,
+            state: state
         )
         let currentContentAnchor = textEditorAlignmentAnchor(
             for: state,
-            text: editor.string
+            text: editor.string,
+            layout: textEditorLayoutPayload
         )
         let fieldAnchorResidualInDocument = documentOffset(
             fromViewOffset: CGSize(
@@ -4686,17 +5928,30 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         )
         let editableRange = AnnotationTextLayout.editableFontSizeRange
         let minimumFontSize = min(editableRange.lowerBound, state.style.fontSize)
-        let maximumFontSize = maximumTextFontSize(
-            fittingFieldHeight: maximumFieldHeight,
-            initialFontSize: state.style.fontSize,
-            editableUpperBound: max(editableRange.upperBound, state.style.fontSize),
-            state: state
-        )
+        let maximumFontSize: CGFloat
+        do {
+            maximumFontSize = try maximumTextFontSize(
+                fittingFieldHeight: maximumFieldHeight,
+                initialFontSize: state.style.fontSize,
+                editableUpperBound: max(editableRange.upperBound, state.style.fontSize),
+                state: state,
+                initialCanonicalWrapWidthInDocument: initialCanonicalWrapWidth,
+                resolvedFont: font
+            )
+        } catch {
+            reportTextLayoutAuthoringFailure(
+                error,
+                operation: "begin-inline-text-resize-maximum-font",
+                itemID: state.itemID
+            )
+            return
+        }
         textResizeInteraction = TextResizeInteraction(
             handle: handle,
             initialFontSize: state.style.fontSize,
             minimumFontSize: minimumFontSize,
             maximumFontSize: maximumFontSize,
+            initialCanonicalWrapWidthInDocument: initialCanonicalWrapWidth,
             initialViewportWidth: container.bounds.width,
             initialAnchor: state.anchor,
             fieldAnchorResidualInDocument: fieldAnchorResidualInDocument,
@@ -4748,6 +6003,11 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         )
         let previousState = state
         let previousViewportWidthInDocument = textEditorPreferredViewportWidthInDocument
+        let previousCanonicalWrapWidthInDocument = textEditorCanonicalWrapWidthInDocument
+        let previousLayoutPayload = textEditorLayoutPayload
+        let previousExplicitResize = textEditorCanonicalWrapWidthWasExplicitlyResized
+        let previousFieldPlacementAnchor = textEditorFieldPlacementAnchorInDocument
+        let previousPresentationLayout = textEditorPresentationLayout
 
         guard maxFrameDelta(bounds, interaction.canvasBounds) < 0.001 else {
             cancelTextResize(reason: "canvas-geometry-changed")
@@ -4759,7 +6019,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             x: currentPointer.x - interaction.initialPointerInView.x,
             y: currentPointer.y - interaction.initialPointerInView.y
         )
-        if abs(pointerDelta.x) < 0.001 && abs(pointerDelta.y) < 0.001 {
+        if abs(pointerDelta.x) < 0.001,
+           abs(pointerDelta.y) < 0.001,
+           interaction.updateCount == 0
+        {
             return true
         }
         let initialVector = CGPoint(
@@ -4783,24 +6046,76 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             max(interaction.minimumFontSize, interaction.initialFontSize * projectedScale)
         )
         let resolvedScale = fontSize / interaction.initialFontSize
+        if interaction.updateCount == 0,
+           abs(resolvedScale - 1) < 0.000_001
+        {
+            // A nonzero pointer delta can still project to an exact no-op on
+            // the resize diagonal. Preserve the original optional layout
+            // generation—especially a legacy nil payload—instead of deriving
+            // new overhang geometry from an interaction that changed nothing.
+            return true
+        }
+        state.anchor = interaction.initialAnchor
+        state.style.fontSize = fontSize
+        let proposedCanonicalWrapWidth = interaction.initialCanonicalWrapWidthInDocument
+            * resolvedScale
+        let activeLayoutPayload: AnnotationTextLayoutPayload
+        let layoutPlan: AnnotationTextLayoutPlan
+        let font: NSFont
+        do {
+            font = try textEditorFont(for: state)
+            activeLayoutPayload = try AnnotationTextLayout.safeLayoutPayload(
+                for: editor.string,
+                style: state.style,
+                proposedWrapWidth: proposedCanonicalWrapWidth,
+                chromeMode: state.chromeMode,
+                resolvedFont: font
+            )
+            layoutPlan = try canonicalTextLayoutPlan(
+                text: editor.string,
+                style: state.style,
+                payload: activeLayoutPayload,
+                context: "updating inline text resize"
+            )
+            clearTextLayoutAuthoringFailure()
+        } catch {
+            reportTextLayoutAuthoringFailure(
+                error,
+                operation: "update-inline-text-resize",
+                itemID: state.itemID
+            )
+            cancelTextResize(reason: "layout-capability-failed")
+            return false
+        }
+        let canonicalWrapWidth = activeLayoutPayload.wrapWidth
         let minimumViewportWidth = min(
             interaction.initialViewportWidth,
             InlineAnnotationTextEditorFrameView.minimumInteractiveFieldWidth
         )
-        let viewportWidth = min(
+        let maximumViewportWidth = min(
             interaction.maximumFieldWidth,
-            max(minimumViewportWidth, interaction.initialViewportWidth * resolvedScale)
+            InlineTextEditorMetrics.maximumViewportWidth
         )
-        let viewportWidthInDocument = documentOffset(
-            fromViewOffset: CGSize(width: viewportWidth, height: 0)
-        ).width
-
-        state.anchor = interaction.initialAnchor
-        state.style.fontSize = fontSize
-        let font = textEditorFont(for: state)
+        let proportionalViewportWidth = interaction.initialViewportWidth * resolvedScale
+        let viewportWidth = min(
+            maximumViewportWidth,
+            max(
+                minimumViewportWidth,
+                proportionalViewportWidth
+            )
+        )
+        let viewportWidthInDocument = textEditorFieldWidthInDocument(
+            fromViewWidth: viewportWidth,
+            state: state
+        )
         let fieldHeight = min(
             interaction.maximumFieldHeight,
-            textEditorFieldHeight(font: font)
+            textEditorFieldHeight(
+                font: font,
+                lineCount: layoutPlan.lineCount,
+                layoutPlan: layoutPlan,
+                state: state
+            )
         )
         let desiredFieldFrame = textFieldFrame(
             fixedCorner: handle.fixedCorner,
@@ -4810,7 +6125,11 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         let desiredAlignmentAnchor = textFieldAlignmentAnchor(
             for: desiredFieldFrame,
             font: font,
-            alignment: state.style.textAlignment
+            alignment: state.style.textAlignment,
+            lineCount: layoutPlan.lineCount,
+            layoutPlan: layoutPlan,
+            layoutPayload: activeLayoutPayload,
+            state: state
         )
         let residualInView = viewOffset(
             fromDocumentOffset: interaction.fieldAnchorResidualInDocument
@@ -4821,7 +6140,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         )
         let currentAlignmentAnchor = textEditorAlignmentAnchor(
             for: state,
-            text: editor.string
+            text: editor.string,
+            layout: activeLayoutPayload
         )
         let anchorDelta = documentOffset(fromViewOffset: CGSize(
             width: desiredContentAlignmentAnchor.x - currentAlignmentAnchor.x,
@@ -4835,19 +6155,41 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
            abs(
                (previousViewportWidthInDocument ?? viewportWidthInDocument)
                    - viewportWidthInDocument
+           ) < 0.001,
+           abs(
+               (textEditorCanonicalWrapWidthInDocument ?? canonicalWrapWidth)
+                   - canonicalWrapWidth
            ) < 0.001
         {
             return true
         }
         textEditingState = state
         textEditorPreferredViewportWidthInDocument = viewportWidthInDocument
+        textEditorCanonicalWrapWidthInDocument = canonicalWrapWidth
+        textEditorLayoutPayload = activeLayoutPayload
+        if abs(canonicalWrapWidth - interaction.initialCanonicalWrapWidthInDocument) > 0.001 {
+            textEditorCanonicalWrapWidthWasExplicitlyResized = true
+        }
         textEditorFieldPlacementAnchorInDocument = documentPoint(
             fromViewPoint: desiredAlignmentAnchor
         )
         textEditorPresentationLayout = nil
 
         let selection = editor.selectedRange()
-        updateTextEditorFrame(scrollsToInsertionPoint: true)
+        guard updateTextEditorFrame(
+            scrollsToInsertionPoint: true,
+            admittedFont: font
+        ) else {
+            textEditingState = previousState
+            textEditorPreferredViewportWidthInDocument = previousViewportWidthInDocument
+            textEditorCanonicalWrapWidthInDocument = previousCanonicalWrapWidthInDocument
+            textEditorLayoutPayload = previousLayoutPayload
+            textEditorCanonicalWrapWidthWasExplicitlyResized = previousExplicitResize
+            textEditorFieldPlacementAnchorInDocument = previousFieldPlacementAnchor
+            textEditorPresentationLayout = previousPresentationLayout
+            cancelTextResize(reason: "layout-capability-failed-after-preview")
+            return false
+        }
         precondition(
             editor.selectedRange() == selection,
             "Inline text font resizing changed the active insertion selection."
@@ -4929,59 +6271,426 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         fittingFieldHeight maximumHeight: CGFloat,
         initialFontSize: CGFloat,
         editableUpperBound: CGFloat,
-        state: TextEditingState
-    ) -> CGFloat {
-        var candidate = state
-        candidate.style.fontSize = initialFontSize
-        guard textEditorFieldHeight(font: textEditorFont(for: candidate)) <= maximumHeight,
-              editableUpperBound > initialFontSize
-        else { return initialFontSize }
-        candidate.style.fontSize = editableUpperBound
-        guard textEditorFieldHeight(font: textEditorFont(for: candidate)) > maximumHeight else {
-            return editableUpperBound
+        state: TextEditingState,
+        initialCanonicalWrapWidthInDocument: CGFloat,
+        resolvedFont: NSFont
+    ) throws -> CGFloat {
+        let sourceText = textEditor?.string ?? ""
+        let chromeInsets = AnnotationTextLayout.chromeInsets(for: state.chromeMode)
+        let maximumHeightInDocument = textEditorFieldHeightInDocument(
+            fromViewHeight: maximumHeight,
+            state: state
+        )
+        guard textEditorFieldHeightInDocument(
+            fromViewHeight: InlineAnnotationTextEditorFrameView.minimumInteractiveFieldHeight,
+            state: state
+        ) <= maximumHeightInDocument else {
+            return initialFontSize
+        }
+        let maximumContentHeight = max(
+            1,
+            maximumHeightInDocument - chromeInsets.height * 2
+        )
+        return try AnnotationTextLayout.maximumEditableFontSize(
+            text: sourceText,
+            style: state.style,
+            wrapWidthAtInitialSize: initialCanonicalWrapWidthInDocument,
+            initialFontSize: initialFontSize,
+            upperBound: editableUpperBound,
+            maximumContentHeight: maximumContentHeight,
+            resolvedFont: resolvedFont
+        )
+    }
+
+    private func textEditorFont(for state: TextEditingState) throws -> NSFont {
+        let request = TextEditorFontRequest(style: state.style)
+        let font: NSFont
+        if request == textEditorSessionFontRequest,
+           let admittedFont = textEditorSessionFont
+        {
+            font = admittedFont
+        } else {
+            font = try AnnotationTextLayout.resolvedFont(style: state.style)
+        }
+        guard font.pointSize.isFinite, font.pointSize > 0 else {
+            throw inlineTextKitEditingCapabilityError(
+                "resolved primary font did not retain a positive finite point size"
+            )
+        }
+        return font
+    }
+
+    /// Proves the actual NSTextView/TextKit 1 stack can reproduce an existing
+    /// annotation before selection, chrome, first-responder or editor state is
+    /// changed. Core validates the persisted renderer snapshot first; this
+    /// second boundary covers the separate live editing engine and our custom
+    /// VT/FF control-character delegate.
+    private func validateInlineTextKitEditingCapability(
+        item: AnnotationItem
+    ) throws -> NSFont {
+        guard item.kind == .text, case .rect(let rawRect) = item.geometry else {
+            throw inlineTextKitEditingCapabilityError(
+                "item did not provide text rectangle geometry"
+            )
+        }
+        let text = item.text ?? ""
+        let font = try AnnotationTextLayout.resolvedFont(style: item.style)
+        let presentationPayload: AnnotationTextLayoutPayload
+        if let payload = item.textLayout {
+            presentationPayload = payload
+        } else {
+            presentationPayload = try AnnotationTextLayout.safeLayoutPayload(
+                for: text,
+                style: item.style,
+                proposedWrapWidth: rawRect.standardized.width,
+                chromeMode: .legacyTight,
+                resolvedFont: font
+            )
+        }
+        let plan = try AnnotationTextLayout.persistedPlan(
+            text: text,
+            style: item.style,
+            payload: presentationPayload
+        )
+        try validateInlineTextKitEditingCapability(
+            text: text,
+            style: item.style,
+            payload: presentationPayload,
+            plan: plan,
+            resolvedFont: font
+        )
+        AppLog.capture.debug(
+            "Validated live inline TextKit editing capability: id=\(item.id.uuidString, privacy: .public), lines=\(plan.lineCount, privacy: .public), characters=\(text.utf16.count, privacy: .public), explicitLayout=\(item.textLayout != nil, privacy: .public)"
+        )
+        return font
+    }
+
+    private func validateInlineTextKitEditingCapability(
+        text: String,
+        style: AnnotationStyle,
+        payload: AnnotationTextLayoutPayload,
+        plan: AnnotationTextLayoutPlan,
+        resolvedFont: NSFont? = nil
+    ) throws {
+        let font: NSFont
+        if let resolvedFont {
+            font = resolvedFont
+        } else {
+            font = try AnnotationTextLayout.resolvedFont(style: style)
+        }
+        let paragraphStyle = canonicalInlineTextParagraphStyle(
+            style: style,
+            lineAdvance: plan.lineAdvance
+        )
+        guard let canonicalBaselineOffset = measuredStableTextEditorBaselineOffset(
+            font: font,
+            paragraphStyle: paragraphStyle,
+            lineHeight: plan.lineAdvance
+        ) else {
+            throw inlineTextKitEditingCapabilityError(
+                "could not resolve the canonical reference baseline"
+            )
         }
 
-        var lowerBound = initialFontSize
-        var upperBound = editableUpperBound
-        for _ in 0..<14 {
-            let midpoint = (lowerBound + upperBound) / 2
-            candidate.style.fontSize = midpoint
-            if textEditorFieldHeight(font: textEditorFont(for: candidate)) <= maximumHeight {
-                lowerBound = midpoint
-            } else {
-                upperBound = midpoint
+        let textStorage = NSTextStorage()
+        let layoutManager = InlineAnnotationTextLayoutManager()
+        let textContainer = NSTextContainer(size: .zero)
+        textStorage.addLayoutManager(layoutManager)
+        layoutManager.addTextContainer(textContainer)
+        let chromeInsets = AnnotationTextLayout.chromeInsets(
+            for: payload.chromeMode
+        )
+        let editorInsets = CGSize(
+            width: chromeInsets.width + payload.leadingOverhang,
+            height: chromeInsets.height
+        )
+        let documentSize = CGSize(
+            width: chromeInsets.width * 2
+                + payload.leadingOverhang
+                + plan.wrapWidth
+                + payload.trailingOverhang,
+            height: chromeInsets.height * 2 + plan.contentHeight
+        )
+        guard documentSize.width.isFinite,
+              documentSize.height.isFinite,
+              documentSize.width > 0,
+              documentSize.height > 0
+        else {
+            throw inlineTextKitEditingCapabilityError(
+                "saved plan produced a non-finite offscreen document extent"
+            )
+        }
+        let editor = InlineAnnotationTextView(
+            frame: CGRect(origin: .zero, size: documentSize),
+            textContainer: textContainer
+        )
+        editor.isRichText = false
+        editor.importsGraphics = false
+        editor.drawsBackground = false
+        editor.isHorizontallyResizable = false
+        editor.isVerticallyResizable = false
+        editor.autoresizingMask = []
+        editor.textContainerInset = editorInsets
+        editor.font = font
+        editor.alignment = nsTextAlignment(style.textAlignment)
+        editor.defaultParagraphStyle = paragraphStyle
+        textContainer.lineFragmentPadding = 0
+        textContainer.maximumNumberOfLines = 0
+        textContainer.lineBreakMode = .byWordWrapping
+        textContainer.widthTracksTextView = false
+        textContainer.heightTracksTextView = false
+        textContainer.containerSize = CGSize(
+            width: plan.wrapWidth,
+            // Editing admission validates line ownership, not viewport
+            // clipping. The live editor also begins with an unbounded
+            // canonical container before its document host is projected into
+            // the viewport; keep every saved visual line inspectable here.
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        editor.string = text
+        editor.typingAttributes = [
+            .font: font,
+            .paragraphStyle: paragraphStyle
+        ]
+        if textStorage.length > 0 {
+            textStorage.addAttributes(
+                [
+                    .font: font,
+                    .paragraphStyle: paragraphStyle
+                ],
+                range: NSRange(location: 0, length: textStorage.length)
+            )
+        }
+        layoutManager.setCanonicalBaselineOffset(canonicalBaselineOffset)
+        layoutManager.ensureLayout(for: textContainer)
+
+        let actualLines = inlineTextKitCapabilityLineSnapshots(
+            editor: editor,
+            canonicalBaselineOffset: canonicalBaselineOffset
+        )
+        guard actualLines.count == plan.lines.count else {
+            throw inlineTextKitEditingCapabilityError(
+                "line-count mismatch expected=\(plan.lines.count) actual=\(actualLines.count)"
+            )
+        }
+        guard let firstActualBaseline = actualLines.first?.baselineY else {
+            throw inlineTextKitEditingCapabilityError(
+                "live TextKit produced no inspectable visual line"
+            )
+        }
+        let expectsExtraLine = text.isEmpty || ((text as NSString).length > 0
+            && isInlineTextHardBreakUTF16Unit(
+                (text as NSString).character(at: (text as NSString).length - 1)
+            ))
+        let tolerance = AnnotationTextLayout.persistedGeometryTolerance
+        for (lineIndex, pair) in zip(plan.lines, actualLines).enumerated() {
+            let (expected, actual) = pair
+            guard NSEqualRanges(expected.utf16Range, actual.utf16Range),
+                  NSEqualRanges(
+                    expected.consumedUTF16Range,
+                    actual.consumedUTF16Range
+                  )
+            else {
+                throw inlineTextKitEditingCapabilityError(
+                    "line \(lineIndex) UTF-16 ownership mismatch expected=\(expected.utf16Range)/\(expected.consumedUTF16Range) actual=\(actual.utf16Range)/\(actual.consumedUTF16Range)"
+                )
+            }
+            guard abs(expected.originX - actual.usedRectMinX) < tolerance else {
+                throw inlineTextKitEditingCapabilityError(
+                    "line \(lineIndex) used-origin mismatch expected=\(expected.originX) actual=\(actual.usedRectMinX)"
+                )
+            }
+            let actualBaselineOffset = firstActualBaseline - actual.baselineY
+            guard abs(expected.baselineOffset - actualBaselineOffset) < tolerance else {
+                throw inlineTextKitEditingCapabilityError(
+                    "line \(lineIndex) baseline mismatch expected=\(expected.baselineOffset) actual=\(actualBaselineOffset)"
+                )
+            }
+            guard abs(
+                actual.baselineOffsetInFragment - canonicalBaselineOffset
+            ) < tolerance else {
+                throw inlineTextKitEditingCapabilityError(
+                    "line \(lineIndex) fragment baseline was not canonical"
+                )
+            }
+            let shouldBeExtraLine = expectsExtraLine
+                && lineIndex == plan.lines.count - 1
+            guard actual.isExtraLineFragment == shouldBeExtraLine else {
+                throw inlineTextKitEditingCapabilityError(
+                    "line \(lineIndex) extra-line ownership mismatch expected=\(shouldBeExtraLine) actual=\(actual.isExtraLineFragment)"
+                )
             }
         }
-        return lowerBound
     }
 
-    private func textEditorFont(for state: TextEditingState) -> NSFont {
-        let visible = visibleDocumentRect()
-        precondition(
-            bounds.height > 0 && visible.height > 0,
-            "Inline text typography requires non-empty canvas geometry."
-        )
-        let scaleY = bounds.height / visible.height
-        let fontSize = state.style.fontSize * scaleY * abs(state.transform.scaleY)
-        precondition(
-            fontSize.isFinite && fontSize > 0,
-            "Inline text typography must exactly preserve a positive presentation font size."
-        )
-        return AnnotationTextLayout.font(style: state.style, size: fontSize)
+    private func inlineTextKitCapabilityLineSnapshots(
+        editor: NSTextView,
+        canonicalBaselineOffset: CGFloat
+    ) -> [InlineTextKitCapabilityLineSnapshot] {
+        guard let textContainer = editor.textContainer,
+              let layoutManager = editor.layoutManager
+        else { return [] }
+        layoutManager.ensureLayout(for: textContainer)
+        let nsText = editor.string as NSString
+        let glyphRange = layoutManager.glyphRange(for: textContainer)
+        var snapshots: [InlineTextKitCapabilityLineSnapshot] = []
+        layoutManager.enumerateLineFragments(
+            forGlyphRange: glyphRange
+        ) { lineFragmentRect, usedRect, _, lineGlyphRange, _ in
+            let consumedRange = layoutManager.characterRange(
+                forGlyphRange: lineGlyphRange,
+                actualGlyphRange: nil
+            )
+            var drawableRange = consumedRange
+            while drawableRange.length > 0 {
+                let finalUTF16Unit = nsText.character(
+                    at: NSMaxRange(drawableRange) - 1
+                )
+                guard self.isInlineTextHardBreakUTF16Unit(finalUTF16Unit) else {
+                    break
+                }
+                drawableRange.length -= 1
+            }
+            let baselineLocation = lineGlyphRange.length > 0
+                ? layoutManager.location(forGlyphAt: lineGlyphRange.location)
+                : usedRect.origin
+            snapshots.append(InlineTextKitCapabilityLineSnapshot(
+                utf16Range: drawableRange,
+                consumedUTF16Range: consumedRange,
+                usedRectMinX: usedRect.minX,
+                baselineY: lineFragmentRect.minY + baselineLocation.y,
+                baselineOffsetInFragment: baselineLocation.y,
+                isExtraLineFragment: false
+            ))
+        }
+        let terminatesWithHardBreak = nsText.length > 0
+            && isInlineTextHardBreakUTF16Unit(
+                nsText.character(at: nsText.length - 1)
+            )
+        if editor.string.isEmpty || terminatesWithHardBreak {
+            let emptyRange = NSRange(location: nsText.length, length: 0)
+            snapshots.append(InlineTextKitCapabilityLineSnapshot(
+                utf16Range: emptyRange,
+                consumedUTF16Range: emptyRange,
+                usedRectMinX: layoutManager.extraLineFragmentUsedRect.minX,
+                baselineY: layoutManager.extraLineFragmentRect.minY
+                    + canonicalBaselineOffset,
+                baselineOffsetInFragment: canonicalBaselineOffset,
+                isExtraLineFragment: true
+            ))
+        }
+        return snapshots
     }
 
-    private func textEditorFieldHeight(font: NSFont) -> CGFloat {
-        max(
+    private func inlineTextKitEditingCapabilityError(
+        _ diagnostic: String
+    ) -> InlineTextKitEditingCapabilityError {
+        AppLog.capture.error(
+            "Rejected live inline TextKit editing capability: \(diagnostic, privacy: .public)"
+        )
+        return InlineTextKitEditingCapabilityError(diagnostic: diagnostic)
+    }
+
+    private func canonicalInlineTextParagraphStyle(
+        style: AnnotationStyle,
+        lineAdvance: CGFloat
+    ) -> NSMutableParagraphStyle {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.minimumLineHeight = lineAdvance
+        paragraphStyle.maximumLineHeight = lineAdvance
+        paragraphStyle.lineBreakMode = .byWordWrapping
+        paragraphStyle.alignment = nsTextAlignment(style.textAlignment)
+        return paragraphStyle
+    }
+
+    private func canonicalTextLayoutPlan(
+        text: String,
+        style: AnnotationStyle,
+        payload: AnnotationTextLayoutPayload,
+        context: String
+    ) throws -> AnnotationTextLayoutPlan {
+        do {
+            return try AnnotationTextLayout.persistedPlan(
+                text: text,
+                style: style,
+                payload: payload
+            )
+        } catch {
+            AppLog.capture.error(
+                "Rejected canonical inline text plan: context=\(context, privacy: .public)"
+            )
+            throw error
+        }
+    }
+
+    private func nsTextAlignment(_ alignment: AnnotationTextAlignment) -> NSTextAlignment {
+        switch alignment {
+        case .leading: return .left
+        case .center: return .center
+        case .trailing: return .right
+        }
+    }
+
+    private func textEditorFieldHeight(
+        font: NSFont,
+        lineCount: Int = 1,
+        layoutPlan: AnnotationTextLayoutPlan? = nil,
+        state explicitState: TextEditingState? = nil
+    ) -> CGFloat {
+        let state = explicitState ?? textEditingState
+        let verticalInsetInDocument = state.map {
+            AnnotationTextLayout.chromeInsets(for: $0.chromeMode).height
+        } ?? InlineTextEditorMetrics.verticalPadding
+        let lines = CGFloat(max(1, lineCount))
+        let contentHeightInDocument = layoutPlan?.contentHeight
+            ?? AnnotationTextLayout.lineAdvance(for: font) * lines
+        let completeHeightInDocument = contentHeightInDocument
+            + verticalInsetInDocument * 2
+        let completeHeightInView = state.map {
+            textEditorFieldHeightInView(
+                fromUntransformedDocumentHeight: completeHeightInDocument,
+                state: $0
+            )
+        } ?? completeHeightInDocument
+        // The border is interaction chrome, not persisted text geometry. Give
+        // it a whole view-point ceiling so small fallback-glyph extent changes
+        // do not make the field visibly breathe while IME composition swaps
+        // fonts. TextKit's canonical bounds and every line origin remain exact.
+        let stableInteractiveHeight = ceil(completeHeightInView)
+        return max(
             InlineAnnotationTextEditorFrameView.minimumInteractiveFieldHeight,
-            max(1, ceil(font.ascender - font.descender + font.leading))
-                + InlineTextEditorMetrics.verticalPadding * 2
+            stableInteractiveHeight
         )
     }
 
-    private func textFieldBaselineInsetFromSouth(font: NSFont) -> CGFloat {
-        max(0, -font.descender)
-            + max(0, font.leading) / 2
-            + InlineTextEditorMetrics.verticalPadding
+    private func textFieldBaselineInsetFromSouth(
+        font: NSFont,
+        lineCount: Int = 1,
+        layoutPlan: AnnotationTextLayoutPlan? = nil,
+        state explicitState: TextEditingState? = nil
+    ) -> CGFloat {
+        let state = explicitState ?? textEditingState
+        let verticalInsetInDocument = state.map {
+            AnnotationTextLayout.chromeInsets(for: $0.chromeMode).height
+        } ?? InlineTextEditorMetrics.verticalPadding
+        let baselineInsetInDocument: CGFloat
+        if let layoutPlan {
+            baselineInsetInDocument = layoutPlan.bottomExtent
+                + CGFloat(max(0, layoutPlan.lineCount - 1)) * layoutPlan.lineAdvance
+                + verticalInsetInDocument
+        } else {
+            let extraLines = CGFloat(max(0, max(1, lineCount) - 1))
+            baselineInsetInDocument = max(0, -font.descender)
+                + max(0, font.leading) / 2
+                + verticalInsetInDocument
+                + AnnotationTextLayout.lineAdvance(for: font) * extraLines
+        }
+        return state.map {
+            textEditorFieldHeightInView(
+                fromUntransformedDocumentHeight: baselineInsetInDocument,
+                state: $0
+            )
+        } ?? baselineInsetInDocument
     }
 
     private func resolvedTextFieldFrame(
@@ -4989,7 +6698,11 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         font: NSFont,
         preferredViewportWidth: CGFloat,
         availableFieldBounds: CGRect,
-        alignment: AnnotationTextAlignment
+        alignment: AnnotationTextAlignment,
+        lineCount: Int = 1,
+        layoutPlan: AnnotationTextLayoutPlan? = nil,
+        layoutPayload: AnnotationTextLayoutPayload? = nil,
+        state: TextEditingState? = nil
     ) -> CGRect {
         precondition(
             preferredViewportWidth > 0
@@ -4998,20 +6711,38 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             "Inline text field layout requires finite, non-empty geometry."
         )
         let width = min(availableFieldBounds.width, preferredViewportWidth)
-        let height = min(availableFieldBounds.height, textEditorFieldHeight(font: font))
+        let height = min(
+            availableFieldBounds.height,
+            textEditorFieldHeight(
+                font: font,
+                lineCount: lineCount,
+                layoutPlan: layoutPlan,
+                state: state
+            )
+        )
         let proposedX: CGFloat
+        let horizontalMargins = textEditorHorizontalMarginsInView(
+            for: layoutPayload ?? textEditorLayoutPayload
+        )
         switch alignment {
         case .leading:
-            proposedX = alignmentAnchor.x - InlineTextEditorMetrics.horizontalPadding
+            proposedX = alignmentAnchor.x - horizontalMargins.leading
         case .center:
-            proposedX = alignmentAnchor.x - width / 2
+            proposedX = alignmentAnchor.x
+                + (horizontalMargins.trailing - horizontalMargins.leading) / 2
+                - width / 2
         case .trailing:
             proposedX = alignmentAnchor.x
                 - width
-                + InlineTextEditorMetrics.horizontalPadding
+                + horizontalMargins.trailing
         }
         let proposedY = alignmentAnchor.y
-            - textFieldBaselineInsetFromSouth(font: font)
+            - textFieldBaselineInsetFromSouth(
+                font: font,
+                lineCount: lineCount,
+                layoutPlan: layoutPlan,
+                state: state
+            )
         return CGRect(
             x: min(
                 max(availableFieldBounds.minX, proposedX),
@@ -5029,24 +6760,37 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     private func textFieldAlignmentAnchor(
         for fieldFrame: CGRect,
         font: NSFont,
-        alignment: AnnotationTextAlignment
+        alignment: AnnotationTextAlignment,
+        lineCount: Int = 1,
+        layoutPlan: AnnotationTextLayoutPlan? = nil,
+        layoutPayload: AnnotationTextLayoutPayload? = nil,
+        state: TextEditingState? = nil
     ) -> CGPoint {
         precondition(
             fieldFrame.width > 0 && fieldFrame.height > 0,
             "Inline text field inversion requires a non-empty target frame."
         )
         let x: CGFloat
+        let horizontalMargins = textEditorHorizontalMarginsInView(
+            for: layoutPayload ?? textEditorLayoutPayload
+        )
         switch alignment {
         case .leading:
-            x = fieldFrame.minX + InlineTextEditorMetrics.horizontalPadding
+            x = fieldFrame.minX + horizontalMargins.leading
         case .center:
             x = fieldFrame.midX
+                + (horizontalMargins.leading - horizontalMargins.trailing) / 2
         case .trailing:
-            x = fieldFrame.maxX - InlineTextEditorMetrics.horizontalPadding
+            x = fieldFrame.maxX - horizontalMargins.trailing
         }
         return CGPoint(
             x: x,
-            y: fieldFrame.minY + textFieldBaselineInsetFromSouth(font: font)
+            y: fieldFrame.minY + textFieldBaselineInsetFromSouth(
+                font: font,
+                lineCount: lineCount,
+                layoutPlan: layoutPlan,
+                state: state
+            )
         )
     }
 
@@ -5114,6 +6858,121 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         )
     }
 
+    private func textEditorChromeInsetsInView(
+        for state: TextEditingState
+    ) -> CGSize {
+        let documentInsets = AnnotationTextLayout.chromeInsets(for: state.chromeMode)
+        let canvasInsets = viewOffset(fromDocumentOffset: documentInsets)
+        return CGSize(
+            width: canvasInsets.width * abs(state.transform.scaleX),
+            height: canvasInsets.height * abs(state.transform.scaleY)
+        )
+    }
+
+    private func textEditorHorizontalMarginsInView(
+        for payload: AnnotationTextLayoutPayload?
+    ) -> (leading: CGFloat, trailing: CGFloat) {
+        guard let state = textEditingState else {
+            return (
+                InlineTextEditorMetrics.horizontalPadding,
+                InlineTextEditorMetrics.horizontalPadding
+            )
+        }
+        let chrome = textEditorChromeInsetsInView(for: state).width
+        guard let payload else { return (chrome, chrome) }
+        return (
+            chrome + textEditorFieldWidthInView(
+                fromUntransformedDocumentWidth: payload.leadingOverhang,
+                state: state
+            ),
+            chrome + textEditorFieldWidthInView(
+                fromUntransformedDocumentWidth: payload.trailingOverhang,
+                state: state
+            )
+        )
+    }
+
+    private var textEditorCanvasScaleX: CGFloat {
+        let scale = viewOffset(fromDocumentOffset: CGSize(width: 1, height: 0)).width
+        precondition(
+            scale.isFinite && scale > 0,
+            "Inline text layout requires a finite positive horizontal canvas scale."
+        )
+        return scale
+    }
+
+    private func textEditorFieldWidthInView(
+        fromUntransformedDocumentWidth width: CGFloat,
+        state: TextEditingState
+    ) -> CGFloat {
+        viewOffset(fromDocumentOffset: CGSize(width: width, height: 0)).width
+            * abs(state.transform.scaleX)
+    }
+
+    private func textEditorFieldHeightInView(
+        fromUntransformedDocumentHeight height: CGFloat,
+        state: TextEditingState
+    ) -> CGFloat {
+        viewOffset(fromDocumentOffset: CGSize(width: 0, height: height)).height
+            * abs(state.transform.scaleY)
+    }
+
+    private func textEditorFieldWidthInDocument(
+        fromViewWidth width: CGFloat,
+        state: TextEditingState
+    ) -> CGFloat {
+        precondition(
+            state.transform.scaleX.isFinite && abs(state.transform.scaleX) > 0,
+            "Inline text width conversion requires a finite non-zero uniform transform."
+        )
+        return documentOffset(fromViewOffset: CGSize(
+            width: width / abs(state.transform.scaleX),
+            height: 0
+        )).width
+    }
+
+    private func textEditorFieldHeightInDocument(
+        fromViewHeight height: CGFloat,
+        state: TextEditingState
+    ) -> CGFloat {
+        precondition(
+            state.transform.scaleY.isFinite && abs(state.transform.scaleY) > 0,
+            "Inline text height conversion requires a finite non-zero uniform transform."
+        )
+        return documentOffset(fromViewOffset: CGSize(
+            width: 0,
+            height: height / abs(state.transform.scaleY)
+        )).height
+    }
+
+    private func textEditorDocumentSizeInView(
+        fromCanonicalSize size: CGSize,
+        state: TextEditingState
+    ) -> CGSize {
+        CGSize(
+            width: textEditorFieldWidthInView(
+                fromUntransformedDocumentWidth: size.width,
+                state: state
+            ),
+            height: textEditorFieldHeightInView(
+                fromUntransformedDocumentHeight: size.height,
+                state: state
+            )
+        )
+    }
+
+    private func canonicalTextWrapWidth(
+        forFieldWidth fieldWidth: CGFloat,
+        state: TextEditingState
+    ) -> CGFloat {
+        AnnotationTextLayout.canonicalWrapWidth(
+            fromPresentationFieldWidth: fieldWidth,
+            chromeMode: state.chromeMode,
+            canvasScale: textEditorCanvasScaleX,
+            uniformTransformScale: abs(state.transform.scaleX)
+        )
+    }
+
     private func style(
         _ source: AnnotationStyle,
         applying color: RGBAColor,
@@ -5144,22 +7003,166 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         }
     }
 
-    private func updateTextEditorFrame(
-        scrollsToInsertionPoint: Bool = false
+    private func applyCanonicalTextEditorTypography(
+        to editor: InlineAnnotationTextView,
+        state: TextEditingState,
+        font: NSFont,
+        lineAdvance: CGFloat,
+        canonicalBaselineOffset: CGFloat
     ) {
-        guard let editor = textEditor,
+        precondition(
+            lineAdvance.isFinite && lineAdvance > 0,
+            "Inline text requires a finite positive canonical line advance."
+        )
+        let alignment = nsTextAlignment(state.style.textAlignment)
+        let fontMatches: (NSFont?) -> Bool = { candidate in
+            guard let candidate else { return false }
+            return candidate.fontName == font.fontName
+                && abs(candidate.pointSize - font.pointSize) < 0.001
+        }
+        let paragraphMatches: (NSParagraphStyle?) -> Bool = { paragraphStyle in
+            guard let paragraphStyle else { return false }
+            return abs(paragraphStyle.minimumLineHeight - lineAdvance) < 0.001
+                && abs(paragraphStyle.maximumLineHeight - lineAdvance) < 0.001
+                && paragraphStyle.lineBreakMode == .byWordWrapping
+                && paragraphStyle.alignment == alignment
+        }
+        let canonicalLineAdvanceChanged = textEditorCanonicalLineAdvance.map {
+            abs($0 - lineAdvance) >= 0.001
+        } ?? true
+        let defaultTypographyChanged = !fontMatches(editor.font)
+            || !paragraphMatches(editor.defaultParagraphStyle)
+        let typingTypographyChanged = !fontMatches(
+            editor.typingAttributes[.font] as? NSFont
+        ) || !paragraphMatches(
+            editor.typingAttributes[.paragraphStyle] as? NSParagraphStyle
+        )
+        var storageTypographyChanged = false
+        if let textStorage = editor.textStorage, textStorage.length > 0 {
+            textStorage.enumerateAttributes(
+                in: NSRange(location: 0, length: textStorage.length),
+                options: []
+            ) { attributes, _, stop in
+                guard fontMatches(attributes[.font] as? NSFont),
+                      paragraphMatches(
+                        attributes[.paragraphStyle] as? NSParagraphStyle
+                      )
+                else {
+                    storageTypographyChanged = true
+                    stop.pointee = true
+                    return
+                }
+            }
+        }
+        guard canonicalLineAdvanceChanged
+                || defaultTypographyChanged
+                || typingTypographyChanged
+                || storageTypographyChanged
+        else { return }
+
+        let previousLineAdvance = textEditorCanonicalLineAdvance
+        let paragraphStyle = canonicalInlineTextParagraphStyle(
+            style: state.style,
+            lineAdvance: lineAdvance
+        )
+
+        // Publish the generation before touching NSTextStorage. AppKit may
+        // synchronously ask for another layout while processing attributes;
+        // that pass must observe the same canonical typography owner.
+        textEditorCanonicalLineAdvance = lineAdvance
+        editor.font = font
+        editor.alignment = alignment
+        editor.defaultParagraphStyle = paragraphStyle
+        guard let layoutManager = editor.layoutManager
+                as? InlineAnnotationTextLayoutManager
+        else {
+            preconditionFailure(
+                "Inline text requires its canonical TextKit layout manager."
+            )
+        }
+        layoutManager.setCanonicalBaselineOffset(canonicalBaselineOffset)
+        textEditorSessionBaselineOffset = canonicalBaselineOffset
+        var typingAttributes = editor.typingAttributes
+        typingAttributes[.font] = font
+        typingAttributes[.foregroundColor] = annotationColor(state.style.strokeColor)
+        typingAttributes[.paragraphStyle] = paragraphStyle
+        editor.typingAttributes = typingAttributes
+        if let textStorage = editor.textStorage, textStorage.length > 0 {
+            // Preserve IME clause/underline attributes while enforcing the
+            // same canonical font and paragraph advance on the marked run.
+            // A fallback glyph is resolved by TextKit from this primary font;
+            // an IME-provided presentation font must not become layout state.
+            textStorage.addAttributes(
+                [
+                    .font: font,
+                    .paragraphStyle: paragraphStyle
+                ],
+                range: NSRange(location: 0, length: textStorage.length)
+            )
+        }
+        if canonicalLineAdvanceChanged, let previousLineAdvance {
+            AppLog.capture.debug(
+                "Updated canonical inline text line advance: previous=\(previousLineAdvance, privacy: .public), next=\(lineAdvance, privacy: .public), markedText=\(editor.hasMarkedText(), privacy: .public), characters=\(editor.string.utf16.count, privacy: .public)"
+            )
+        }
+    }
+
+    @discardableResult
+    private func updateTextEditorFrame(
+        scrollsToInsertionPoint: Bool = false,
+        admittedFont: NSFont? = nil
+    ) -> Bool {
+        guard textEditor != nil,
               let state = textEditingState,
               bounds.width > 0, bounds.height > 0
-        else { return }
-        let font = textEditorFont(for: state)
+        else { return true }
+        let previousLayoutBounds = textEditorLayoutBounds
+        let previousDocumentScaleInView = textEditorDocumentScaleInView
+        let previousSessionFont = textEditorSessionFont
+        let previousSessionFontRequest = textEditorSessionFontRequest
+        let previousCanonicalLineAdvance = textEditorCanonicalLineAdvance
+        let previousSessionBaselineOffset = textEditorSessionBaselineOffset
+        let previousPresentationLayout = textEditorPresentationLayout
+        let previousPreferredViewportWidth = textEditorPreferredViewportWidthInDocument
+        let font: NSFont
+        do {
+            if let admittedFont {
+                font = admittedFont
+            } else {
+                font = try textEditorFont(for: state)
+            }
+        } catch {
+            reportTextLayoutAuthoringFailure(
+                error,
+                operation: "resolve-inline-text-font",
+                itemID: state.itemID
+            )
+            return false
+        }
+        let fontRequest = TextEditorFontRequest(style: state.style)
+        let documentScaleInView = CGSize(
+            width: textEditorFieldWidthInView(
+                fromUntransformedDocumentWidth: 1,
+                state: state
+            ),
+            height: textEditorFieldHeightInView(
+                fromUntransformedDocumentHeight: 1,
+                state: state
+            )
+        )
 
         let layoutBoundsChanged = textEditorLayoutBounds != bounds
-        let sessionFontChanged = textEditorSessionFont.map {
-            $0.fontName != font.fontName || abs($0.pointSize - font.pointSize) > 0.001
+        let documentScaleChanged = textEditorDocumentScaleInView.map {
+            abs($0.width - documentScaleInView.width) > 0.000_001
+                || abs($0.height - documentScaleInView.height) > 0.000_001
         } ?? true
-        if layoutBoundsChanged || sessionFontChanged {
+        let sessionFontChanged = textEditorSessionFontRequest != fontRequest
+            || (textEditorSessionFont.map {
+                $0.fontName != font.fontName || abs($0.pointSize - font.pointSize) > 0.001
+            } ?? true)
+        if layoutBoundsChanged || documentScaleChanged || sessionFontChanged {
             if textEditorGeometryConfigurationCount > 0 {
-                let message = "Recalibrating inline text after geometry or typography changed: boundsChanged=\(layoutBoundsChanged), sessionFontChanged=\(sessionFontChanged), explicitResize=\(self.textResizeInteraction != nil), configurations=\(self.textEditorGeometryConfigurationCount)"
+                let message = "Recalibrating inline text after geometry or typography changed: boundsChanged=\(layoutBoundsChanged), documentScaleChanged=\(documentScaleChanged), sessionFontChanged=\(sessionFontChanged), explicitResize=\(self.textResizeInteraction != nil), configurations=\(self.textEditorGeometryConfigurationCount)"
                 if textResizeInteraction == nil {
                     AppLog.capture.notice("\(message, privacy: .public)")
                 } else {
@@ -5167,70 +7170,102 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 }
             }
             textEditorLayoutBounds = bounds
+            textEditorDocumentScaleInView = documentScaleInView
             textEditorSessionFont = font
-            textEditorPresentationLayout = nil
-
-            // NSTextView.font reflects the current selection and marked-text
-            // attributes. It is not a stable source of editor typography:
-            // Chinese input methods may temporarily expose a fallback font or
-            // no uniform font at all. The editing session owns this font and
-            // changes it only at an explicit canvas/font-size boundary.
-            editor.font = font
-            let paragraphStyle = NSMutableParagraphStyle()
-            let lineHeight = max(1, ceil(font.ascender - font.descender + font.leading))
-            paragraphStyle.minimumLineHeight = lineHeight
-            paragraphStyle.maximumLineHeight = lineHeight
-            paragraphStyle.lineBreakMode = .byClipping
-            paragraphStyle.alignment = .left
-            editor.defaultParagraphStyle = paragraphStyle
-            textEditorSessionBaselineOffset = stableTextEditorBaselineOffset(
-                font: font,
-                paragraphStyle: paragraphStyle,
-                lineHeight: lineHeight
-            )
-            var typingAttributes = editor.typingAttributes
-            typingAttributes[.font] = font
-            typingAttributes[.foregroundColor] = annotationColor(state.style.strokeColor)
-            typingAttributes[.paragraphStyle] = paragraphStyle
-            editor.typingAttributes = typingAttributes
-            if let textStorage = editor.textStorage,
-               textStorage.length > 0,
-               !editor.hasMarkedText()
-            {
-                textStorage.addAttributes(
-                    [
-                        .font: font,
-                        .foregroundColor: annotationColor(state.style.strokeColor),
-                        .paragraphStyle: paragraphStyle
-                    ],
-                    range: NSRange(location: 0, length: textStorage.length)
-                )
+            textEditorSessionFontRequest = fontRequest
+            if sessionFontChanged {
+                // The next canonical plan owns the complete font/line-height
+                // generation, even when two primary fonts share a point size.
+                textEditorCanonicalLineAdvance = nil
+                textEditorSessionBaselineOffset = nil
             }
+            textEditorPresentationLayout = nil
         }
         if textEditorPreferredViewportWidthInDocument == nil {
-            // The outer field is a spatial anchor, not a measurement preview.
-            // Choose its width once so Latin glyphs, fallback glyphs and IME
-            // marked text cannot resize it while the user is typing.
-            let initialTextWidth = AnnotationTextLayout.lineMetrics(
-                for: editor.string,
-                style: state.style,
-                size: font.pointSize
-            ).width
-            let initialViewportWidth = max(
-                InlineTextEditorMetrics.minimumViewportWidth,
-                min(
-                    InlineTextEditorMetrics.maximumViewportWidth,
-                    ceil(initialTextWidth) + InlineTextEditorMetrics.horizontalPadding * 2
-                )
+            // New drafts start compact and grow with the text. Re-editing a
+            // wrapped annotation keeps the committed wrap width so the same
+            // line breaks come back. The width never shrinks during a session,
+            // so IME marked text cannot oscillate the frame.
+            let availableWidth = max(
+                1,
+                bounds.width - InlineAnnotationTextEditorFrameView.chromeOutset * 2
             )
-            textEditorPreferredViewportWidthInDocument = documentOffset(
-                fromViewOffset: CGSize(width: initialViewportWidth, height: 0)
-            ).width
+            let maximumViewportWidth = min(
+                InlineTextEditorMetrics.maximumViewportWidth,
+                availableWidth
+            )
+            let initialViewportWidth: CGFloat
+            if let itemID = state.itemID,
+               let item = session.controller.document.annotations.first(where: { $0.id == itemID }),
+               case .rect = item.geometry
+            {
+                let existingWidth: CGFloat
+                if let layout = item.textLayout {
+                    existingWidth = AnnotationTextLayout.presentationFieldWidth(
+                        layout: layout,
+                        canvasScale: textEditorCanvasScaleX,
+                        uniformTransformScale: abs(state.transform.scaleX)
+                    )
+                } else {
+                    existingWidth = AnnotationTextLayout.presentationFieldWidth(
+                        canonicalWrapWidth: AnnotationTextLayout.canonicalWrapWidth(for: item),
+                        chromeMode: .legacyTight,
+                        canvasScale: textEditorCanvasScaleX,
+                        uniformTransformScale: abs(state.transform.scaleX)
+                    )
+                }
+                initialViewportWidth = min(
+                    maximumViewportWidth,
+                    max(1, existingWidth)
+                )
+            } else {
+                initialViewportWidth = min(
+                    maximumViewportWidth,
+                    InlineTextEditorMetrics.minimumViewportWidth
+                )
+            }
+            textEditorPreferredViewportWidthInDocument = textEditorFieldWidthInDocument(
+                fromViewWidth: initialViewportWidth,
+                state: state
+            )
         }
-        updateTextEditorLayout(scrollsToInsertionPoint: scrollsToInsertionPoint)
+        let didResolveLayout = updateTextEditorLayout(
+            scrollsToInsertionPoint: scrollsToInsertionPoint
+        )
+        if !didResolveLayout {
+            textEditorLayoutBounds = previousLayoutBounds
+            textEditorDocumentScaleInView = previousDocumentScaleInView
+            textEditorSessionFont = previousSessionFont
+            textEditorSessionFontRequest = previousSessionFontRequest
+            textEditorCanonicalLineAdvance = previousCanonicalLineAdvance
+            textEditorSessionBaselineOffset = previousSessionBaselineOffset
+            textEditorPresentationLayout = previousPresentationLayout
+            textEditorPreferredViewportWidthInDocument = previousPreferredViewportWidth
+        }
+        return didResolveLayout
     }
 
-    private func updateTextEditorLayout(scrollsToInsertionPoint: Bool) {
+    @discardableResult
+    private func updateTextEditorLayout(scrollsToInsertionPoint: Bool) -> Bool {
+        do {
+            try updateTextEditorLayoutChecked(
+                scrollsToInsertionPoint: scrollsToInsertionPoint
+            )
+            clearTextLayoutAuthoringFailure()
+            return true
+        } catch {
+            reportTextLayoutAuthoringFailure(
+                error,
+                operation: "update-inline-text-layout",
+                itemID: textEditingState?.itemID
+            )
+            return false
+        }
+    }
+
+    private func updateTextEditorLayoutChecked(
+        scrollsToInsertionPoint: Bool
+    ) throws {
         guard let editor = textEditor,
               let container = textEditorContainer,
               let documentView = textEditorDocumentView,
@@ -5240,23 +7275,204 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
               let font = textEditorSessionFont,
               bounds.width > 0, bounds.height > 0
         else { return }
-        let preferredViewportWidth = viewOffset(
-            fromDocumentOffset: CGSize(
-                width: preferredViewportWidthInDocument,
-                height: 0
+        if let priorGeneration = textEditorRendererGeneration {
+            try AnnotationTextLayout.validateEditingCapability(
+                text: priorGeneration.text,
+                style: priorGeneration.style,
+                layout: priorGeneration.payload
             )
-        ).width
+        }
+        var preferredViewportWidth = textEditorFieldWidthInView(
+            fromUntransformedDocumentWidth: preferredViewportWidthInDocument,
+            state: state
+        )
         precondition(
             preferredViewportWidth.isFinite && preferredViewportWidth > 0,
             "Inline text viewport width must resolve to a positive view-space value."
         )
-        frameView.setFontSizeAccessibilityValue(state.style.fontSize)
-        let lineMetrics = AnnotationTextLayout.lineMetrics(
+        let measuredWidth = AnnotationTextLayout.maximumLineWidth(
+            for: editor.string,
+            resolvedFont: font
+        )
+        let chromeOutset = InlineAnnotationTextEditorFrameView.chromeOutset
+        let availableFieldBounds = bounds.insetBy(dx: chromeOutset, dy: chromeOutset)
+        guard availableFieldBounds.width > 0, availableFieldBounds.height > 0 else {
+            preconditionFailure("Inline text chrome requires a non-empty canvas interior.")
+        }
+        let maximumViewportWidth = min(
+            InlineTextEditorMetrics.maximumViewportWidth,
+            availableFieldBounds.width
+        )
+        let semanticWrapCap = canonicalTextWrapWidth(
+            forFieldWidth: maximumViewportWidth,
+            state: state
+        )
+        let requiredUntransformedWidth = min(
+            semanticWrapCap,
+            max(1, ceil(measuredWidth))
+        )
+        let semanticBaseWidth: CGFloat
+        let textActuallyChanged: Bool
+        let fontMetricsActuallyChanged: Bool
+        let alignmentActuallyChanged: Bool
+        let originalSemanticStateRestored: Bool
+        let resetsPresentationForRestoredOriginal: Bool
+        let previousLayoutPayload = textEditorLayoutPayload
+        if let originalItem = state.originalItem {
+            guard case .rect(let originalRect) = originalItem.geometry else {
+                preconditionFailure("An existing inline text editor lost its original text rectangle.")
+            }
+            let originalWrapWidth = AnnotationTextLayout.canonicalWrapWidth(for: originalItem)
+            textActuallyChanged = editor.string != (originalItem.text ?? "")
+            fontMetricsActuallyChanged = abs(
+                state.style.fontSize - originalItem.style.fontSize
+            ) > 0.000_001
+                || state.style.fontName != originalItem.style.fontName
+                || state.style.fontWeight != originalItem.style.fontWeight
+            alignmentActuallyChanged = state.style.textAlignment
+                != originalItem.style.textAlignment
+            let originalAnchor = AnnotationTextLayout.alignmentAnchor(
+                in: originalRect,
+                text: originalItem.text ?? "",
+                style: originalItem.style,
+                layout: originalItem.textLayout
+            )
+            originalSemanticStateRestored = !textActuallyChanged
+                && !fontMetricsActuallyChanged
+                && !alignmentActuallyChanged
+                && !textEditorCanonicalWrapWidthWasExplicitlyResized
+                && hypot(
+                    originalAnchor.x - state.anchor.x,
+                    originalAnchor.y - state.anchor.y
+                ) < 0.000_001
+            if originalSemanticStateRestored {
+                resetsPresentationForRestoredOriginal = abs(
+                    (textEditorCanonicalWrapWidthInDocument ?? originalWrapWidth)
+                        - originalWrapWidth
+                ) > 0.001
+                    || previousLayoutPayload != originalItem.textLayout
+                semanticBaseWidth = originalWrapWidth
+            } else {
+                resetsPresentationForRestoredOriginal = false
+                semanticBaseWidth = textEditorCanonicalWrapWidthInDocument
+                    ?? originalWrapWidth
+            }
+        } else {
+            semanticBaseWidth = textEditorCanonicalWrapWidthInDocument ?? 1
+            textActuallyChanged = true
+            fontMetricsActuallyChanged = false
+            alignmentActuallyChanged = false
+            originalSemanticStateRestored = false
+            resetsPresentationForRestoredOriginal = false
+        }
+        let layoutActuallyChanged = textActuallyChanged
+            || fontMetricsActuallyChanged
+            || alignmentActuallyChanged
+        // The interaction viewport is bounded by the canvas and the 520-point
+        // usability cap. The persisted wrap width is not: an older or scaled
+        // annotation may legitimately own a wider line. Never narrow that
+        // semantic width merely because only part of it is visible while the
+        // user edits. New content may still grow up to the interaction cap.
+        let proposedSemanticWrapWidth = layoutActuallyChanged
+            && !textEditorCanonicalWrapWidthWasExplicitlyResized
+            && textResizeInteraction == nil
+            ? max(
+                semanticBaseWidth,
+                textActuallyChanged || fontMetricsActuallyChanged
+                    ? min(semanticWrapCap, requiredUntransformedWidth)
+                    : semanticBaseWidth
+            )
+            : semanticBaseWidth
+        let safeLayoutPayload = try AnnotationTextLayout.safeLayoutPayload(
             for: editor.string,
             style: state.style,
-            size: font.pointSize
+            proposedWrapWidth: proposedSemanticWrapWidth,
+            chromeMode: state.chromeMode,
+            resolvedFont: font
         )
-        let measuredWidth = lineMetrics.width
+        if originalSemanticStateRestored,
+           let originalPayload = state.originalItem?.textLayout,
+           safeLayoutPayload != originalPayload
+        {
+            throw inlineTextKitEditingCapabilityError(
+                "the current font source no longer reproduces the admitted renderer generation"
+            )
+        }
+        let resolvedLayoutPayload: AnnotationTextLayoutPayload?
+        if originalSemanticStateRestored {
+            resolvedLayoutPayload = state.originalItem?.textLayout
+        } else {
+            resolvedLayoutPayload = safeLayoutPayload
+        }
+        // A legacy nil payload remains absent for exact persistence, while its
+        // live NSTextView still needs the measured overhangs to avoid clipping.
+        let presentationLayoutPayload = resolvedLayoutPayload ?? safeLayoutPayload
+        let layoutPlan = try canonicalTextLayoutPlan(
+            text: editor.string,
+            style: state.style,
+            payload: presentationLayoutPayload,
+            context: "updating inline text presentation"
+        )
+        let baselineParagraphStyle = canonicalInlineTextParagraphStyle(
+            style: state.style,
+            lineAdvance: layoutPlan.lineAdvance
+        )
+        let canonicalBaselineOffset = try stableTextEditorBaselineOffset(
+            font: font,
+            paragraphStyle: baselineParagraphStyle,
+            lineHeight: layoutPlan.lineAdvance
+        )
+        if resetsPresentationForRestoredOriginal {
+            // The editor may have grown while text was temporarily different
+            // or may own a different overhang generation at the same wrap
+            // width. Reset only after the restored payload has passed every
+            // renderer-ready capability check.
+            textEditorPresentationLayout = nil
+        }
+        textEditorLayoutPayload = resolvedLayoutPayload
+        let semanticWrapWidth = presentationLayoutPayload.wrapWidth
+        precondition(
+            semanticWrapWidth.isFinite && semanticWrapWidth > 0,
+            "Inline text semantic layout produced an invalid canonical wrap width."
+        )
+        textEditorCanonicalWrapWidthInDocument = semanticWrapWidth
+        frameView.setFontSizeAccessibilityValue(state.style.fontSize)
+        let completeSemanticFieldWidth = AnnotationTextLayout.presentationFieldWidth(
+            layout: presentationLayoutPayload,
+            canvasScale: textEditorCanvasScaleX,
+            uniformTransformScale: abs(state.transform.scaleX)
+        )
+        // A direct-resize interaction already owns the presentation viewport.
+        // Re-growing it from semantic content in the same frame overrides the
+        // pointer-derived width and changes the content-to-field residual.
+        let neededViewportWidth = textResizeInteraction == nil
+            && (textActuallyChanged || fontMetricsActuallyChanged)
+            ? min(
+                maximumViewportWidth,
+                max(
+                    preferredViewportWidth,
+                    ceil(completeSemanticFieldWidth)
+                )
+            )
+            : preferredViewportWidth
+        if neededViewportWidth > preferredViewportWidth + 0.01 {
+            AppLog.capture.notice(
+                "Grew the inline text field so leading characters stay visible: previousWidth=\(preferredViewportWidth, privacy: .public), nextWidth=\(neededViewportWidth, privacy: .public), characters=\(editor.string.utf16.count, privacy: .public)"
+            )
+            preferredViewportWidth = neededViewportWidth
+            textEditorPreferredViewportWidthInDocument = textEditorFieldWidthInDocument(
+                fromViewWidth: preferredViewportWidth,
+                state: state
+            )
+        }
+        applyCanonicalTextEditorTypography(
+            to: editor,
+            state: state,
+            font: font,
+            lineAdvance: layoutPlan.lineAdvance,
+            canonicalBaselineOffset: canonicalBaselineOffset
+        )
+        let lineCount = layoutPlan.lineCount
         // A legacy uniform transform is applied around the annotation rect,
         // whose center changes when leading/trailing text changes width. The
         // renderer's presentation anchor must therefore be resolved from the
@@ -5266,21 +7482,14 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         // move it.
         let canonicalAlignmentAnchor = textEditorAlignmentAnchor(
             for: state,
-            text: editor.string
+            text: editor.string,
+            layout: textEditorLayoutPayload
         )
-        let desiredLineOrigin = CGPoint(
-            x: AnnotationTextLayout.lineOriginX(
-                alignmentAnchorX: canonicalAlignmentAnchor.x,
-                lineWidth: measuredWidth,
-                alignment: state.style.textAlignment
-            ),
-            y: canonicalAlignmentAnchor.y
+        let desiredLineOrigin = renderedTextLineOriginInView(
+            state: state,
+            text: editor.string,
+            layout: textEditorLayoutPayload
         )
-        let chromeOutset = InlineAnnotationTextEditorFrameView.chromeOutset
-        let availableFieldBounds = bounds.insetBy(dx: chromeOutset, dy: chromeOutset)
-        guard availableFieldBounds.width > 0, availableFieldBounds.height > 0 else {
-            preconditionFailure("Inline text chrome requires a non-empty canvas interior.")
-        }
         let fieldPlacementAnchor = textEditorFieldPlacementAnchorInDocument.map {
             viewPoint(fromDocumentPoint: $0)
         } ?? canonicalAlignmentAnchor
@@ -5289,19 +7498,26 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             font: font,
             preferredViewportWidth: preferredViewportWidth,
             availableFieldBounds: availableFieldBounds,
-            alignment: state.style.textAlignment
+            alignment: state.style.textAlignment,
+            lineCount: lineCount,
+            layoutPlan: layoutPlan,
+            layoutPayload: presentationLayoutPayload,
+            state: state
         )
         if textEditorFieldPlacementAnchorInDocument == nil {
             let resolvedFieldAnchor = textFieldAlignmentAnchor(
                 for: stableFieldFrame,
                 font: font,
-                alignment: state.style.textAlignment
+                alignment: state.style.textAlignment,
+                lineCount: lineCount,
+                layoutPlan: layoutPlan,
+                layoutPayload: presentationLayoutPayload,
+                state: state
             )
             textEditorFieldPlacementAnchorInDocument = documentPoint(
                 fromViewPoint: resolvedFieldAnchor
             )
         }
-        let frameHeight = stableFieldFrame.height
         let outerFrame = stableFieldFrame.insetBy(dx: -chromeOutset, dy: -chromeOutset)
         let localFieldFrame = CGRect(
             x: chromeOutset,
@@ -5309,97 +7525,165 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             width: stableFieldFrame.width,
             height: stableFieldFrame.height
         )
-        let horizontalInset = max(0, desiredLineOrigin.x - stableFieldFrame.minX)
-        let requiredDocumentWidth = max(
-            stableFieldFrame.width,
-            bounds.width + InlineTextEditorMetrics.maximumViewportWidth,
-            ceil(
-                horizontalInset
-                    + measuredWidth
-                    + InlineTextEditorMetrics.horizontalPadding * 2
+        let chromeInsets = AnnotationTextLayout.chromeInsets(for: state.chromeMode)
+        let textContainerInset = CGSize(
+            width: chromeInsets.width + presentationLayoutPayload.leadingOverhang,
+            height: chromeInsets.height
+        )
+        let minimumCanonicalDocumentSize = CGSize(
+            width: textEditorFieldWidthInDocument(
+                fromViewWidth: stableFieldFrame.width,
+                state: state
+            ),
+            height: textEditorFieldHeightInDocument(
+                fromViewHeight: stableFieldFrame.height,
+                state: state
             )
         )
-        let documentSize = CGSize(
-            // The hidden document extent may only grow. Its left/baseline
-            // origin remains fixed, so extending a long line cannot move any
-            // already rendered glyph or the visible field.
+        let completeSemanticDocumentWidth = chromeInsets.width * 2
+            + presentationLayoutPayload.leadingOverhang
+            + semanticWrapWidth
+            + presentationLayoutPayload.trailingOverhang
+        let canonicalDocumentSize = CGSize(
             width: max(
-                textEditorPresentationLayout?.documentSize.width ?? 0,
-                requiredDocumentWidth
+                textEditorPresentationLayout?.canonicalDocumentSize.width ?? 0,
+                max(
+                    minimumCanonicalDocumentSize.width,
+                    completeSemanticDocumentWidth
+                )
             ),
-            height: frameHeight
+            height: minimumCanonicalDocumentSize.height
+        )
+        let documentSize = textEditorDocumentSizeInView(
+            fromCanonicalSize: canonicalDocumentSize,
+            state: state
         )
         let configuresGeometry = textEditorPresentationLayout == nil
         if configuresGeometry {
             frameView.frame = outerFrame
             frameView.setFieldFrame(localFieldFrame)
             container.frame = localFieldFrame
-            editor.textContainerInset = CGSize(
-                width: horizontalInset,
-                height: InlineTextEditorMetrics.verticalPadding
-            )
+            editor.textContainerInset = textContainerInset
             documentView.frame = CGRect(origin: .zero, size: documentSize)
             configureTextEditorDocumentExtent(
                 editor: editor,
                 documentView: documentView,
-                size: documentSize
+                presentationSize: documentSize,
+                canonicalSize: canonicalDocumentSize,
+                wrapWidth: semanticWrapWidth,
+                layoutPayload: presentationLayoutPayload
             )
         } else {
             guard var presentation = textEditorPresentationLayout else {
                 preconditionFailure("The inline editor geometry cache disappeared during input.")
             }
-            if documentSize.width > presentation.documentSize.width + 0.01 {
+            let frameChanged = maxFrameDelta(presentation.frame, outerFrame) > 0.01
+            let containerChanged = maxFrameDelta(
+                presentation.containerFrame,
+                localFieldFrame
+            ) > 0.01
+            let documentSizeChanged = max(
+                abs(presentation.documentSize.width - documentSize.width),
+                abs(presentation.documentSize.height - documentSize.height)
+            ) > 0.01
+            let canonicalDocumentSizeChanged = max(
+                abs(
+                    presentation.canonicalDocumentSize.width
+                        - canonicalDocumentSize.width
+                ),
+                abs(
+                    presentation.canonicalDocumentSize.height
+                        - canonicalDocumentSize.height
+                )
+            ) > 0.01
+            let textContainerOriginChanged = max(
+                abs(editor.textContainerInset.width - textContainerInset.width),
+                abs(editor.textContainerInset.height - textContainerInset.height)
+            ) > 0.001
+            let geometryChanged = frameChanged
+                || containerChanged
+                || documentSizeChanged
+                || canonicalDocumentSizeChanged
+                || textContainerOriginChanged
+            if geometryChanged {
+                let didWrap = measuredWidth > semanticWrapWidth + 0.01
+                AppLog.capture.notice(
+                    "Updated inline text field for wrap or growth: lines=\(lineCount, privacy: .public), previous=(\(presentation.frame.width, privacy: .public)x\(presentation.frame.height, privacy: .public)), next=(\(outerFrame.width, privacy: .public)x\(outerFrame.height, privacy: .public)), wrapped=\(didWrap, privacy: .public), characters=\(editor.string.utf16.count, privacy: .public)"
+                )
+                frameView.frame = outerFrame
+                frameView.setFieldFrame(localFieldFrame)
+                container.frame = localFieldFrame
+                editor.textContainerInset = textContainerInset
+                // Reconfiguration operates on the unscrolled canonical
+                // document. A visible caret scroll must never be promoted into
+                // the next layout generation's base origin.
+                documentView.setFrameOrigin(presentation.documentBaseOrigin)
                 configureTextEditorDocumentExtent(
                     editor: editor,
                     documentView: documentView,
-                    size: documentSize
+                    presentationSize: documentSize,
+                    canonicalSize: canonicalDocumentSize,
+                    wrapWidth: semanticWrapWidth,
+                    layoutPayload: presentationLayoutPayload
                 )
                 presentation = TextEditorPresentationLayout(
-                    frame: presentation.frame,
-                    containerFrame: presentation.containerFrame,
-                    documentBaseOrigin: presentation.documentBaseOrigin,
-                    documentSize: documentSize
+                    frame: outerFrame,
+                    containerFrame: localFieldFrame,
+                    documentBaseOrigin: documentView.frame.origin,
+                    documentSize: documentSize,
+                    canonicalDocumentSize: canonicalDocumentSize
                 )
                 textEditorPresentationLayout = presentation
-                AppLog.capture.debug(
-                    "Extended inline text document without moving its origin: width=\(documentSize.width, privacy: .public), characters=\(editor.string.utf16.count, privacy: .public)"
+            }
+            if !geometryChanged {
+                precondition(
+                    maxFrameDelta(presentation.frame, outerFrame) < 0.01,
+                    "Text input changed the fixed editor frame without a canvas resize."
                 )
             }
-            precondition(
-                maxFrameDelta(presentation.frame, outerFrame) < 0.01,
-                "Text input changed the fixed editor frame without a canvas resize."
-            )
             let documentSizeDelta = max(
-                abs(editor.frame.width - presentation.documentSize.width),
-                abs(editor.frame.height - presentation.documentSize.height)
+                abs(editor.frame.width - presentation.canonicalDocumentSize.width),
+                abs(editor.frame.height - presentation.canonicalDocumentSize.height)
             )
             let hostSizeDelta = max(
                 abs(documentView.frame.width - presentation.documentSize.width),
                 abs(documentView.frame.height - presentation.documentSize.height)
             )
+            let hostBoundsDelta = max(
+                abs(
+                    documentView.bounds.width
+                        - presentation.canonicalDocumentSize.width
+                ),
+                abs(
+                    documentView.bounds.height
+                        - presentation.canonicalDocumentSize.height
+                )
+            )
             precondition(
-                hostSizeDelta < 0.01,
-                "The inline text document host changed size during input."
+                hostSizeDelta < 0.01 && hostBoundsDelta < 0.01,
+                "The inline text document host changed its presentation frame or canonical bounds during input."
             )
             if documentSizeDelta >= 0.01 {
                 AppLog.capture.error(
-                    "TextKit mutated inline document geometry: expected=\(presentation.documentSize.width, privacy: .public)x\(presentation.documentSize.height, privacy: .public), actual=\(editor.frame.width, privacy: .public)x\(editor.frame.height, privacy: .public), viewport=\(container.bounds.width, privacy: .public)x\(container.bounds.height, privacy: .public), min=\(editor.minSize.width, privacy: .public)x\(editor.minSize.height, privacy: .public), max=\(editor.maxSize.width, privacy: .public)x\(editor.maxSize.height, privacy: .public)"
+                    "TextKit mutated canonical inline document geometry: expected=\(presentation.canonicalDocumentSize.width, privacy: .public)x\(presentation.canonicalDocumentSize.height, privacy: .public), actual=\(editor.frame.width, privacy: .public)x\(editor.frame.height, privacy: .public), presentation=\(presentation.documentSize.width, privacy: .public)x\(presentation.documentSize.height, privacy: .public), viewport=\(container.bounds.width, privacy: .public)x\(container.bounds.height, privacy: .public), min=\(editor.minSize.width, privacy: .public)x\(editor.minSize.height, privacy: .public), max=\(editor.maxSize.width, privacy: .public)x\(editor.maxSize.height, privacy: .public)"
                 )
                 preconditionFailure("TextKit resized the fixed inline document view during input.")
             }
-            precondition(
-                maxFrameDelta(container.frame, presentation.containerFrame) < 0.01,
-                "TextKit moved the fixed inline viewport during input."
-            )
-            precondition(
-                abs(documentView.frame.minY - presentation.documentBaseOrigin.y) < 0.01,
-                "Text input moved the document vertically after initial calibration."
-            )
-            if abs(editor.textContainerInset.width - horizontalInset) > 0.001 {
-                editor.textContainerInset = CGSize(
-                    width: horizontalInset,
-                    height: InlineTextEditorMetrics.verticalPadding
+            if !geometryChanged {
+                precondition(
+                    maxFrameDelta(container.frame, presentation.containerFrame) < 0.01,
+                    "TextKit moved the fixed inline viewport during input."
                 )
+                precondition(
+                    abs(documentView.frame.minY - presentation.documentBaseOrigin.y) < 0.01,
+                    "Text input moved the document vertically after initial calibration."
+                )
+            }
+            if !geometryChanged,
+               (abs(editor.textContainerInset.width - textContainerInset.width) > 0.001
+                    || abs(editor.textContainerInset.height - textContainerInset.height) > 0.001)
+            {
+                editor.textContainerInset = textContainerInset
             }
         }
         guard let textContainer = editor.textContainer,
@@ -5407,16 +7691,26 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         else {
             preconditionFailure("The inline annotation editor requires a TextKit layout stack.")
         }
+        let expectedTextContainerSize = CGSize(
+            width: semanticWrapWidth,
+            height: max(
+                1,
+                canonicalDocumentSize.height - textContainerInset.height * 2
+            )
+        )
+        if abs(textContainer.containerSize.width - expectedTextContainerSize.width) > 0.01
+            || abs(textContainer.containerSize.height - expectedTextContainerSize.height) > 0.01
+        {
+            textContainer.containerSize = expectedTextContainerSize
+        }
         layoutManager.ensureLayout(for: textContainer)
 
-        let entireLineFits = desiredLineOrigin.x
-                >= stableFieldFrame.minX + InlineTextEditorMetrics.horizontalPadding - 0.5
-            && desiredLineOrigin.x + measuredWidth
-                <= stableFieldFrame.maxX - InlineTextEditorMetrics.horizontalPadding + 0.5
+        let documentWidthFitsViewport = documentSize.width
+            <= container.bounds.width + 0.01
         if configuresGeometry {
             alignTextEditorBaseline(
                 to: desiredLineOrigin,
-                entireLineFits: entireLineFits,
+                entireLineFits: documentWidthFitsViewport,
                 calibratesCanonicalHorizontalOrigin: true
             )
             textEditorGeometryConfigurationCount += 1
@@ -5424,7 +7718,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 frame: outerFrame,
                 containerFrame: container.frame,
                 documentBaseOrigin: documentView.frame.origin,
-                documentSize: documentSize
+                documentSize: documentSize,
+                canonicalDocumentSize: canonicalDocumentSize
             )
         } else {
             // The renderer's alignment anchor is fixed, but the canonical
@@ -5433,13 +7728,20 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             // TextKit layout, including while the line remains overflowed.
             alignTextEditorBaseline(
                 to: desiredLineOrigin,
-                entireLineFits: entireLineFits,
+                entireLineFits: documentWidthFitsViewport,
                 calibratesCanonicalHorizontalOrigin: true
             )
         }
         guard let presentation = textEditorPresentationLayout else {
             preconditionFailure("The inline editor must be calibrated before scrolling.")
         }
+        // Canonical baseline calibration can translate an otherwise narrow
+        // host. It fits only when that complete calibrated frame—not merely
+        // its width—lies inside the viewport.
+        let entireLineFits = presentation.documentBaseOrigin.x >= -0.01
+            && presentation.documentBaseOrigin.x
+                + presentation.documentSize.width
+                <= container.bounds.width + 0.01
         updateTextEditorHorizontalScroll(
             editor: editor,
             container: container,
@@ -5456,29 +7758,76 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             // to the canonical renderer origin.
             calibratesCanonicalHorizontalOrigin: false
         )
+        // Baseline alignment can finalize a different TextKit line fragment
+        // for the insertion point. Re-read its explicitly converted document
+        // coordinate once and apply the same bounded scroll policy so a
+        // fractional transform cannot leave it beyond the viewport.
+        guard let postAlignmentPresentation = textEditorPresentationLayout else {
+            preconditionFailure("Inline text alignment lost its calibrated document mapping.")
+        }
+        updateTextEditorHorizontalScroll(
+            editor: editor,
+            container: container,
+            documentView: documentView,
+            presentation: postAlignmentPresentation,
+            entireLineFits: entireLineFits,
+            scrollsToInsertionPoint: scrollsToInsertionPoint
+        )
+        textEditorRendererGeneration = TextEditorRendererGeneration(
+            text: editor.string,
+            style: state.style,
+            payload: presentationLayoutPayload
+        )
         AppLog.capture.debug(
-            "Laid out stable inline text frame: outer=(\(outerFrame.minX, privacy: .public),\(outerFrame.minY, privacy: .public),\(outerFrame.width, privacy: .public),\(outerFrame.height, privacy: .public)), field=(\(stableFieldFrame.minX, privacy: .public),\(stableFieldFrame.minY, privacy: .public),\(stableFieldFrame.width, privacy: .public),\(stableFieldFrame.height, privacy: .public)), lineWidth=\(measuredWidth, privacy: .public), preferredWidth=\(preferredViewportWidth, privacy: .public), geometryConfigurations=\(self.textEditorGeometryConfigurationCount, privacy: .public), characters=\(editor.string.utf16.count, privacy: .public)"
+            "Laid out stable inline text frame: outer=(\(outerFrame.minX, privacy: .public),\(outerFrame.minY, privacy: .public),\(outerFrame.width, privacy: .public),\(outerFrame.height, privacy: .public)), field=(\(stableFieldFrame.minX, privacy: .public),\(stableFieldFrame.minY, privacy: .public),\(stableFieldFrame.width, privacy: .public),\(stableFieldFrame.height, privacy: .public)), canonicalLineWidth=\(measuredWidth, privacy: .public), canonicalWrapWidth=\(semanticWrapWidth, privacy: .public), viewportWidth=\(preferredViewportWidth, privacy: .public), presentationDocumentWidth=\(documentSize.width, privacy: .public), canonicalDocumentWidth=\(canonicalDocumentSize.width, privacy: .public), scrollable=\(!entireLineFits, privacy: .public), geometryConfigurations=\(self.textEditorGeometryConfigurationCount, privacy: .public), characters=\(editor.string.utf16.count, privacy: .public)"
         )
     }
 
     private func configureTextEditorDocumentExtent(
         editor: InlineAnnotationTextView,
         documentView: NSView,
-        size: CGSize
+        presentationSize: CGSize,
+        canonicalSize: CGSize,
+        wrapWidth: CGFloat,
+        layoutPayload: AnnotationTextLayoutPayload
     ) {
-        documentView.setFrameSize(size)
+        guard let state = textEditingState else {
+            preconditionFailure("Inline text extent configuration requires its layout owner.")
+        }
+        let chromeInsets = AnnotationTextLayout.chromeInsets(for: state.chromeMode)
+        let horizontalMargins = (
+            leading: chromeInsets.width + layoutPayload.leadingOverhang,
+            trailing: chromeInsets.width + layoutPayload.trailingOverhang
+        )
+        precondition(
+            wrapWidth.isFinite && wrapWidth > 0
+                && wrapWidth
+                    + horizontalMargins.leading
+                    + horizontalMargins.trailing <= canonicalSize.width + 0.01,
+            "The canonical inline text document must contain its semantic wrap width."
+        )
+        precondition(
+            presentationSize.width.isFinite
+                && presentationSize.height.isFinite
+                && presentationSize.width > 0
+                && presentationSize.height > 0
+                && canonicalSize.width.isFinite
+                && canonicalSize.height.isFinite
+                && canonicalSize.width > 0
+                && canonicalSize.height > 0,
+            "Inline text host mapping requires finite positive frame and bounds sizes."
+        )
+        documentView.setFrameSize(presentationSize)
+        documentView.bounds = CGRect(origin: .zero, size: canonicalSize)
         editor.minSize = .zero
-        editor.maxSize = size
-        editor.lockPresentationFrame(CGRect(origin: .zero, size: size))
-        editor.minSize = size
+        editor.maxSize = canonicalSize
+        editor.lockDocumentFrame(CGRect(origin: .zero, size: canonicalSize))
+        editor.minSize = canonicalSize
         editor.textContainer?.containerSize = CGSize(
-            width: max(
-                1,
-                size.width - InlineTextEditorMetrics.horizontalPadding * 2
-            ),
+            width: wrapWidth,
             height: max(
                 1,
-                size.height - InlineTextEditorMetrics.verticalPadding * 2
+                canonicalSize.height - chromeInsets.height * 2
             )
         )
     }
@@ -5492,15 +7841,19 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         scrollsToInsertionPoint: Bool
     ) {
         var horizontalOffset = presentation.documentBaseOrigin.x - documentView.frame.minX
+        guard let state = textEditingState else {
+            preconditionFailure("Inline text scrolling requires its layout owner.")
+        }
+        let horizontalInset = textEditorChromeInsetsInView(for: state).width
         if entireLineFits {
             horizontalOffset = 0
         } else if scrollsToInsertionPoint,
                   let insertionX = textEditorInsertionX(editor)
         {
-            let minimumVisibleX = InlineTextEditorMetrics.horizontalPadding
+            let minimumVisibleX = horizontalInset
             let maximumVisibleX = max(
                 minimumVisibleX,
-                container.bounds.width - InlineTextEditorMetrics.horizontalPadding
+                container.bounds.width - horizontalInset
             )
             let visibleInsertionX = presentation.documentBaseOrigin.x
                 - horizontalOffset
@@ -5511,13 +7864,27 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 horizontalOffset -= minimumVisibleX - visibleInsertionX
             }
         }
-        let maximumOffset = max(
-            0,
-            presentation.documentSize.width - container.bounds.width
-        )
-        horizontalOffset = min(max(0, horizontalOffset), maximumOffset)
+        // The canonical document origin may be asymmetric relative to the
+        // viewport when the field itself is clamped at a canvas edge. Derive
+        // both scroll limits from that calibrated origin, rather than assuming
+        // leading/center/trailing always means 0, 1/2 or all of the overflow.
+        let minimumOffset: CGFloat
+        let maximumOffset: CGFloat
+        if entireLineFits {
+            minimumOffset = 0
+            maximumOffset = 0
+        } else {
+            let leftEdgeOffset = presentation.documentBaseOrigin.x
+            let rightEdgeOffset = presentation.documentBaseOrigin.x
+                + presentation.documentSize.width
+                - container.bounds.width
+            minimumOffset = min(leftEdgeOffset, rightEdgeOffset)
+            maximumOffset = max(leftEdgeOffset, rightEdgeOffset)
+        }
+        horizontalOffset = min(max(minimumOffset, horizontalOffset), maximumOffset)
         let backingScale = max(1, window?.backingScaleFactor ?? 1)
         horizontalOffset = (horizontalOffset * backingScale).rounded() / backingScale
+        horizontalOffset = min(max(minimumOffset, horizontalOffset), maximumOffset)
         let newOrigin = CGPoint(
             x: presentation.documentBaseOrigin.x - horizontalOffset,
             y: presentation.documentBaseOrigin.y
@@ -5549,25 +7916,234 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         )
     }
 
+    private func isInlineTextHardBreakUTF16Unit(_ unit: unichar) -> Bool {
+        switch unit {
+        case 0x000A, 0x000B, 0x000C, 0x000D, 0x0085, 0x2028, 0x2029:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func textEditorInsertionX(_ editor: NSTextView) -> CGFloat? {
         guard let textStorage = editor.textStorage,
               let textContainer = editor.textContainer,
-              let layoutManager = editor.layoutManager
+              let layoutManager = editor.layoutManager,
+              let container = textEditorContainer,
+              let documentView = textEditorDocumentView
         else { return nil }
-        layoutManager.ensureLayout(for: textContainer)
         let characterLocation = min(editor.selectedRange().location, textStorage.length)
-        guard characterLocation > 0 else { return editor.textContainerOrigin.x }
-        let glyphRange = layoutManager.glyphRange(
-            forCharacterRange: NSRange(location: 0, length: characterLocation),
-            actualCharacterRange: nil
+        layoutManager.ensureLayout(for: textContainer)
+        let insertionXInTextContainer: CGFloat
+        let nsText = editor.string as NSString
+        let terminatesWithHardBreak: Bool
+        if textStorage.length > 0 {
+            let finalUTF16Unit = nsText.character(at: textStorage.length - 1)
+            terminatesWithHardBreak = isInlineTextHardBreakUTF16Unit(
+                finalUTF16Unit
+            )
+        } else {
+            terminatesWithHardBreak = false
+        }
+        if textStorage.length == 0
+            || (characterLocation == textStorage.length && terminatesWithHardBreak)
+        {
+            insertionXInTextContainer = layoutManager.extraLineFragmentUsedRect.minX
+        } else {
+            let lineProbeCharacter = min(characterLocation, textStorage.length - 1)
+            let glyphIndex = layoutManager.glyphIndexForCharacter(at: lineProbeCharacter)
+            let lineFragment = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphIndex,
+                effectiveRange: nil
+            )
+            var positions = [CGFloat](repeating: 0, count: textStorage.length + 1)
+            var characterIndexes = [Int](repeating: 0, count: textStorage.length + 1)
+            let insertionPointCount = positions.withUnsafeMutableBufferPointer { positionsBuffer in
+                characterIndexes.withUnsafeMutableBufferPointer { characterIndexesBuffer in
+                    layoutManager.getLineFragmentInsertionPoints(
+                        forCharacterAt: lineProbeCharacter,
+                        alternatePositions: false,
+                        inDisplayOrder: false,
+                        positions: positionsBuffer.baseAddress,
+                        characterIndexes: characterIndexesBuffer.baseAddress
+                    )
+                }
+            }
+            guard let insertionPointIndex = characterIndexes[..<insertionPointCount]
+                .firstIndex(of: characterLocation)
+            else {
+                preconditionFailure(
+                    "TextKit did not expose the active inline insertion point in its line fragment."
+                )
+            }
+            insertionXInTextContainer = lineFragment.minX
+                + positions[insertionPointIndex]
+        }
+        let editorInsertionPoint = CGPoint(
+            x: editor.textContainerOrigin.x + insertionXInTextContainer,
+            y: editor.textContainerOrigin.y
         )
-        guard glyphRange.length > 0 else { return editor.textContainerOrigin.x }
-        let finalGlyphRange = NSRange(location: NSMaxRange(glyphRange) - 1, length: 1)
-        let glyphBounds = layoutManager.boundingRect(
-            forGlyphRange: finalGlyphRange,
-            in: textContainer
+        let caretInViewport = container.convert(
+            editorInsertionPoint,
+            from: editor
         )
-        return editor.textContainerOrigin.x + glyphBounds.maxX
+        let presentationLocalX = caretInViewport.x - documentView.frame.minX
+        precondition(
+            presentationLocalX.isFinite,
+            "Inline text caret conversion produced a non-finite presentation coordinate."
+        )
+        return presentationLocalX
+    }
+
+    private var isRegionConfirmationCanvas: Bool {
+        onRegionSelectionDoubleClickCopy != nil
+    }
+
+    private func screenPoint(from event: NSEvent) -> CGPoint {
+        if let window = event.window {
+            return window.convertToScreen(
+                CGRect(origin: event.locationInWindow, size: .zero)
+            ).origin
+        }
+        return NSEvent.mouseLocation
+    }
+
+    @discardableResult
+    private func armRegionDoubleClickCopyIfNeeded(from event: NSEvent) -> Bool {
+        guard recognizesRegionDoubleClick(from: event) else { return false }
+        pendingRegionDoubleClickCopy = true
+        lastEmptyRegionClick = nil
+        // A recognized second click is still the beginning of an ordinary
+        // Select-body press until its pointer-up commits the copy. Retain the
+        // original down event so crossing the move threshold can cancel the
+        // copy candidate and enter the same region-move lifecycle without a
+        // dead press or a synthetic replacement event.
+        pendingRegionBodyMoveMouseDown = event
+        regionBodyMoveStartScreenPoint = screenPoint(from: event)
+        regionBodyMoveHasDragged = false
+        startPoint = nil
+        currentPoint = nil
+        AppLog.capture.notice(
+            "Armed region confirmation double-click copy for pointer-up: clickCount=\(event.clickCount, privacy: .public), tool=\(self.session.currentTool.rawValue, privacy: .public)"
+        )
+        return true
+    }
+
+    @discardableResult
+    private func finishRegionDoubleClickCopyIfNeeded(from event: NSEvent) -> Bool {
+        let wasArmed = pendingRegionDoubleClickCopy
+        let recognizedOnRelease = recognizesRegionDoubleClick(from: event)
+        guard wasArmed || recognizedOnRelease else { return false }
+        guard !regionBodyMoveHasDragged, !isWindowDragInProgress else {
+            AppLog.capture.notice(
+                "Ignored region confirmation double-click copy because the press became a move: clickCount=\(event.clickCount, privacy: .public)"
+            )
+            pendingRegionDoubleClickCopy = false
+            lastEmptyRegionClick = nil
+            return false
+        }
+        pendingRegionDoubleClickCopy = false
+        lastEmptyRegionClick = nil
+        pendingRegionBodyMoveMouseDown = nil
+        regionBodyMoveStartScreenPoint = nil
+        regionBodyMoveHasDragged = false
+        finishWindowDragIfNeeded(reason: "region-double-click-copy")
+        _ = endSelectionInteractionLifecycle(reason: "region-double-click-copy")
+        startPoint = nil
+        currentPoint = nil
+        let documentPoint = documentPoint(
+            fromViewPoint: convert(event.locationInWindow, from: nil)
+        )
+        AppLog.capture.notice(
+            "Region confirmation double-click requested copy: clickCount=\(event.clickCount, privacy: .public), armed=\(wasArmed, privacy: .public), recognizedOnRelease=\(recognizedOnRelease, privacy: .public), tool=\(self.session.currentTool.rawValue, privacy: .public), x=\(documentPoint.x, privacy: .public), y=\(documentPoint.y, privacy: .public)"
+        )
+        onRegionSelectionDoubleClickCopy?()
+        return true
+    }
+
+    private func recognizesRegionDoubleClick(from event: NSEvent) -> Bool {
+        guard isRegionConfirmationCanvas, isAnnotationEditingEnabled else { return false }
+        let documentPoint = documentPoint(
+            fromViewPoint: convert(event.locationInWindow, from: nil)
+        )
+        guard shouldCopyRegionOnDoubleClick(at: documentPoint) else {
+            if event.clickCount >= 2 {
+                AppLog.capture.notice(
+                    "Ignored region confirmation double-click because the target was not empty interior: clickCount=\(event.clickCount, privacy: .public), tool=\(self.session.currentTool.rawValue, privacy: .public), x=\(documentPoint.x, privacy: .public), y=\(documentPoint.y, privacy: .public)"
+                )
+            }
+            return false
+        }
+        let recognizedByClickCount = event.clickCount >= 2
+        let recognizedByPairedClick = isPairedEmptyRegionClick(event)
+        if recognizedByClickCount || recognizedByPairedClick {
+            return true
+        }
+        if let last = lastEmptyRegionClick {
+            let screen = screenPoint(from: event)
+            let elapsed = event.timestamp - last.timestamp
+            let distance = hypot(
+                screen.x - last.screenPoint.x,
+                screen.y - last.screenPoint.y
+            )
+            AppLog.capture.notice(
+                "Region confirmation click was not a copy double-click: clickCount=\(event.clickCount, privacy: .public), elapsed=\(elapsed, privacy: .public), distance=\(distance, privacy: .public), interval=\(NSEvent.doubleClickInterval, privacy: .public)"
+            )
+        }
+        return false
+    }
+
+    private func isPairedEmptyRegionClick(_ event: NSEvent) -> Bool {
+        guard let last = lastEmptyRegionClick else { return false }
+        return RegionConfirmationClickPolicy.isPairedClick(
+            previousTimestamp: last.timestamp,
+            previousScreenPoint: last.screenPoint,
+            currentTimestamp: event.timestamp,
+            currentScreenPoint: screenPoint(from: event),
+            interval: NSEvent.doubleClickInterval
+        )
+    }
+
+    @discardableResult
+    private func beginRegionBodyMoveIfNeeded(with event: NSEvent) -> Bool {
+        if isWindowDragInProgress {
+            return true
+        }
+        guard let pending = pendingRegionBodyMoveMouseDown,
+              let start = regionBodyMoveStartScreenPoint
+        else { return false }
+        let current = screenPoint(from: event)
+        guard RegionConfirmationClickPolicy.didCrossBodyMoveThreshold(from: start, to: current) else {
+            return false
+        }
+        let distance = hypot(current.x - start.x, current.y - start.y)
+        let canceledDoubleClickCopy = pendingRegionDoubleClickCopy
+        pendingRegionBodyMoveMouseDown = nil
+        regionBodyMoveHasDragged = true
+        pendingRegionDoubleClickCopy = false
+        lastEmptyRegionClick = nil
+        AppLog.capture.debug(
+            "Region confirmation body press crossed the move threshold: distance=\(distance, privacy: .public), canceledDoubleClickCopy=\(canceledDoubleClickCopy, privacy: .public)"
+        )
+        onWindowDragBegan?(pending)
+        return isWindowDragInProgress
+    }
+
+    private func shouldCopyRegionOnDoubleClick(at point: CGPoint) -> Bool {
+        guard onRegionSelectionDoubleClickCopy != nil else { return false }
+        guard session.currentTool == .select else { return false }
+        guard textEditor == nil, textEditingState == nil else { return false }
+        guard selectionInteraction == nil,
+              textResizeInteraction == nil,
+              selectedTextResizeInteraction == nil
+        else { return false }
+        if pinnedWindowResizeHandle(at: viewPoint(fromDocumentPoint: point)) != nil {
+            return false
+        }
+        if session.controller.topmostItem(at: point) != nil {
+            return false
+        }
+        return true
     }
 
     private func topmostEditableText(at point: CGPoint) -> AnnotationItem? {
@@ -5594,18 +8170,30 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
               let container = textEditorContainer,
               let documentView = textEditorDocumentView
         else { return "missing" }
-        return "canvasBounds=\(bounds), canvasFrame=\(frame), field=\(frameView.frame), viewport=\(container.frame), viewportBounds=\(container.bounds), document=\(documentView.frame), editor=\(editor.frame), textContainerOrigin=\(editor.textContainerOrigin), windowFrame=\(window?.frame ?? .zero)"
+        return "canvasBounds=\(bounds), canvasFrame=\(frame), field=\(frameView.frame), viewport=\(container.frame), viewportBounds=\(container.bounds), documentFrame=\(documentView.frame), documentBounds=\(documentView.bounds), editorDocumentFrame=\(editor.frame), textContainerOrigin=\(editor.textContainerOrigin), windowFrame=\(window?.frame ?? .zero)"
     }
 
     private func textEditorAlignmentAnchor(
         for state: TextEditingState,
-        text: String
+        text: String,
+        layout: AnnotationTextLayoutPayload?
     ) -> CGPoint {
-        let annotationRect = AnnotationTextLayout.annotationRect(
-            baselineAnchor: state.anchor,
-            text: text,
-            style: state.style
-        )
+        let resolvedLayout = layout
+        let annotationRect: CGRect
+        if let resolvedLayout {
+            annotationRect = AnnotationTextLayout.annotationRect(
+                baselineAnchor: state.anchor,
+                text: text,
+                style: state.style,
+                layout: resolvedLayout
+            )
+        } else if let originalItem = state.originalItem,
+                  case .rect(let originalRect) = originalItem.geometry
+        {
+            annotationRect = originalRect.standardized
+        } else {
+            preconditionFailure("Inline text alignment requires explicit layout ownership.")
+        }
         return viewPoint(fromDocumentPoint: transformedPoint(
             state.anchor,
             transform: state.transform,
@@ -5615,30 +8203,171 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
 
     private func renderedTextLineOriginInView(
         state: TextEditingState,
-        text: String
+        text: String,
+        layout: AnnotationTextLayoutPayload?
     ) -> CGPoint {
-        let annotationRect = AnnotationTextLayout.annotationRect(
-            baselineAnchor: state.anchor,
+        guard let firstLine = renderedTextLineSnapshotsInView(
+            state: state,
             text: text,
-            style: state.style
+            layout: layout
+        ).first else {
+            preconditionFailure("Inline text rendering requires at least one canonical line.")
+        }
+        return firstLine.originInView
+    }
+
+    private func renderedTextLineSnapshotsInView(
+        state: TextEditingState,
+        text: String,
+        layout: AnnotationTextLayoutPayload?
+    ) -> [InlineTextEditorLineSnapshot] {
+        let resolvedLayout = layout
+        let annotationRect: CGRect
+        if let resolvedLayout {
+            annotationRect = AnnotationTextLayout.annotationRect(
+                baselineAnchor: state.anchor,
+                text: text,
+                style: state.style,
+                layout: resolvedLayout
+            )
+        } else if let originalItem = state.originalItem,
+                  case .rect(let originalRect) = originalItem.geometry
+        {
+            annotationRect = originalRect.standardized
+        } else {
+            preconditionFailure("Inline text rendering requires explicit layout ownership.")
+        }
+        return AnnotationTextLayout.placedLines(
+            in: annotationRect,
+            text: text,
+            style: state.style,
+            layout: resolvedLayout
+        ).map { placedLine in
+            InlineTextEditorLineSnapshot(
+                utf16Range: placedLine.line.utf16Range,
+                consumedUTF16Range: placedLine.line.consumedUTF16Range,
+                originInView: viewPoint(fromDocumentPoint: transformedPoint(
+                    placedLine.origin,
+                    transform: state.transform,
+                    around: annotationRect
+                ))
+            )
+        }
+    }
+
+    private func textEditorLineSnapshotsInView(
+        _ editor: NSTextView
+    ) -> [InlineTextEditorLineSnapshot] {
+        guard let textContainer = editor.textContainer,
+              let layoutManager = editor.layoutManager
+        else {
+            preconditionFailure("Inline text line inspection requires its TextKit stack.")
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        let nsText = editor.string as NSString
+        let glyphRange = layoutManager.glyphRange(for: textContainer)
+        var snapshots: [InlineTextEditorLineSnapshot] = []
+        layoutManager.enumerateLineFragments(
+            forGlyphRange: glyphRange
+        ) { lineFragmentRect, usedRect, _, lineGlyphRange, _ in
+            let consumedRange = layoutManager.characterRange(
+                forGlyphRange: lineGlyphRange,
+                actualGlyphRange: nil
+            )
+            var drawableRange = consumedRange
+            while drawableRange.length > 0 {
+                let finalUTF16Unit = nsText.character(at: NSMaxRange(drawableRange) - 1)
+                guard self.isInlineTextHardBreakUTF16Unit(finalUTF16Unit) else {
+                    break
+                }
+                drawableRange.length -= 1
+            }
+            let baselineLocation = lineGlyphRange.length > 0
+                ? layoutManager.location(forGlyphAt: lineGlyphRange.location)
+                : usedRect.origin
+            snapshots.append(InlineTextEditorLineSnapshot(
+                utf16Range: drawableRange,
+                consumedUTF16Range: consumedRange,
+                originInView: editor.convert(
+                    CGPoint(
+                        // Match the canonical plan's visual line origin. The
+                        // first logical glyph can live at the opposite edge of
+                        // an RTL or mixed-direction fragment.
+                        x: editor.textContainerOrigin.x + usedRect.minX,
+                        y: editor.textContainerOrigin.y
+                            + lineFragmentRect.minY
+                            + baselineLocation.y
+                    ),
+                    to: self
+                )
+            ))
+        }
+        let terminatesWithHardBreak = nsText.length > 0
+            && isInlineTextHardBreakUTF16Unit(
+                nsText.character(at: nsText.length - 1)
+            )
+        if editor.string.isEmpty || terminatesWithHardBreak {
+            guard let stableBaselineOffset = textEditorSessionBaselineOffset else {
+                preconditionFailure(
+                    "Inline text extra-line inspection requires a canonical baseline offset."
+                )
+            }
+            let emptyRange = NSRange(location: nsText.length, length: 0)
+            snapshots.append(InlineTextEditorLineSnapshot(
+                utf16Range: emptyRange,
+                consumedUTF16Range: emptyRange,
+                originInView: editor.convert(
+                    CGPoint(
+                        x: editor.textContainerOrigin.x
+                            + layoutManager.extraLineFragmentUsedRect.minX,
+                        y: editor.textContainerOrigin.y
+                            + layoutManager.extraLineFragmentRect.minY
+                            + stableBaselineOffset
+                    ),
+                    to: self
+                )
+            ))
+        }
+        return snapshots
+    }
+
+    private func assertTextEditorLinesMatchRenderer(
+        _ editor: NSTextView,
+        state: TextEditingState,
+        layout: AnnotationTextLayoutPayload?,
+        canonicalHorizontalOffset: CGFloat = 0,
+        context: String
+    ) {
+        let editorLines = textEditorLineSnapshotsInView(editor)
+        let renderedLines = renderedTextLineSnapshotsInView(
+            state: state,
+            text: editor.string,
+            layout: layout
         )
-        let lineWidth = AnnotationTextLayout.lineMetrics(
-            for: text,
-            style: state.style
-        ).width
-        let lineOrigin = CGPoint(
-            x: AnnotationTextLayout.lineOriginX(
-                alignmentAnchorX: state.anchor.x,
-                lineWidth: lineWidth,
-                alignment: state.style.textAlignment
-            ),
-            y: state.anchor.y
+        precondition(
+            editorLines.count == renderedLines.count,
+            "Inline text line count diverged from the canonical renderer during \(context): editor=\(editorLines.count), renderer=\(renderedLines.count)."
         )
-        return viewPoint(fromDocumentPoint: transformedPoint(
-            lineOrigin,
-            transform: state.transform,
-            around: annotationRect
-        ))
+        for (index, pair) in zip(editorLines, renderedLines).enumerated() {
+            let (editorLine, renderedLine) = pair
+            precondition(
+                NSEqualRanges(editorLine.utf16Range, renderedLine.utf16Range)
+                    && NSEqualRanges(
+                        editorLine.consumedUTF16Range,
+                        renderedLine.consumedUTF16Range
+                    ),
+                "Inline text line \(index) range diverged from the canonical renderer during \(context): editor=\(editorLine.utf16Range)/\(editorLine.consumedUTF16Range), renderer=\(renderedLine.utf16Range)/\(renderedLine.consumedUTF16Range)."
+            )
+            precondition(
+                hypot(
+                    editorLine.originInView.x
+                        + canonicalHorizontalOffset
+                        - renderedLine.originInView.x,
+                    editorLine.originInView.y - renderedLine.originInView.y
+                ) < 0.01,
+                "Inline text line \(index) origin diverged from the canonical renderer during \(context): editor=\(editorLine.originInView), renderer=\(renderedLine.originInView)."
+            )
+        }
     }
 
     private func alignTextEditorBaseline(
@@ -5683,7 +8412,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                         x: presentation.documentBaseOrigin.x + appliedHorizontalCorrection,
                         y: presentation.documentBaseOrigin.y
                     ),
-                    documentSize: presentation.documentSize
+                    documentSize: presentation.documentSize,
+                    canonicalDocumentSize: presentation.canonicalDocumentSize
                 )
             }
         }
@@ -5700,7 +8430,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                         x: presentation.documentBaseOrigin.x,
                         y: presentation.documentBaseOrigin.y + verticalCorrection
                     ),
-                    documentSize: presentation.documentSize
+                    documentSize: presentation.documentSize,
+                    canonicalDocumentSize: presentation.canonicalDocumentSize
                 )
             }
             if textEditorGeometryConfigurationCount > 0 {
@@ -5765,7 +8496,21 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         let glyphRange = layoutManager.glyphRange(for: textContainer)
         let location: CGPoint
         if glyphRange.length > 0 {
-            location = layoutManager.location(forGlyphAt: glyphRange.location)
+            let baselineLocation = layoutManager.location(
+                forGlyphAt: glyphRange.location
+            )
+            let lineFragmentRect = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphRange.location,
+                effectiveRange: nil
+            )
+            let usedRect = layoutManager.lineFragmentUsedRect(
+                forGlyphAt: glyphRange.location,
+                effectiveRange: nil
+            )
+            location = CGPoint(
+                x: usedRect.minX,
+                y: lineFragmentRect.minY + baselineLocation.y
+            )
         } else {
             location = CGPoint(
                 x: 0,
@@ -5790,7 +8535,24 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         font: NSFont,
         paragraphStyle: NSParagraphStyle,
         lineHeight: CGFloat
-    ) -> CGFloat {
+    ) throws -> CGFloat {
+        guard let baselineOffset = measuredStableTextEditorBaselineOffset(
+            font: font,
+            paragraphStyle: paragraphStyle,
+            lineHeight: lineHeight
+        ) else {
+            throw inlineTextKitEditingCapabilityError(
+                "baseline calibration did not produce exactly one finite reference glyph"
+            )
+        }
+        return baselineOffset
+    }
+
+    private func measuredStableTextEditorBaselineOffset(
+        font: NSFont,
+        paragraphStyle: NSParagraphStyle,
+        lineHeight: CGFloat
+    ) -> CGFloat? {
         let storage = NSTextStorage(
             string: "M",
             attributes: [
@@ -5807,11 +8569,13 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         layoutManager.addTextContainer(textContainer)
         layoutManager.ensureLayout(for: textContainer)
         let glyphRange = layoutManager.glyphRange(for: textContainer)
-        precondition(
-            glyphRange.length == 1,
-            "Inline text baseline calibration requires exactly one reference glyph."
-        )
-        return layoutManager.location(forGlyphAt: glyphRange.location).y
+        guard glyphRange.length == 1 else { return nil }
+        let baselineOffset = layoutManager.location(
+            forGlyphAt: glyphRange.location
+        ).y
+        return baselineOffset.isFinite && baselineOffset >= 0
+            ? baselineOffset
+            : nil
     }
 
     private func annotationColor(_ color: RGBAColor) -> NSColor {
@@ -5882,6 +8646,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 isVisible: original.isVisible,
                 isLocked: false,
                 text: original.text,
+                textLayout: original.textLayout,
                 counterValue: original.counterValue
             ))
         }
@@ -5937,18 +8702,79 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1)
     }
 
+    private func reportTextLayoutAuthoringFailure(
+        _ error: Error,
+        operation: String,
+        itemID: UUID? = nil
+    ) {
+        let nsError = error as NSError
+        let fingerprint = "\(type(of: error))|\(nsError.domain)|\(nsError.code)|\(nsError.localizedDescription)"
+        guard fingerprint != lastTextLayoutAuthoringFailureFingerprint else { return }
+        lastTextLayoutAuthoringFailureFingerprint = fingerprint
+        AppLog.capture.error(
+            "Rejected text layout before document mutation: operation=\(operation, privacy: .public), id=\(itemID?.uuidString ?? "none", privacy: .public), domain=\(nsError.domain, privacy: .public), code=\(nsError.code, privacy: .public)"
+        )
+        NSSound.beep()
+        DispatchQueue.main.async { [weak self, nsError] in
+            self?.session.onError?(nsError)
+        }
+    }
+
+    private func clearTextLayoutAuthoringFailure() {
+        lastTextLayoutAuthoringFailureFingerprint = nil
+    }
+
+    private func reportVectorRenderFailure(
+        _ error: Error,
+        item: AnnotationItem,
+        isProvisional: Bool,
+        operation: String = "render"
+    ) {
+        let nsError = error as NSError
+        let shouldReport: Bool
+        if isProvisional {
+            let fingerprint = "\(type(of: error))|\(nsError.domain)|\(nsError.code)|\(nsError.localizedDescription)"
+            shouldReport = reportedProvisionalVectorRenderFailureDescriptions
+                .insert(fingerprint).inserted
+        } else if reportedVectorRenderFailureItems[item.id] == item {
+            shouldReport = false
+        } else {
+            reportedVectorRenderFailureItems[item.id] = item
+            shouldReport = true
+        }
+        guard shouldReport else { return }
+        AppLog.capture.error(
+            "Annotation vector operation failed: operation=\(operation, privacy: .public), id=\(item.id.uuidString, privacy: .public), kind=\(item.kind.rawValue, privacy: .public), provisional=\(isProvisional, privacy: .public), domain=\(nsError.domain, privacy: .public), code=\(nsError.code, privacy: .public)"
+        )
+        // Never present application UI from inside AppKit's drawing stack.
+        DispatchQueue.main.async { [weak self, nsError] in
+            self?.session.onError?(nsError)
+        }
+    }
+
     private func drawInteractiveItem(_ item: AnnotationItem) {
         guard item.isVisible,
               let colorSpace = session.baseImage.image.colorSpace
                 ?? CGColorSpace(name: CGColorSpace.sRGB)
         else { return }
         withDocumentDrawingContext { context in
-            if vectorRenderer.draw(
-                item: item,
-                in: context,
-                colorSpace: colorSpace,
-                canvasBounds: visibleDocumentRect()
-            ) {
+            let didDrawVector: Bool
+            do {
+                didDrawVector = try vectorRenderer.draw(
+                    item: item,
+                    in: context,
+                    colorSpace: colorSpace,
+                    canvasBounds: visibleDocumentRect()
+                )
+            } catch {
+                reportVectorRenderFailure(
+                    error,
+                    item: item,
+                    isProvisional: false
+                )
+                return
+            }
+            if didDrawVector {
                 return
             }
             guard case .rect(let rect) = item.geometry else { return }
@@ -6069,12 +8895,20 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 ?? CGColorSpace(name: CGColorSpace.sRGB)
         else { return }
         withDocumentDrawingContext { context in
-            _ = vectorRenderer.draw(
-                item: provisionalItem,
-                in: context,
-                colorSpace: colorSpace,
-                canvasBounds: visibleDocumentRect()
-            )
+            do {
+                _ = try vectorRenderer.draw(
+                    item: provisionalItem,
+                    in: context,
+                    colorSpace: colorSpace,
+                    canvasBounds: visibleDocumentRect()
+                )
+            } catch {
+                reportVectorRenderFailure(
+                    error,
+                    item: provisionalItem,
+                    isProvisional: true
+                )
+            }
         }
     }
 
@@ -6331,7 +9165,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     private func applyCursor(for viewPoint: CGPoint) {
-        if isWindowDragInProgress || (!isAnnotationEditingEnabled && isReadOnlyWindowDragArmed) {
+        if isWindowDragInProgress
+            || pendingRegionBodyMoveMouseDown != nil
+            || (!isAnnotationEditingEnabled && isReadOnlyWindowDragArmed)
+        {
             NSCursor.closedHand.set()
             return
         }
@@ -6680,6 +9517,77 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 }
 
+private final class InlineAnnotationTextLayoutManager: NSLayoutManager,
+    NSLayoutManagerDelegate
+{
+    private var canonicalBaselineOffset: CGFloat?
+
+    override init() {
+        super.init()
+        delegate = self
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    func setCanonicalBaselineOffset(_ baselineOffset: CGFloat) {
+        precondition(
+            baselineOffset.isFinite && baselineOffset >= 0,
+            "Inline text requires a finite canonical baseline offset."
+        )
+        guard canonicalBaselineOffset.map({
+            abs($0 - baselineOffset) >= 0.001
+        }) ?? true else { return }
+        canonicalBaselineOffset = baselineOffset
+        if let textStorage {
+            invalidateLayout(
+                forCharacterRange: NSRange(
+                    location: 0,
+                    length: textStorage.length
+                ),
+                actualCharacterRange: nil
+            )
+        }
+    }
+
+    override func defaultBaselineOffset(for font: NSFont) -> CGFloat {
+        canonicalBaselineOffset ?? super.defaultBaselineOffset(for: font)
+    }
+
+    func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<NSRect>,
+        lineFragmentUsedRect: UnsafeMutablePointer<NSRect>,
+        baselineOffset: UnsafeMutablePointer<CGFloat>,
+        in textContainer: NSTextContainer,
+        forGlyphRange glyphRange: NSRange
+    ) -> Bool {
+        guard let canonicalBaselineOffset else { return false }
+        baselineOffset.pointee = canonicalBaselineOffset
+        return true
+    }
+
+    func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        shouldUse action: NSLayoutManager.ControlCharacterAction,
+        forControlCharacterAt charIndex: Int
+    ) -> NSLayoutManager.ControlCharacterAction {
+        guard let textStorage, charIndex < textStorage.length else {
+            return action
+        }
+        switch (textStorage.string as NSString).character(at: charIndex) {
+        case 0x000B, 0x000C:
+            // Core's canonical planner treats these raw hard breaks like LF
+            // while preserving their original UTF-16 unit in the document.
+            return [.lineBreak, .paragraphBreak]
+        default:
+            return action
+        }
+    }
+}
+
 private final class InlineAnnotationTextDocumentView: NSView {
     override var isFlipped: Bool { true }
 }
@@ -6868,6 +9776,9 @@ private final class InlineAnnotationTextEditorFrameView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        // Callers pass receiver-local points. Do not forward them to
+        // super.hitTest, which expects superview coordinates and would miss
+        // the NSTextView whenever the chrome is not at the canvas origin.
         guard bounds.contains(point) else { return nil }
         let matchingControls = chromeControls.filter {
             !$0.isHidden && $0.frame.contains(point)
@@ -6884,7 +9795,25 @@ private final class InlineAnnotationTextEditorFrameView: NSView {
             return nearestControl
         }
         guard capturesFieldHitTesting, textFieldFrame.contains(point) else { return nil }
-        return super.hitTest(point)
+        guard let editor = inlineEditorDescendant() else {
+            preconditionFailure("An editable inline text field must contain its NSTextView.")
+        }
+        return editor
+    }
+
+    private func inlineEditorDescendant() -> NSTextView? {
+        func search(_ view: NSView) -> NSTextView? {
+            if let editor = view as? NSTextView {
+                return editor
+            }
+            for subview in view.subviews {
+                if let editor = search(subview) {
+                    return editor
+                }
+            }
+            return nil
+        }
+        return search(self)
     }
 
     override func viewDidMoveToWindow() {
@@ -7119,64 +10048,89 @@ private final class InlineAnnotationTextChromeControl: NSView {
 private final class InlineAnnotationTextView: NSTextView {
     var onMarkedTextChange: (() -> Void)?
     var onEscape: (() -> Void)?
+    var onShiftReturnLineBreak: (() -> Void)?
     var onRejectedPresentationFrameChange: ((CGRect, CGRect) -> Void)?
-    private var presentationFrameLock: CGRect?
+    private var documentFrameLock: CGRect?
 
-    func lockPresentationFrame(_ frame: CGRect) {
-        presentationFrameLock = nil
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        AppLog.capture.notice(
+            "Inline text received pointer down: x=\(location.x, privacy: .public), y=\(location.y, privacy: .public), characters=\(self.string.utf16.count, privacy: .public), selected=\(self.selectedRange().location, privacy: .public)"
+        )
+        super.mouseDown(with: event)
+    }
+
+    func lockDocumentFrame(_ frame: CGRect) {
+        documentFrameLock = nil
         super.setFrameOrigin(frame.origin)
         super.setFrameSize(frame.size)
-        presentationFrameLock = frame
+        documentFrameLock = frame
     }
 
     override func setFrameOrigin(_ newOrigin: NSPoint) {
-        guard let presentationFrameLock else {
+        guard let documentFrameLock else {
             super.setFrameOrigin(newOrigin)
             return
         }
         let proposedFrame = CGRect(origin: newOrigin, size: frame.size)
         if max(
-            abs(proposedFrame.minX - presentationFrameLock.minX),
-            abs(proposedFrame.minY - presentationFrameLock.minY)
+            abs(proposedFrame.minX - documentFrameLock.minX),
+            abs(proposedFrame.minY - documentFrameLock.minY)
         ) > 0.001 {
-            onRejectedPresentationFrameChange?(proposedFrame, presentationFrameLock)
+            onRejectedPresentationFrameChange?(proposedFrame, documentFrameLock)
         }
-        super.setFrameOrigin(presentationFrameLock.origin)
+        super.setFrameOrigin(documentFrameLock.origin)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
-        guard let presentationFrameLock else {
+        guard let documentFrameLock else {
             super.setFrameSize(newSize)
             return
         }
         let proposedFrame = CGRect(origin: frame.origin, size: newSize)
         if max(
-            abs(proposedFrame.width - presentationFrameLock.width),
-            abs(proposedFrame.height - presentationFrameLock.height)
+            abs(proposedFrame.width - documentFrameLock.width),
+            abs(proposedFrame.height - documentFrameLock.height)
         ) > 0.001 {
-            onRejectedPresentationFrameChange?(proposedFrame, presentationFrameLock)
+            onRejectedPresentationFrameChange?(proposedFrame, documentFrameLock)
         }
-        super.setFrameSize(presentationFrameLock.size)
+        super.setFrameSize(documentFrameLock.size)
     }
 
     override func keyDown(with event: NSEvent) {
         let dismissalModifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        guard event.keyCode == 53, dismissalModifiers.isEmpty else {
-            super.keyDown(with: event)
+        if event.keyCode == 53, dismissalModifiers.isEmpty {
+            let discardedComposition = hasMarkedText()
+            if discardedComposition {
+                guard let inputContext else {
+                    preconditionFailure("A marked inline composition must have an NSInputContext.")
+                }
+                inputContext.discardMarkedText()
+                onMarkedTextChange?()
+            }
+            AppLog.capture.debug(
+                "Handled inline text Escape: discardedComposition=\(discardedComposition, privacy: .public)"
+            )
+            onEscape?()
             return
         }
-        let discardedComposition = hasMarkedText()
-        if discardedComposition {
-            guard let inputContext else {
-                preconditionFailure("A marked inline composition must have an NSInputContext.")
-            }
-            inputContext.discardMarkedText()
+        if isShiftReturnLineBreak(event) {
+            insertNewlineIgnoringFieldEditor(nil)
+            onShiftReturnLineBreak?()
             onMarkedTextChange?()
+            return
         }
-        AppLog.capture.debug(
-            "Handled inline text Escape: discardedComposition=\(discardedComposition, privacy: .public)"
-        )
-        onEscape?()
+        super.keyDown(with: event)
+    }
+
+    private func isShiftReturnLineBreak(_ event: NSEvent) -> Bool {
+        guard event.keyCode == 36 || event.keyCode == 76 else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        return modifiers.contains(.shift)
+            && !modifiers.contains(.command)
+            && !modifiers.contains(.control)
     }
 
     override func setMarkedText(

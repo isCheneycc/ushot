@@ -58,6 +58,7 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
     private let exporter: any ImageExporting
     private let outputSettings: OutputSettings
     private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
+    private let commandGate: CanvasEditorCommandGate
     private var closeCallbacks: [() -> Void] = []
     private var registeredCloseOwnershipIDs: Set<UUID> = []
     private var didCompleteCloseLifecycle = false
@@ -72,6 +73,8 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
         self.exporter = exporter
         self.outputSettings = settingsStore.settings.output
         self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
+        let commandGate = CanvasEditorCommandGate()
+        self.commandGate = commandGate
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -87,9 +90,10 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
         window.contentViewController = NSHostingController(rootView: CanvasEditorRootView(
             session: session,
             settingsStore: settingsStore,
+            commandGate: commandGate,
             onCopy: { [weak self] in self?.copyImage() },
             onExport: { [weak self] in self?.exportImage() },
-            onDone: { [weak self] in self?.close() }
+            onDone: { [weak self] in self?.closeFromCommandBar() }
         ))
         window.center()
     }
@@ -131,7 +135,23 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
         onClose = nil
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard commandGate.resolveActiveTextEditing(reason: "window-close") else {
+            AppLog.lifecycle.notice(
+                "Kept Canvas editor open because active text could not commit"
+            )
+            return false
+        }
+        return true
+    }
+
+    private func closeFromCommandBar() {
+        guard commandGate.resolveActiveTextEditing(reason: "done") else { return }
+        close()
+    }
+
     private func copyImage() {
+        guard commandGate.resolveActiveTextEditing(reason: "copy") else { return }
         let updateSensitiveActivityTracker = updateSensitiveActivityTracker
         let lease = updateSensitiveActivityTracker.begin(
             operation: "canvas-editor-copy"
@@ -157,6 +177,7 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
     }
 
     private func exportImage() {
+        guard commandGate.resolveActiveTextEditing(reason: "export") else { return }
         guard let window else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [outputSettings.format.contentType]

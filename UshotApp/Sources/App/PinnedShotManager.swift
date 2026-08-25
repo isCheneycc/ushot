@@ -301,11 +301,12 @@ final class PinnedShotManager {
         regionDraftController.previewRegionDraftFrame(frame, change: change)
     }
 
-    func setCurrentRegionDraftGeometryUpdating(_ updating: Bool) {
+    @discardableResult
+    func setCurrentRegionDraftGeometryUpdating(_ updating: Bool) -> Bool {
         guard let regionDraftController, regionDraftController.isRegionDraft else {
             preconditionFailure("Region selection changed geometry state without a current region draft.")
         }
-        regionDraftController.setRegionDraftGeometryUpdating(updating)
+        return regionDraftController.setRegionDraftGeometryUpdating(updating)
     }
 
     func updateCurrentRegionDraft(
@@ -386,11 +387,23 @@ final class PinnedShotManager {
         guard let onOpenEditor else {
             preconditionFailure("Canvas-editor presentation requires an installed application coordinator.")
         }
+        let currentAdmission = currentController?.beginCanvasEditorPresentation(
+            for: session,
+            reason: reason
+        )
+        let regionAdmission = regionDraftController?.beginCanvasEditorPresentation(
+            for: session,
+            reason: reason
+        )
+        guard (currentAdmission ?? regionAdmission) == true else {
+            AppLog.capture.notice(
+                "Rejected exclusive canvas-editor ownership because active text could not commit: reason=\(reason, privacy: .public)"
+            )
+            return
+        }
         let key = ObjectIdentifier(session)
         let leaseID = canvasEditorLeases[key] ?? UUID()
         canvasEditorLeases[key] = leaseID
-        currentController?.beginCanvasEditorPresentation(for: session, reason: reason)
-        regionDraftController?.beginCanvasEditorPresentation(for: session, reason: reason)
         AppLog.capture.notice(
             "Acquired exclusive canvas-editor ownership: reason=\(reason, privacy: .public)"
         )
@@ -592,6 +605,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         case toolbar
         case keyboard
         case contextMenu = "context-menu"
+        case regionDoubleClick = "region-double-click"
     }
 
     private enum CopyCompletionPolicy: String {
@@ -672,6 +686,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private let outputSettings: OutputSettings
     private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
     private let admitAppWork: @MainActor () throws -> Void
+    private let pointerIdleOutputGate: PointerIdleOutputGate
     private var presentationMode: PinnedShotPresentationMode
     private var promiseDelegates: [FilePromiseDelegate] = []
     private var cancellables: Set<AnyCancellable> = []
@@ -690,8 +705,12 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private var didReleaseRegionToolbar = false
     private var toolbarContextMenuItem: NSMenuItem?
     private var windowMoveInteraction: WindowMoveInteraction?
+    private var pinchZoomRecognizer: NSMagnificationGestureRecognizer?
     private var pinchZoomInteraction: PinchZoomInteraction?
     private var liveResizeInProgress = false
+    private var pendingLiveResizeStartFrame: CGRect?
+    private var rejectedLiveResizeStartFrame: CGRect?
+    private var isRestoringRejectedLiveResizeFrame = false
     private var canvasEditorPresented = false
     private var restoresToolbarAfterCanvasEditor = false
     private var isApplyingEditorSettings = false
@@ -733,7 +752,10 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         presentationMode: PinnedShotPresentationMode,
         preparedToolbarController: PinnedShotToolbarController? = nil,
         updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
-        admitAppWork: @escaping @MainActor () throws -> Void = {}
+        admitAppWork: @escaping @MainActor () throws -> Void = {},
+        pressedMouseButtonsProvider: @escaping () -> UInt = {
+            UInt(NSEvent.pressedMouseButtons)
+        }
     ) {
         precondition(
             preparedToolbarController == nil || presentationMode.isRegionDraft,
@@ -747,6 +769,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         self.outputSettings = outputSettings
         self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
         self.admitAppWork = admitAppWork
+        self.pointerIdleOutputGate = PointerIdleOutputGate(
+            pressedMouseButtonsProvider: pressedMouseButtonsProvider
+        )
         self.presentationMode = presentationMode
         self.ownsReusableRegionToolbar = presentationMode.isRegionDraft
         // The decision must match the fixed image content, not live settings:
@@ -1067,12 +1092,16 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         payload.releaseCache()
     }
 
-    func beginCanvasEditorPresentation(for candidate: AnnotationEditingSession, reason: String) {
-        guard session === candidate else { return }
-        beginCanvasEditorPresentation(reason: reason)
+    func beginCanvasEditorPresentation(
+        for candidate: AnnotationEditingSession,
+        reason: String
+    ) -> Bool? {
+        guard session === candidate else { return nil }
+        return beginCanvasEditorPresentation(reason: reason)
     }
 
-    func beginCanvasEditorPresentation(reason: String) {
+    @discardableResult
+    func beginCanvasEditorPresentation(reason: String) -> Bool {
         precondition(
             !presentationMode.isRegionDraft,
             "An uncommitted region confirmation cannot share its document with the full canvas editor."
@@ -1081,11 +1110,13 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             AppLog.capture.debug(
                 "Kept existing exclusive canvas-editor ownership: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public)"
             )
-            return
+            return true
         }
 
         resolveActiveLineWidthEdit(.commitOrReject, reason: "canvas-editor-open")
-        imageView.endTextEditingIfNeeded(reason: .externalAction)
+        guard resolveActiveTextEditing(reason: "canvas-editor-open") else {
+            return false
+        }
         canvasEditorPresented = true
         restoresToolbarAfterCanvasEditor = presentationMode.showsToolbar
         if presentationMode.showsToolbar {
@@ -1108,6 +1139,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         AppLog.capture.notice(
             "Pinned surface yielded exclusive annotation ownership to canvas editor: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public), restoreToolbar=\(self.restoresToolbarAfterCanvasEditor, privacy: .public)"
         )
+        return true
     }
 
     func endCanvasEditorPresentation(for candidate: AnnotationEditingSession) {
@@ -1132,7 +1164,36 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
 
     @discardableResult
     func endTextEditingForGeometryChange() -> Bool {
-        imageView.endTextEditingIfNeeded(reason: .externalAction)
+        resolveActiveTextEditing(reason: "geometry-change")
+    }
+
+    private func resolveActiveTextEditing(reason: String) -> Bool {
+        guard imageView.isTextEditing else { return true }
+        guard imageView.endTextEditingIfNeeded(reason: .externalAction) else {
+            AppLog.capture.notice(
+                "Rejected screenshot action because active text could not commit: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public)"
+            )
+            return false
+        }
+        return true
+    }
+
+    private func pointerIsInsideActiveTextEditor(_ event: NSEvent) -> Bool {
+        guard imageView.isTextEditing,
+              let editor = imagePanel.firstResponder as? NSTextView
+        else { return false }
+        var editorHost: NSView = editor
+        while let parent = editorHost.superview, parent !== imageView {
+            editorHost = parent
+        }
+        guard editorHost.superview === imageView else {
+            AppLog.capture.fault(
+                "Active pinned text editor lost its canvas-local input host: id=\(self.identifier.uuidString, privacy: .public)"
+            )
+            return false
+        }
+        let point = editorHost.convert(event.locationInWindow, from: nil)
+        return editorHost.bounds.contains(point)
     }
 
     func takeRegionDraftToolbarForReuse() -> PinnedShotToolbarController? {
@@ -1392,6 +1453,10 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     }
 
     func windowDidResize(_ notification: Notification) {
+        if rejectedLiveResizeStartFrame != nil {
+            restoreRejectedLiveResizeFrameIfNeeded(reason: "window-did-resize")
+            return
+        }
         repositionToolbar()
     }
 
@@ -1583,7 +1648,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 session.configuredRegionCornerRadius ?? RegionCaptureCornerRadius.defaultLogicalPoints
             chromeView.onResizeBegan = { [weak self] handle, point in
                 guard let self else { return }
-                _ = self.imageView.endTextEditingIfNeeded(reason: .externalAction)
+                guard self.resolveActiveTextEditing(
+                    reason: "region-resize-began"
+                ) else { return }
                 self.onRegionDraftResizeBegan?(handle, point)
             }
             chromeView.onResizeChanged = { [weak self] point in
@@ -1611,13 +1678,19 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             imageView.autoresizingMask = [.width, .height]
         }
         // Trackpad pinch zoom. The recognizer is attached in both presentation
-        // modes but its handler is gated to pinned presentations, so a region
-        // confirmation never resizes and the same controller can keep zooming
-        // after Pin converts it into a pinned screenshot.
-        imageView.addGestureRecognizer(NSMagnificationGestureRecognizer(
+        // modes but stays disabled until Pin: delaying primary mouse-button
+        // events during region confirmation resets AppKit clickCount and made
+        // double-click copy unusable. The handler is also gated to pinned
+        // presentations so a confirmation never resizes.
+        let pinchZoomRecognizer = NSMagnificationGestureRecognizer(
             target: self,
             action: #selector(handlePinchZoom(_:))
-        ))
+        )
+        pinchZoomRecognizer.delaysPrimaryMouseButtonEvents = false
+        pinchZoomRecognizer.delaysOtherMouseButtonEvents = false
+        pinchZoomRecognizer.isEnabled = !presentationMode.isRegionDraft
+        imageView.addGestureRecognizer(pinchZoomRecognizer)
+        self.pinchZoomRecognizer = pinchZoomRecognizer
         imageView.onWindowDragBegan = { [weak self] event in
             guard let self else { return }
             precondition(
@@ -1625,8 +1698,19 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 "A screenshot-canvas move must begin with the original left-mouse-down event."
             )
             if self.presentationMode.isRegionDraft {
+                guard self.resolveActiveTextEditing(
+                    reason: "region-move-began"
+                ) else { return }
                 self.imageView.setWindowDragInProgress(true)
-                self.onRegionDraftMoveBegan?(NSEvent.mouseLocation)
+                let startPoint: CGPoint
+                if let window = event.window {
+                    startPoint = window.convertToScreen(
+                        CGRect(origin: event.locationInWindow, size: .zero)
+                    ).origin
+                } else {
+                    startPoint = NSEvent.mouseLocation
+                }
+                self.onRegionDraftMoveBegan?(startPoint)
                 AppLog.capture.notice(
                     "Region confirmation canvas press began: id=\(self.identifier.uuidString, privacy: .public), cursor=closed-hand"
                 )
@@ -1636,6 +1720,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 self.windowMoveInteraction == nil,
                 "A pinned screenshot cannot begin a second window move before pointer-up."
             )
+            guard self.resolveActiveTextEditing(
+                reason: "pinned-window-move-began"
+            ) else { return }
             guard self.admitUpdateSensitiveAction("move-window") else { return }
             self.imagePanel.beginAppControlledPointerDrag()
             let panelOrigin = self.imagePanel.frame.origin
@@ -1687,6 +1774,18 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         imageView.onCopyFinalImage = { [weak self] in
             self?.requestCopy(source: .keyboard)
         }
+        if presentationMode.isRegionDraft {
+            imageView.onRegionSelectionDoubleClickCopy = { [weak self] in
+                guard let self else { return }
+                guard self.settingsStore.settings.capture.copiesRegionOnDoubleClick else {
+                    AppLog.capture.notice(
+                        "Ignored region confirmation double-click copy because the setting is off: id=\(self.identifier.uuidString, privacy: .public)"
+                    )
+                    return
+                }
+                self.requestCopy(source: .regionDoubleClick)
+            }
+        }
         imageView.onPreviewChange = { [weak self] captured in
             guard let self else { return }
             self.payload.update(capturedImage: captured)
@@ -1695,8 +1794,20 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             }
         }
         imagePanel.onEscape = { [weak self] in self?.handleEscape() }
-        imagePanel.shouldAcceptLeftMouseDown = { [weak self] in
-            self?.admitPinnedPointerInput(action: "left-mouse-down") ?? false
+        imagePanel.shouldAcceptLeftMouseDown = { [weak self] event in
+            guard let self,
+                  self.admitPinnedPointerInput(action: "left-mouse-down")
+            else { return false }
+            if self.imageView.isTextEditing,
+               self.pointerIsInsideActiveTextEditor(event) {
+                self.pendingLiveResizeStartFrame = nil
+                return true
+            }
+            self.pendingLiveResizeStartFrame = self.imagePanel.isNativeResizeEdge(
+                atWindowPoint: event.locationInWindow
+            ) ? self.imagePanel.frame : nil
+            guard self.imageView.isTextEditing else { return true }
+            return self.resolveActiveTextEditing(reason: "left-mouse-down-outside-text")
         }
         session.onError = { [weak self] error in
             guard let self else { return }
@@ -1762,22 +1873,60 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
 
     func windowWillStartLiveResize(_ notification: Notification) {
         guard notification.object as? NSWindow === imagePanel else { return }
-        liveResizeInProgress = true
+        let startingFrame = pendingLiveResizeStartFrame ?? imagePanel.frame
+        pendingLiveResizeStartFrame = nil
         guard admitPinnedPointerInput(action: "live-resize") else {
             AppLog.updates.fault(
                 "AppKit began a pinned live resize after update ownership rejected its pointer input: id=\(self.identifier.uuidString, privacy: .public)"
             )
             return
         }
+        resolveActiveLineWidthEdit(.commitOrReject, reason: "live-resize")
+        guard resolveActiveTextEditing(reason: "live-resize") else {
+            rejectedLiveResizeStartFrame = startingFrame
+            AppLog.capture.fault(
+                "Rejected a native pinned resize that bypassed pointer admission because active text could not commit: id=\(self.identifier.uuidString, privacy: .public), frame=\(startingFrame.debugDescription, privacy: .public)"
+            )
+            restoreRejectedLiveResizeFrameIfNeeded(reason: "resize-began")
+            return
+        }
+        liveResizeInProgress = true
         AppLog.capture.debug(
             "Pinned screenshot live resize began: id=\(self.identifier.uuidString, privacy: .public)"
         )
     }
 
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        guard sender === imagePanel, let rejectedLiveResizeStartFrame else {
+            return frameSize
+        }
+        return rejectedLiveResizeStartFrame.size
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
         guard notification.object as? NSWindow === imagePanel else { return }
+        if rejectedLiveResizeStartFrame != nil {
+            restoreRejectedLiveResizeFrameIfNeeded(reason: "resize-ended")
+            rejectedLiveResizeStartFrame = nil
+            liveResizeInProgress = false
+            return
+        }
         liveResizeInProgress = false
         logScreenshotSampling(reason: "live-resize-ended")
+    }
+
+    private func restoreRejectedLiveResizeFrameIfNeeded(reason: String) {
+        guard let rejectedLiveResizeStartFrame,
+              !isRestoringRejectedLiveResizeFrame,
+              imagePanel.frame != rejectedLiveResizeStartFrame
+        else { return }
+        isRestoringRejectedLiveResizeFrame = true
+        imagePanel.setFrame(rejectedLiveResizeStartFrame, display: true, animate: false)
+        isRestoringRejectedLiveResizeFrame = false
+        repositionToolbar()
+        AppLog.capture.notice(
+            "Restored pinned frame after rejecting native resize: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public), frame=\(rejectedLiveResizeStartFrame.debugDescription, privacy: .public)"
+        )
     }
 
     // MARK - Trackpad pinch zoom
@@ -1791,7 +1940,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             // hidden image has no visible geometry to zoom.
             guard !presentationMode.isRegionDraft, !imageIsHidden else { return }
             resolveActiveLineWidthEdit(.commitOrReject, reason: "pinch-zoom-began")
-            _ = endTextEditingForGeometryChange()
+            guard resolveActiveTextEditing(reason: "pinch-zoom-began") else {
+                return
+            }
             guard admitUpdateSensitiveAction("pinch-zoom") else { return }
             precondition(
                 pinchZoomInteraction == nil,
@@ -1857,12 +2008,15 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         toolbarController.onSave = { [weak self] in
             guard let self else { return }
             self.resolveActiveLineWidthEdit(.commitOrReject, reason: "save")
-            self.imageView.endTextEditingIfNeeded(reason: .externalAction)
+            guard self.resolveActiveTextEditing(reason: "save") else { return }
             self.saveImage()
         }
         toolbarController.onRestoreSize = { [weak self] in
             guard let self else { return }
             self.resolveActiveLineWidthEdit(.commitOrReject, reason: "restore-size")
+            guard self.resolveActiveTextEditing(reason: "restore-size") else {
+                return
+            }
             self.restoreOriginalSize()
         }
         toolbarController.onOpacityChange = { [weak self] value in
@@ -1877,11 +2031,17 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         toolbarController.onToggleClickThrough = { [weak self] enabled in
             guard let self else { return }
             self.resolveActiveLineWidthEdit(.commitOrReject, reason: "click-through-change")
+            guard self.resolveActiveTextEditing(
+                reason: "click-through-change"
+            ) else { return }
             self.imagePanel.ignoresMouseEvents = enabled
         }
         toolbarController.onToggleHidden = { [weak self] in
             guard let self else { return }
             self.resolveActiveLineWidthEdit(.commitOrReject, reason: "temporary-visibility-change")
+            guard self.resolveActiveTextEditing(
+                reason: "temporary-visibility-change"
+            ) else { return }
             self.toggleImageVisibility()
         }
         toolbarController.onOpenEditor = { [weak self] in
@@ -1897,6 +2057,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             if self.presentationMode.isRegionDraft {
                 self.cancelRegionDraft()
             } else {
+                guard self.resolveActiveTextEditing(reason: "toolbar-close") else {
+                    return
+                }
                 self.close(reason: .toolbar)
             }
         }
@@ -1908,11 +2071,13 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         toolbarController.onUndo = { [weak self] in
             guard let self else { return }
             self.resolveActiveLineWidthEdit(.commitOrReject, reason: "undo")
+            guard self.resolveActiveTextEditing(reason: "undo") else { return }
             self.session.controller.undo()
         }
         toolbarController.onRedo = { [weak self] in
             guard let self else { return }
             self.resolveActiveLineWidthEdit(.commitOrReject, reason: "redo")
+            guard self.resolveActiveTextEditing(reason: "redo") else { return }
             self.session.controller.redo()
         }
         toolbarController.onColorChange = { [weak self] color in
@@ -2074,6 +2239,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
 
     private func selectAnnotationTool(_ tool: AnnotationTool, reason: String) {
         resolveActiveLineWidthEdit(.commitOrReject, reason: reason)
+        if tool != .text {
+            guard resolveActiveTextEditing(reason: reason) else { return }
+        }
         session.currentTool = tool
     }
 
@@ -2175,7 +2343,10 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     }
 
     private func handleEscape() {
-        if imageView.endTextEditingIfNeeded(reason: .escape) {
+        if imageView.isTextEditing {
+            guard imageView.endTextEditingIfNeeded(reason: .escape) else {
+                return
+            }
             AppLog.capture.notice(
                 "Escape ended inline text editing without closing the screenshot: id=\(self.identifier.uuidString, privacy: .public)"
             )
@@ -2204,6 +2375,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             return
         }
         guard admitPointerIdleOutput(action: "pin") else { return }
+        guard resolveActiveTextEditing(reason: "region-pin") else { return }
         disableAnnotationEditing(reason: "region-pin")
         regionDraftTransitionInProgress = true
         regionDraftImageIgnoredMouseEvents = imagePanel.ignoresMouseEvents
@@ -2234,6 +2406,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 self.imageView.syncPresentationContentCornerRadius(
                     for: currentImage.logicalSize
                 )
+                self.pinchZoomRecognizer?.isEnabled = true
                 // A pinned region crop is opaque desktop pixels, so this
                 // resolves to true; the property keeps one shadow owner.
                 self.imagePanel.hasShadow = self.wantsImagePanelShadow
@@ -2337,19 +2510,22 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         repositionToolbar()
     }
 
-    func setRegionDraftGeometryUpdating(_ updating: Bool) {
+    @discardableResult
+    func setRegionDraftGeometryUpdating(_ updating: Bool) -> Bool {
         guard presentationMode.isRegionDraft else {
             preconditionFailure("Only a region draft may update selection geometry.")
         }
-        guard regionDraftGeometryUpdateInProgress != updating else { return }
+        guard regionDraftGeometryUpdateInProgress != updating else { return true }
         if updating {
             resolveActiveLineWidthEdit(.commitOrReject, reason: "region-geometry-change")
+            guard resolveActiveTextEditing(
+                reason: "region-geometry-change"
+            ) else { return false }
         }
         regionDraftGeometryUpdateInProgress = updating
         regionDraftChromeView?.isResizeEnabled = !updating
         toolbarController.setRegionDraftTransitioning(updating)
         if updating {
-            _ = imageView.endTextEditingIfNeeded(reason: .externalAction)
             regionDraftGeometryImageIgnoredMouseEvents = imagePanel.ignoresMouseEvents
             imagePanel.ignoresMouseEvents = true
         } else {
@@ -2358,6 +2534,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         AppLog.capture.debug(
             "Region draft geometry transaction changed: updating=\(updating, privacy: .public), selectionFrame=\(self.regionToolbarAnchorFrame.debugDescription, privacy: .public), panelFrame=\(self.imagePanel.frame.debugDescription, privacy: .public)"
         )
+        return true
     }
 
     func updateRegionDraft(
@@ -2403,7 +2580,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private func requestCopy(source: CopyRequestSource) {
         guard admitUpdateSensitiveAction("copy-\(source.rawValue)") else { return }
         resolveActiveLineWidthEdit(.commitOrReject, reason: "copy-\(source.rawValue)")
-        imageView.endTextEditingIfNeeded(reason: .externalAction)
+        guard resolveActiveTextEditing(reason: "copy-\(source.rawValue)") else {
+            return
+        }
         let completionPolicy: CopyCompletionPolicy = source == .contextMenu || retainsAfterCopy
             ? .keepPresented
             : .dismissAfterSuccess
@@ -2631,35 +2810,54 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             NSSound.beep()
             return nil
         }
-        guard admitPointerIdleOutput(action: action.rawValue) else { return nil }
-
-        let transaction = ExportTransaction(
-            identifier: UUID(),
-            action: action,
-            beganAsRegionDraft: presentationMode.isRegionDraft,
-            desktopFrame: capturedImage.sourceMetadata.desktopFrame.standardized,
-            imageIgnoredMouseEvents: imagePanel.ignoresMouseEvents,
-            resizeWasEnabled: regionDraftChromeView?.isResizeEnabled
-        )
-        activeExportTransaction = transaction
-        imagePanel.ignoresMouseEvents = true
-        regionDraftChromeView?.isResizeEnabled = false
-        toolbarController.setExporting(true)
-        AppLog.export.notice(
-            "Began screenshot output transaction: id=\(transaction.identifier.uuidString, privacy: .public), action=\(action.rawValue, privacy: .public), regionConfirmation=\(transaction.beganAsRegionDraft, privacy: .public), inputFrozen=true"
-        )
-        return transaction
+        guard windowMoveInteraction == nil else {
+            AppLog.export.notice(
+                "Rejected screenshot output during an active window move: action=\(action.rawValue, privacy: .public)"
+            )
+            NSSound.beep()
+            return nil
+        }
+        let attempt = pointerIdleOutputGate.performIfIdle { () -> ExportTransaction in
+            let transaction = ExportTransaction(
+                identifier: UUID(),
+                action: action,
+                beganAsRegionDraft: presentationMode.isRegionDraft,
+                desktopFrame: capturedImage.sourceMetadata.desktopFrame.standardized,
+                imageIgnoredMouseEvents: imagePanel.ignoresMouseEvents,
+                resizeWasEnabled: regionDraftChromeView?.isResizeEnabled
+            )
+            activeExportTransaction = transaction
+            imagePanel.ignoresMouseEvents = true
+            regionDraftChromeView?.isResizeEnabled = false
+            toolbarController.setExporting(true)
+            AppLog.export.notice(
+                "Began screenshot output transaction: id=\(transaction.identifier.uuidString, privacy: .public), action=\(action.rawValue, privacy: .public), regionConfirmation=\(transaction.beganAsRegionDraft, privacy: .public), inputFrozen=true"
+            )
+            return transaction
+        }
+        switch attempt {
+        case .admitted(let transaction):
+            return transaction
+        case .rejected(let pressedMouseButtons):
+            AppLog.export.notice(
+                "Rejected screenshot output during an active pointer interaction: action=\(action.rawValue, privacy: .public), pressedButtons=\(pressedMouseButtons, privacy: .public)"
+            )
+            NSSound.beep()
+            return nil
+        }
     }
 
     private func admitPointerIdleOutput(action: String) -> Bool {
-        guard NSEvent.pressedMouseButtons == 0 else {
+        switch pointerIdleOutputGate.performIfIdle({ () }) {
+        case .admitted:
+            return true
+        case .rejected(let pressedMouseButtons):
             AppLog.export.notice(
-                "Rejected screenshot output during an active pointer interaction: action=\(action, privacy: .public), pressedButtons=\(NSEvent.pressedMouseButtons, privacy: .public)"
+                "Rejected screenshot output during an active pointer interaction: action=\(action, privacy: .public), pressedButtons=\(pressedMouseButtons, privacy: .public)"
             )
             NSSound.beep()
             return false
         }
-        return true
     }
 
     @discardableResult
@@ -2842,6 +3040,11 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             "The pinned quick toolbar cannot become writable while the full canvas editor owns the session."
         )
         guard presentationMode.showsToolbar != visible else { return }
+        if !visible {
+            guard resolveActiveTextEditing(
+                reason: "toolbar-hide-\(reason)"
+            ) else { return }
+        }
         presentationMode = .pinned(showsToolbar: visible)
         if visible {
             toolbarController.setRegionActionsVisible(false)
@@ -3357,7 +3560,7 @@ private final class RegionDraftChromeView: NSView {
 
 private final class PinnedShotPanel: NSPanel {
     var onEscape: (() -> Void)?
-    var shouldAcceptLeftMouseDown: (() -> Bool)?
+    var shouldAcceptLeftMouseDown: ((NSEvent) -> Bool)?
     var inputRole = "unconfigured"
     private var isAppControlledPointerDragActive = false
     private var isApplyingAppControlledPointerDragOrigin = false
@@ -3366,6 +3569,15 @@ private final class PinnedShotPanel: NSPanel {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    func isNativeResizeEdge(atWindowPoint point: CGPoint) -> Bool {
+        guard styleMask.contains(.resizable) else { return false }
+        let edgeThickness: CGFloat = 7
+        return point.x <= edgeThickness
+            || point.y <= edgeThickness
+            || point.x >= frame.width - edgeThickness
+            || point.y >= frame.height - edgeThickness
+    }
 
     func beginAppControlledPointerDrag() {
         precondition(
@@ -3487,7 +3699,7 @@ private final class PinnedShotPanel: NSPanel {
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown {
-            guard shouldAcceptLeftMouseDown?() != false else { return }
+            guard shouldAcceptLeftMouseDown?(event) != false else { return }
             let point = event.locationInWindow
             let targetDescription: String
             if let contentView {
@@ -4765,12 +4977,18 @@ private final class PinnedToolStylePopoverController: NSViewController {
             guard let context = NSGraphicsContext.current?.cgContext,
                   let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
             else { return false }
-            return vectorRenderer.draw(
-                item: item,
-                in: context,
-                colorSpace: colorSpace,
-                canvasBounds: CGRect(origin: .zero, size: size)
-            )
+            do {
+                return try vectorRenderer.draw(
+                    item: item,
+                    in: context,
+                    colorSpace: colorSpace,
+                    canvasBounds: CGRect(origin: .zero, size: size)
+                )
+            } catch {
+                preconditionFailure(
+                    "A static non-text toolbar preview failed to render: \(error)"
+                )
+            }
         }
         image.isTemplate = true
         return image

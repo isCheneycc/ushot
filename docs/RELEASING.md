@@ -112,12 +112,12 @@ Never install a `public-adhoc` build over the local signed `/Applications/Ushot.
 2. Add nonempty restricted-Markdown source notes at `updates/release-notes/<version>.md`. Links, images, raw HTML, autolinks, entities and URL/domain/network-address-like destinations are forbidden. Do not add Sparkle signing comments or appcast elements yourself.
 3. Run the relevant tests and direct-install manual checks. Preserve the historical 0.1.2/0.1.3 transition evidence. For a feed-enabled release, authenticate and validate the existing production feed before extension, prove that both the new stable version and build are strictly monotonic, and rerun the relevant runtime, raw-XML, archive-signature, exact-version and active-work regressions. A `publish_update_feed=false` release is direct-download-only and must never be presented as an in-app update.
 4. Commit the exact release source.
-5. Merge the release commit into protected `main`, wait for the `CI` push run on that exact commit to succeed, then create and push an immutable tag matching the version exactly, for example `v0.1.7` for version 0.1.7.
+5. Merge the release commit into protected `main`, wait for the `CI` push run on that exact commit to succeed, then create and push an immutable tag matching the version exactly, for example `v0.1.8` for version 0.1.8.
 6. Add that exact tag to the protected `release` environment's deployment rules and confirm failed or superseded tags remain excluded. Then dispatch **Protected release** at the tag ref, not at `main`. The ref and the `tag` input must be identical:
 
    ```bash
-   TAG=v0.1.7
-   BUILD_NUMBER=8
+   TAG=v0.1.8
+   BUILD_NUMBER=9
    PUBLISH_UPDATE_FEED=false
    gh workflow run release.yml \
      --ref "$TAG" \
@@ -151,14 +151,14 @@ For a local packaging dry run that does not publish anything:
 ```bash
 scripts/build-release.sh \
   --mode public-adhoc \
-  --version 0.1.7 \
-  --build-number 8
+  --version 0.1.8 \
+  --build-number 9
 
 scripts/package-release.sh \
   --mode public-adhoc \
-  --version 0.1.7 \
-  --build-number 8 \
-  --tag v0.1.7
+  --version 0.1.8 \
+  --build-number 9 \
+  --tag v0.1.8
 ```
 
 ## Exact release assets

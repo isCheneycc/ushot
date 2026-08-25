@@ -245,6 +245,20 @@ private enum SettingsTestSupport {
         object["editor"] = editor
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
+
+    static func settingsDataWithoutRegionDoubleClickPreference() throws -> Data {
+        let encoded = try JSONEncoder().encode(AppSettings.defaults)
+        guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any],
+              var capture = object["capture"] as? [String: Any]
+        else {
+            throw ScreenshotAppError.settingsCorrupted(
+                description: "The test could not construct settings without the region double-click preference."
+            )
+        }
+        capture.removeValue(forKey: "copiesRegionOnDoubleClick")
+        object["capture"] = capture
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
 }
 
 private enum ImageTestSupport {
@@ -534,6 +548,7 @@ final class UshotCoreFoundationTests: XCTestCase {
         XCTAssertTrue(settings.capture.recognizesInterfaceElements)
         XCTAssertFalse(settings.capture.automaticallyCopies)
         XCTAssertFalse(settings.capture.automaticallySaves)
+        XCTAssertTrue(settings.capture.copiesRegionOnDoubleClick)
         XCTAssertFalse(settings.history.isEnabled)
         XCTAssertEqual(settings.output.format, .png)
         XCTAssertEqual(settings.colorPicker.colorSpace, .sRGB)
@@ -628,6 +643,21 @@ final class UshotCoreFoundationTests: XCTestCase {
 
         XCTAssertNotNil(store.loadError)
         XCTAssertEqual(store.settings, .defaults)
+    }
+
+    @MainActor
+    func testSettingsWithoutRegionDoubleClickPreferenceUseEnabledDefault() throws {
+        let context = SettingsTestSupport.makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.suite) }
+        context.defaults.set(
+            try SettingsTestSupport.settingsDataWithoutRegionDoubleClickPreference(),
+            forKey: context.key
+        )
+
+        let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
+
+        XCTAssertTrue(store.settings.capture.copiesRegionOnDoubleClick)
+        XCTAssertNil(store.loadError)
     }
 
     @MainActor
@@ -1926,7 +1956,7 @@ final class UshotCoreFoundationTests: XCTestCase {
             )
         )
 
-        XCTAssertTrue(AnnotationVectorRenderer().draw(
+        XCTAssertTrue(try AnnotationVectorRenderer().draw(
             item: item,
             in: context,
             colorSpace: colorSpace
@@ -1942,6 +1972,35 @@ final class UshotCoreFoundationTests: XCTestCase {
         XCTAssertGreaterThan(alpha(x: 8, y: 32), 200, "The rounded shaft tail must remain filled as one continuous path.")
         XCTAssertGreaterThan(alpha(x: 58, y: 32), 200, "The shaft must remain continuous through the V-shaped join.")
         XCTAssertLessThan(alpha(x: 93, y: 32), 32, "The round shaft cap must not protrude beyond the requested arrow tip.")
+    }
+
+    func testEmptyLegacyTextDoesNotResolveAnUnavailableFont() throws {
+        let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: 40,
+            height: 30,
+            bitsPerComponent: 8,
+            bytesPerRow: 40 * 4,
+            space: colorSpace,
+            bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue
+                | CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        var style = AnnotationStyle(fontSize: 18)
+        style.fontName = "Ushot-Intentionally-Unavailable-Font"
+        let item = AnnotationItem(
+            kind: .text,
+            zIndex: 0,
+            geometry: .rect(CGRect(x: 4, y: 5, width: 24, height: 20)),
+            style: style,
+            text: ""
+        )
+
+        XCTAssertTrue(try AnnotationVectorRenderer().draw(
+            item: item,
+            in: context,
+            colorSpace: colorSpace
+        ))
     }
 
     func testShortThickArrowsStayInsideTheirEndpointsAndKeepTaperedWidthsOrdered() throws {
@@ -1990,7 +2049,7 @@ final class UshotCoreFoundationTests: XCTestCase {
                     arrowHeadStyle: arrowStyle
                 )
             )
-            XCTAssertTrue(AnnotationVectorRenderer().draw(
+            XCTAssertTrue(try AnnotationVectorRenderer().draw(
                 item: item,
                 in: context,
                 colorSpace: colorSpace
@@ -2207,7 +2266,7 @@ final class UshotCoreFoundationTests: XCTestCase {
             geometry: .rect(CGRect(x: 5, y: 5, width: 10, height: 10))
         )
 
-        XCTAssertTrue(AnnotationVectorRenderer().draw(
+        XCTAssertTrue(try AnnotationVectorRenderer().draw(
             item: spotlight,
             in: context,
             colorSpace: colorSpace,
@@ -2250,7 +2309,7 @@ final class UshotCoreFoundationTests: XCTestCase {
     }
 
     @MainActor
-    func testAnnotationTextLayoutMatchesTextKitAndPreservesBaselineAnchor() {
+    func testAnnotationTextLayoutMatchesTextKitAndPreservesBaselineAnchor() throws {
         var style = AnnotationStyle(
             fontSize: 18,
             fontWeight: .semibold,
@@ -2286,14 +2345,17 @@ final class UshotCoreFoundationTests: XCTestCase {
         let baselineAnchor = CGPoint(x: 173.25, y: 91.75)
         for alignment in AnnotationTextAlignment.allCases {
             style.textAlignment = alignment
-            let rect = AnnotationTextLayout.annotationRect(
+            let layout = try AnnotationTextLayout.newTextLayout(
                 baselineAnchor: baselineAnchor,
                 text: text,
                 style: style
             )
+            let rect = layout.rect
             let recoveredAnchor = AnnotationTextLayout.alignmentAnchor(
                 in: rect,
-                style: style
+                text: text,
+                style: style,
+                layout: layout.payload
             )
             XCTAssertEqual(recoveredAnchor.x, baselineAnchor.x, accuracy: 0.001)
             XCTAssertEqual(recoveredAnchor.y, baselineAnchor.y, accuracy: 0.001)
@@ -2301,13 +2363,24 @@ final class UshotCoreFoundationTests: XCTestCase {
                 AnnotationTextLayout.lineOriginX(
                     in: rect,
                     lineWidth: metrics.width,
-                    alignment: alignment
+                    style: style,
+                    layout: layout.payload
                 ),
                 AnnotationTextLayout.lineOriginX(
                     alignmentAnchorX: baselineAnchor.x,
                     lineWidth: metrics.width,
                     alignment: alignment
                 ),
+                accuracy: 0.001
+            )
+            XCTAssertEqual(
+                AnnotationTextLayout.chromeInsets(for: layout.payload).width,
+                AnnotationTextLayout.horizontalChromePadding,
+                accuracy: 0.001
+            )
+            XCTAssertEqual(
+                AnnotationTextLayout.chromeInsets(for: layout.payload).height,
+                AnnotationTextLayout.verticalChromePadding,
                 accuracy: 0.001
             )
         }
@@ -2323,6 +2396,252 @@ final class UshotCoreFoundationTests: XCTestCase {
             from: JSONEncoder().encode(customFontStyle)
         )
         XCTAssertEqual(decodedStyle?.fontName, "Helvetica")
+    }
+
+    func testAnnotationTextLayoutPreservesFirstLineBaselineForHardLineBreaks() throws {
+        let style = AnnotationStyle(
+            fontSize: 18,
+            fontWeight: .semibold,
+            textAlignment: .leading
+        )
+        let anchor = CGPoint(x: 40, y: 80)
+        let singleLayout = try AnnotationTextLayout.newTextLayout(
+            baselineAnchor: anchor,
+            text: "First",
+            style: style
+        )
+        let multiLayout = try AnnotationTextLayout.newTextLayout(
+            baselineAnchor: anchor,
+            text: "First\nSecond",
+            style: style
+        )
+        let singleRect = singleLayout.rect
+        let multiRect = multiLayout.rect
+
+        XCTAssertEqual(
+            AnnotationTextLayout.alignmentAnchor(
+                in: singleRect,
+                text: "First",
+                style: style,
+                layout: singleLayout.payload
+            ).y,
+            anchor.y,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            AnnotationTextLayout.alignmentAnchor(
+                in: multiRect,
+                text: "First\nSecond",
+                style: style,
+                layout: multiLayout.payload
+            ).y,
+            anchor.y,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(singleRect.maxY, multiRect.maxY, accuracy: 0.001)
+        let singlePlan = AnnotationTextLayout.layoutPlan(
+            in: "First",
+            style: style,
+            wrapWidth: singleLayout.payload.wrapWidth
+        )
+        let multiPlan = AnnotationTextLayout.layoutPlan(
+            in: "First\nSecond",
+            style: style,
+            wrapWidth: multiLayout.payload.wrapWidth
+        )
+        XCTAssertEqual(
+            AnnotationTextLayout.contentRect(
+                from: singleRect,
+                layout: singleLayout.payload
+            ).height,
+            singlePlan.contentHeight,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            AnnotationTextLayout.contentRect(
+                from: multiRect,
+                layout: multiLayout.payload
+            ).height,
+            multiPlan.contentHeight,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            multiPlan.contentHeight,
+            singlePlan.contentHeight + multiPlan.lineAdvance,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            AnnotationTextLayout.lineCount(in: "First\n"),
+            2
+        )
+        XCTAssertEqual(
+            AnnotationTextLayout.firstLine(of: "First\nSecond"),
+            "First"
+        )
+        XCTAssertGreaterThan(
+            AnnotationTextLayout.maximumLineWidth(for: "WW\n.", style: style),
+            AnnotationTextLayout.lineMetrics(for: ".", style: style).width
+        )
+    }
+
+    func testAnnotationTextLayoutWrapsLongLinesWithoutMovingFirstBaseline() throws {
+        let style = AnnotationStyle(
+            fontSize: 18,
+            fontWeight: .semibold,
+            textAlignment: .leading
+        )
+        let anchor = CGPoint(x: 40, y: 80)
+        let longText = String(repeating: "W", count: 40)
+        let wrapWidth: CGFloat = 120
+        let wrappedLayout = try AnnotationTextLayout.newTextLayout(
+            baselineAnchor: anchor,
+            text: longText,
+            style: style,
+            maximumWrapWidth: wrapWidth
+        )
+        let tightLayout = try AnnotationTextLayout.newTextLayout(
+            baselineAnchor: anchor,
+            text: longText,
+            style: style
+        )
+        let wrappedRect = wrappedLayout.rect
+        let tightRect = tightLayout.rect
+        let visualCount = AnnotationTextLayout.visualLineCount(
+            in: longText,
+            style: style,
+            wrapWidth: wrapWidth
+        )
+
+        XCTAssertGreaterThan(visualCount, 1)
+        XCTAssertEqual(
+            AnnotationTextLayout.contentRect(
+                from: wrappedRect,
+                layout: wrappedLayout.payload
+            ).width,
+            wrapWidth,
+            accuracy: 0.001
+        )
+        XCTAssertLessThan(wrappedRect.width, tightRect.width)
+        XCTAssertEqual(wrappedRect.maxY, tightRect.maxY, accuracy: 0.001)
+        XCTAssertEqual(
+            AnnotationTextLayout.chromeInsets(
+                for: nil as AnnotationTextLayoutPayload?
+            ).width,
+            0,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            AnnotationTextLayout.alignmentAnchor(
+                in: wrappedRect,
+                text: longText,
+                style: style,
+                layout: wrappedLayout.payload
+            ).y,
+            anchor.y,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            AnnotationTextLayout.visualLines(
+                in: longText,
+                style: style,
+                wrapWidth: wrapWidth
+            ).joined(),
+            longText
+        )
+        XCTAssertFalse(
+            AnnotationTextLayout.visualLines(
+                in: longText,
+                style: style,
+                wrapWidth: wrapWidth
+            ).first?.contains("\n") ?? true
+        )
+    }
+
+    func testMultiDigitCountersRenderAsOneCenteredLine() throws {
+        let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+        let counterRect = CGRect(x: 12, y: 12, width: 40, height: 40)
+        var counterTextStyle = AnnotationStyle(
+            strokeColor: .systemRed,
+            fillColor: .white
+        )
+        counterTextStyle.strokeColor = .white
+        counterTextStyle.fontSize = counterRect.width * 0.52
+        counterTextStyle.textAlignment = .center
+
+        for value in [10, 99] {
+            let text = "\(value)"
+            let metrics = AnnotationTextLayout.lineMetrics(
+                for: text,
+                style: counterTextStyle
+            )
+            let origin = AnnotationTextLayout.fixedFrameSingleLineOrigin(
+                for: text,
+                in: counterRect,
+                style: counterTextStyle
+            )
+            XCTAssertEqual(
+                origin.x + metrics.width / 2,
+                counterRect.midX,
+                accuracy: 0.001,
+                "Counter \(value) must use the complete unwrapped line width for centering."
+            )
+
+            let context = try XCTUnwrap(CGContext(
+                data: nil,
+                width: 64,
+                height: 64,
+                bitsPerComponent: 8,
+                bytesPerRow: 64 * 4,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue
+                    | CGImageAlphaInfo.premultipliedLast.rawValue
+            ))
+            let item = AnnotationItem(
+                kind: .counter,
+                zIndex: 0,
+                geometry: .rect(counterRect),
+                style: AnnotationStyle(
+                    strokeColor: .systemRed,
+                    fillColor: .white
+                ),
+                counterValue: value
+            )
+            XCTAssertTrue(try AnnotationVectorRenderer().draw(
+                item: item,
+                in: context,
+                colorSpace: colorSpace
+            ))
+            let rendered = try XCTUnwrap(context.makeImage())
+            let bytes = ImageTestSupport.rgbaBytes(for: rendered)
+            var whiteBounds = CGRect.null
+            for y in 0..<rendered.height {
+                for x in 0..<rendered.width {
+                    let offset = (y * rendered.width + x) * 4
+                    let isCounterText = bytes[offset + 1] > 160
+                        && bytes[offset + 2] > 160
+                        && bytes[offset + 3] > 32
+                    if isCounterText {
+                        whiteBounds = whiteBounds.union(
+                            CGRect(x: x, y: y, width: 1, height: 1)
+                        )
+                    }
+                }
+            }
+
+            XCTAssertFalse(whiteBounds.isNull)
+            XCTAssertGreaterThan(
+                whiteBounds.width,
+                whiteBounds.height,
+                "Counter \(value) must remain a horizontal, single-line label."
+            )
+            XCTAssertEqual(
+                whiteBounds.midX,
+                counterRect.midX,
+                accuracy: 2,
+                "Counter \(value) output must remain visually centered in its badge."
+            )
+            XCTAssertTrue(counterRect.contains(whiteBounds))
+        }
     }
 
     func testTextUsesDedicatedSelectionChromeWhileShapesKeepStandardHandles() {
@@ -2670,6 +2989,7 @@ func defaultSettingsMatchProductDefaults() {
     #expect(settings.capture.recognizesInterfaceElements)
     #expect(!settings.capture.automaticallyCopies)
     #expect(!settings.capture.automaticallySaves)
+    #expect(settings.capture.copiesRegionOnDoubleClick)
     #expect(!settings.history.isEnabled)
     #expect(settings.output.format == .png)
     #expect(settings.colorPicker.colorSpace == .sRGB)
@@ -2757,6 +3077,21 @@ func corruptSettingsAreObservable() {
     let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
     #expect(store.loadError != nil)
     #expect(store.settings == .defaults)
+}
+
+@Test @MainActor
+func settingsWithoutRegionDoubleClickPreferenceUseEnabledDefault() throws {
+    let context = SettingsTestSupport.makeDefaults()
+    defer { context.defaults.removePersistentDomain(forName: context.suite) }
+    context.defaults.set(
+        try SettingsTestSupport.settingsDataWithoutRegionDoubleClickPreference(),
+        forKey: context.key
+    )
+
+    let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
+
+    #expect(store.settings.capture.copiesRegionOnDoubleClick)
+    #expect(store.loadError == nil)
 }
 
 @Test @MainActor
@@ -4061,7 +4396,7 @@ func filledArrowRendersPaperPlaneWingsAroundAContinuousShaft() throws {
         )
     )
 
-    #expect(AnnotationVectorRenderer().draw(
+    #expect(try AnnotationVectorRenderer().draw(
         item: item,
         in: context,
         colorSpace: colorSpace
@@ -4126,7 +4461,7 @@ func shortThickArrowsStayInsideTheirEndpointsAndKeepTaperedWidthsOrdered() throw
                 arrowHeadStyle: arrowStyle
             )
         )
-        #expect(AnnotationVectorRenderer().draw(
+        #expect(try AnnotationVectorRenderer().draw(
             item: item,
             in: context,
             colorSpace: colorSpace
@@ -4342,7 +4677,7 @@ func spotlightVectorMaskCoversLiveExpandedCanvasBounds() throws {
         geometry: .rect(CGRect(x: 5, y: 5, width: 10, height: 10))
     )
 
-    #expect(AnnotationVectorRenderer().draw(
+    #expect(try AnnotationVectorRenderer().draw(
         item: spotlight,
         in: context,
         colorSpace: colorSpace,

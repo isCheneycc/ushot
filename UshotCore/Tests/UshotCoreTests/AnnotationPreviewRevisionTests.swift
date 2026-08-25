@@ -12,6 +12,7 @@ final class AnnotationPreviewRevisionTests: XCTestCase {
             AnnotationDocument.currentCachedPreviewRenderRevision
         )
         XCTAssertTrue(document.isCachedPreviewCompatibleWithCurrentRenderer)
+        XCTAssertEqual(document.cachedPreviewRevisionAffectedAnnotationCount, 0)
     }
 
     func testLegacyJSONWithoutPreviewRevisionStillDecodes() throws {
@@ -31,7 +32,7 @@ final class AnnotationPreviewRevisionTests: XCTestCase {
         XCTAssertTrue(decoded.isCachedPreviewCompatibleWithCurrentRenderer)
     }
 
-    func testLegacyPreviewOnlyRefreshesForChangedArrowStyles() {
+    func testRevisionOnePreviewRefreshesForChangedArrowStyles() {
         for style in [ArrowHeadStyle.filled, .double, .tapered] {
             let document = makeDocument(
                 cachedPreviewRenderRevision: AnnotationDocument.legacyCachedPreviewRenderRevision,
@@ -46,9 +47,48 @@ final class AnnotationPreviewRevisionTests: XCTestCase {
         }
     }
 
-    func testLegacyPreviewRemainsCompatibleForUnaffectedHistory() {
+    func testRevisionOnePreviewCountsArrowAndTextChangesAcrossBothMigrations() {
+        let document = makeDocument(
+            cachedPreviewRenderRevision: AnnotationDocument.legacyCachedPreviewRenderRevision,
+            annotations: [
+                makeArrow(style: .filled),
+                makeText(zIndex: 1)
+            ]
+        )
+
+        XCTAssertFalse(document.isCachedPreviewCompatibleWithCurrentRenderer)
+        XCTAssertEqual(document.cachedPreviewRevisionAffectedAnnotationCount, 2)
+    }
+
+    func testRevisionTwoPreviewRefreshesOnlyForVisibleText() {
+        var hiddenText = makeText(zIndex: 1)
+        hiddenText.isVisible = false
+        let unaffected = makeDocument(
+            cachedPreviewRenderRevision: textLayoutPredecessorRevision,
+            annotations: [
+                makeArrow(style: .filled),
+                hiddenText
+            ]
+        )
+        let affected = makeDocument(
+            cachedPreviewRenderRevision: textLayoutPredecessorRevision,
+            annotations: [
+                makeArrow(style: .filled),
+                makeText(zIndex: 1)
+            ]
+        )
+
+        XCTAssertTrue(unaffected.isCachedPreviewCompatibleWithCurrentRenderer)
+        XCTAssertEqual(unaffected.cachedPreviewRevisionAffectedAnnotationCount, 0)
+        XCTAssertFalse(affected.isCachedPreviewCompatibleWithCurrentRenderer)
+        XCTAssertEqual(affected.cachedPreviewRevisionAffectedAnnotationCount, 1)
+    }
+
+    func testRevisionOnePreviewRemainsCompatibleForUnaffectedHistory() {
         var hiddenFilledArrow = makeArrow(style: .filled)
         hiddenFilledArrow.isVisible = false
+        var hiddenText = makeText(zIndex: 3)
+        hiddenText.isVisible = false
         let document = makeDocument(
             cachedPreviewRenderRevision: AnnotationDocument.legacyCachedPreviewRenderRevision,
             annotations: [
@@ -58,7 +98,8 @@ final class AnnotationPreviewRevisionTests: XCTestCase {
                     geometry: .rect(CGRect(x: 4, y: 4, width: 20, height: 12))
                 ),
                 makeArrow(style: .open, zIndex: 1),
-                hiddenFilledArrow
+                hiddenFilledArrow,
+                hiddenText
             ]
         )
 
@@ -110,12 +151,12 @@ final class AnnotationPreviewRevisionTests: XCTestCase {
         let store = SystemScreenshotHistoryStore(rootDirectory: root)
         let image = try makeCapturedImage()
         let changedDocument = makeDocument(
-            cachedPreviewRenderRevision: AnnotationDocument.legacyCachedPreviewRenderRevision,
-            annotations: [makeArrow(style: .filled)]
+            cachedPreviewRenderRevision: textLayoutPredecessorRevision,
+            annotations: [makeText()]
         )
         let unaffectedDocument = makeDocument(
-            cachedPreviewRenderRevision: AnnotationDocument.legacyCachedPreviewRenderRevision,
-            annotations: [makeArrow(style: .open)]
+            cachedPreviewRenderRevision: textLayoutPredecessorRevision,
+            annotations: [makeArrow(style: .filled)]
         )
 
         for document in [changedDocument, unaffectedDocument] {
@@ -172,6 +213,10 @@ final class AnnotationPreviewRevisionTests: XCTestCase {
         )
     }
 
+    private var textLayoutPredecessorRevision: Int {
+        AnnotationDocument.currentCachedPreviewRenderRevision - 1
+    }
+
     private func makeArrow(
         style arrowHeadStyle: ArrowHeadStyle,
         zIndex: Int = 0
@@ -184,6 +229,15 @@ final class AnnotationPreviewRevisionTests: XCTestCase {
                 end: CGPoint(x: 72, y: 58)
             ),
             style: AnnotationStyle(arrowHeadStyle: arrowHeadStyle)
+        )
+    }
+
+    private func makeText(zIndex: Int = 0) -> AnnotationItem {
+        AnnotationItem(
+            kind: .text,
+            zIndex: zIndex,
+            geometry: .rect(CGRect(x: 8, y: 10, width: 64, height: 24)),
+            text: "Preview text"
         )
     }
 

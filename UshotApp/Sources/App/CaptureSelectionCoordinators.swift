@@ -1012,7 +1012,12 @@ final class RegionSelectionCoordinator {
               let selection,
               isValidSelection(selection)
         else { return }
-        _ = pinnedShotManager.endCurrentRegionDraftTextEditing()
+        guard pinnedShotManager.endCurrentRegionDraftTextEditing() else {
+            AppLog.capture.notice(
+                "Rejected region confirmation move because active text could not commit"
+            )
+            return
+        }
         dragOrigin = point
         initialSelection = selection.integral
         dragMode = .moving
@@ -1086,7 +1091,18 @@ final class RegionSelectionCoordinator {
     ) {
         let startedAt = ProcessInfo.processInfo.systemUptime
         isPreparingDraft = true
-        pinnedShotManager.setCurrentRegionDraftGeometryUpdating(true)
+        guard pinnedShotManager.setCurrentRegionDraftGeometryUpdating(true) else {
+            selection = previousSelection
+            pinnedShotManager.previewCurrentRegionDraftFrame(
+                previousSelection,
+                change: change
+            )
+            isPreparingDraft = false
+            AppLog.capture.notice(
+                "Rejected region geometry commit because active text could not commit: change=\(change.rawValue, privacy: .public)"
+            )
+            return
+        }
         let cropTask = Task.detached(priority: .userInitiated) {
             try RegionCaptureProcessor().crop(updatedSelection, from: preparation)
         }
@@ -1104,7 +1120,7 @@ final class RegionSelectionCoordinator {
                     capturedImage,
                     change: change
                 )
-                self.pinnedShotManager.setCurrentRegionDraftGeometryUpdating(false)
+                _ = self.pinnedShotManager.setCurrentRegionDraftGeometryUpdating(false)
                 self.draftCropTask = nil
                 self.draftPresentationTask = nil
                 self.isPreparingDraft = false
@@ -1122,7 +1138,7 @@ final class RegionSelectionCoordinator {
                     previousSelection,
                     change: change
                 )
-                self.pinnedShotManager.setCurrentRegionDraftGeometryUpdating(false)
+                _ = self.pinnedShotManager.setCurrentRegionDraftGeometryUpdating(false)
                 self.pinnedShotManager.reportRegionDraftUpdateFailure(error)
                 self.draftCropTask = nil
                 self.draftPresentationTask = nil

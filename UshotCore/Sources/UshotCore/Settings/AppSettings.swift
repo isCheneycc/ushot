@@ -133,6 +133,9 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
     public var showsQuickToolbar = true
     public var automaticallyCopies = false
     public var automaticallySaves = false
+    /// When true, double-clicking empty space inside a confirmed region copies
+    /// the composite and closes the overlay. Mouse-up still never completes capture.
+    public var copiesRegionOnDoubleClick = true
     public var automaticallyOpensCanvasEditor = false
     public var savesOriginalAndEdited = false
     public var showsCornerThumbnail = false
@@ -149,6 +152,7 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         showsQuickToolbar: Bool = true,
         automaticallyCopies: Bool = false,
         automaticallySaves: Bool = false,
+        copiesRegionOnDoubleClick: Bool = true,
         automaticallyOpensCanvasEditor: Bool = false,
         savesOriginalAndEdited: Bool = false,
         showsCornerThumbnail: Bool = false,
@@ -162,6 +166,7 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         self.showsQuickToolbar = showsQuickToolbar
         self.automaticallyCopies = automaticallyCopies
         self.automaticallySaves = automaticallySaves
+        self.copiesRegionOnDoubleClick = copiesRegionOnDoubleClick
         self.automaticallyOpensCanvasEditor = automaticallyOpensCanvasEditor
         self.savesOriginalAndEdited = savesOriginalAndEdited
         self.showsCornerThumbnail = showsCornerThumbnail
@@ -199,6 +204,7 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         case showsQuickToolbar
         case automaticallyCopies
         case automaticallySaves
+        case copiesRegionOnDoubleClick
         case automaticallyOpensCanvasEditor
         case savesOriginalAndEdited
         case showsCornerThumbnail
@@ -216,6 +222,10 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         showsQuickToolbar = try container.decodeIfPresent(Bool.self, forKey: .showsQuickToolbar) ?? true
         automaticallyCopies = try container.decodeIfPresent(Bool.self, forKey: .automaticallyCopies) ?? false
         automaticallySaves = try container.decodeIfPresent(Bool.self, forKey: .automaticallySaves) ?? false
+        copiesRegionOnDoubleClick = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .copiesRegionOnDoubleClick
+        ) ?? true
         automaticallyOpensCanvasEditor = try container.decodeIfPresent(
             Bool.self,
             forKey: .automaticallyOpensCanvasEditor
@@ -244,6 +254,7 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         try container.encode(showsQuickToolbar, forKey: .showsQuickToolbar)
         try container.encode(automaticallyCopies, forKey: .automaticallyCopies)
         try container.encode(automaticallySaves, forKey: .automaticallySaves)
+        try container.encode(copiesRegionOnDoubleClick, forKey: .copiesRegionOnDoubleClick)
         try container.encode(automaticallyOpensCanvasEditor, forKey: .automaticallyOpensCanvasEditor)
         try container.encode(savesOriginalAndEdited, forKey: .savesOriginalAndEdited)
         try container.encode(showsCornerThumbnail, forKey: .showsCornerThumbnail)
