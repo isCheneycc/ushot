@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-25
+
+### Added
+
+- Add Settings → Capture → Double-click region to copy, which copies a confirmed region and closes the overlay. Copy starts on the second pointer-up so an active press cannot be rejected as busy; physical mouse, trackpad press-twice and tap-to-click all work. Region movement waits for a drag threshold, the second click is recognized by timing and position as well as AppKit's clickCount, and the pinch-zoom recognizer no longer delays confirmation clicks.
+
+### Fixed
+
+- Let the text tool keep the caret inside an active field on click, and insert a hard line break with Shift+Return instead of committing.
+- Grow and then wrap long text instead of scrolling the start of the sentence out of the field.
+- Keep even padding around committed text so re-editing does not jump the accent box.
+- Make editing, selection and final output use the same document-space native line ownership, visual origins and canonical baselines, preventing fractional-scale multiline drift and wrapped, bidirectional, emoji-fallback or tall-font text from shifting or being clipped.
+- Persist a revision-qualified renderer-ready line plan whose glyph fingerprint binds the complete primary/fallback font sources, including color strikes and variation state. Decode validates saved structure without resolving fonts; authoring, rendering, history migration and edit admission report an unavailable or unreadable font source or changed shape instead of crashing, silently substituting, corrupting or hiding readable history.
+- Validate explicit saved text width, height, overhang, UTF-16 ownership and glyph containment instead of allowing inconsistent geometry to draw outside its frame.
+- Keep a saved text line's semantic width independent from the bounded editor viewport, so reopening wide or scaled text does not temporarily rewrap it.
+- Version the new text-layout document format and preserve legacy text geometry during migration, preventing an older reader from silently rewriting the new layout state.
+- Merge each continuous Canvas inspector gesture or focused text edit into one complete undo step and refresh Undo/Redo availability as soon as it finishes.
+
 ## [0.1.7] - 2026-08-24
 
 ### Added
@@ -121,7 +139,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Limited the manual Gatekeeper workaround to removing `com.apple.quarantine` from an official Ushot release instead of clearing every extended attribute.
 - Defined the Sparkle EdDSA private key as release-critical secret material requiring protected storage, an independent encrypted backup and an exercised recovery process.
 
-[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/isCheneycc/ushot/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/isCheneycc/ushot/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/isCheneycc/ushot/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/isCheneycc/ushot/compare/v0.1.4...v0.1.5

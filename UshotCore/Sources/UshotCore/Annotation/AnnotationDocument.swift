@@ -53,15 +53,23 @@ public struct CanvasEffects: Codable, Equatable, Sendable {
 }
 
 public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
+
+    private static let legacyTightTextSchemaVersion = 1
 
     /// Revision 1 produced filled arrow heads with a flat rear edge. Revision
     /// 2 uses the current paper-plane geometry for filled, double and tapered
-    /// arrow heads. This is deliberately independent from `schemaVersion`: it
-    /// describes the renderer that produced a cached preview bitmap, not the
-    /// structure or interpretation of the editable document itself.
+    /// arrow heads. Revision 3 introduced multiline text and explicit chrome.
+    /// Revision 4 uses the exact TextKit line plan plus persisted asymmetric
+    /// glyph overhangs. This remains independent from `schemaVersion`: it
+    /// describes the renderer that produced a cached preview bitmap, while
+    /// schema version 2 separately protects the editable text-layout payload
+    /// from being opened and destructively rewritten by a version-1 reader.
     public static let legacyCachedPreviewRenderRevision = 1
-    public static let currentCachedPreviewRenderRevision = 2
+    public static let currentCachedPreviewRenderRevision = 4
+
+    private static let paperPlaneArrowCachedPreviewRenderRevision = 2
+    private static let textKitPlanCachedPreviewRenderRevision = 4
 
     public let id: UUID
     public var schemaVersion: Int
@@ -87,6 +95,10 @@ public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
         annotations: [AnnotationItem] = []
     ) {
         precondition(
+            schemaVersion == Self.currentSchemaVersion,
+            "New annotation documents must use the current schema version."
+        )
+        precondition(
             cachedPreviewRenderRevision >= AnnotationDocument.legacyCachedPreviewRenderRevision,
             "A cached annotation preview render revision must be positive."
         )
@@ -104,10 +116,10 @@ public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
 
     /// Whether the persisted preview can be reused by the current renderer.
     ///
-    /// A legacy preview remains byte-for-byte valid when its document does not
-    /// contain a visible arrow style affected by the renderer revision. Future
-    /// revisions are never trusted because this build cannot know which of its
-    /// drawing semantics changed.
+    /// An older preview remains byte-for-byte valid when its document contains
+    /// no visible annotation affected by any renderer revision it predates.
+    /// Future revisions are never trusted because this build cannot know which
+    /// of their drawing semantics changed.
     public var isCachedPreviewCompatibleWithCurrentRenderer: Bool {
         if cachedPreviewRenderRevision == Self.currentCachedPreviewRenderRevision {
             return true
@@ -115,26 +127,30 @@ public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
         guard cachedPreviewRenderRevision < Self.currentCachedPreviewRenderRevision else {
             return false
         }
-        return annotations.allSatisfy { item in
-            guard item.isVisible, item.kind == .arrow else { return true }
-            switch item.style.arrowHeadStyle {
-            case .open:
-                return true
-            case .filled, .double, .tapered:
-                return false
-            }
-        }
+        return cachedPreviewRevisionAffectedAnnotationCount == 0
     }
 
-    /// Number of visible annotations whose cached pixels changed in the
-    /// paper-plane arrow renderer revision. This is intended for privacy-safe
-    /// migration logging; it never exposes annotation content or geometry.
+    /// Number of visible annotations whose cached pixels changed after the
+    /// revision that produced the persisted preview. This is intended for
+    /// privacy-safe migration logging; it never exposes annotation content or
+    /// geometry.
     public var cachedPreviewRevisionAffectedAnnotationCount: Int {
         annotations.reduce(into: 0) { count, item in
-            guard item.isVisible, item.kind == .arrow else { return }
+            guard item.isVisible else { return }
+            if cachedPreviewRenderRevision < Self.textKitPlanCachedPreviewRenderRevision,
+               item.kind == .text
+            {
+                count += 1
+                return
+            }
+            guard cachedPreviewRenderRevision < Self.paperPlaneArrowCachedPreviewRenderRevision,
+                  item.kind == .arrow
+            else {
+                return
+            }
             switch item.style.arrowHeadStyle {
             case .open:
-                break
+                return
             case .filled, .double, .tapered:
                 count += 1
             }
@@ -210,7 +226,16 @@ public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
-        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        let storedSchemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        guard storedSchemaVersion == Self.legacyTightTextSchemaVersion
+                || storedSchemaVersion == Self.currentSchemaVersion
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schemaVersion,
+                in: container,
+                debugDescription: "Unsupported annotation schema version \(storedSchemaVersion)."
+            )
+        }
         if container.contains(.cachedPreviewRenderRevision) {
             cachedPreviewRenderRevision = try container.decode(
                 Int.self,
@@ -233,12 +258,40 @@ public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
         background = try container.decode(BackgroundStyle.self, forKey: .background)
         canvasEffects = try container.decode(CanvasEffects.self, forKey: .canvasEffects)
         annotations = try container.decode([AnnotationItem].self, forKey: .annotations)
+        if storedSchemaVersion == Self.legacyTightTextSchemaVersion {
+            let unexpectedLayoutCount = annotations.reduce(into: 0) { count, item in
+                if item.textLayout != nil { count += 1 }
+            }
+            guard unexpectedLayoutCount == 0 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .annotations,
+                    in: container,
+                    debugDescription: "Annotation schema version 1 cannot contain version-2 text layout state."
+                )
+            }
+            let legacyTextCount = annotations.reduce(into: 0) { count, item in
+                if item.kind == .text { count += 1 }
+            }
+            AppLog.history.notice(
+                "Migrated annotation document schema: from=\(storedSchemaVersion, privacy: .public), to=\(Self.currentSchemaVersion, privacy: .public), legacyTextAnnotations=\(legacyTextCount, privacy: .public)"
+            )
+        }
+        schemaVersion = Self.currentSchemaVersion
     }
 
     public func encode(to encoder: any Encoder) throws {
+        guard schemaVersion == Self.currentSchemaVersion else {
+            throw EncodingError.invalidValue(
+                schemaVersion,
+                EncodingError.Context(
+                    codingPath: encoder.codingPath,
+                    debugDescription: "Only the current annotation schema can be encoded."
+                )
+            )
+        }
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
-        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
         try container.encode(cachedPreviewRenderRevision, forKey: .cachedPreviewRenderRevision)
         try container.encode(baseImageReference, forKey: .baseImageReference)
         try container.encode(canvasSize, forKey: .canvasSize)
@@ -680,6 +733,267 @@ public struct RGBAColor: Codable, Equatable, Sendable {
     public static let clear = RGBAColor(red: 0, green: 0, blue: 0, alpha: 0)
 }
 
+/// Persisted ownership for a text annotation's content box.
+///
+/// Documents written before this payload existed omit it. That absence has one
+/// deterministic meaning: the annotation owns a legacy tight rectangle with no
+/// chrome padding and its rectangle width is the canonical wrap width. New and
+/// migrated text annotations persist an explicit payload so layout never has to
+/// infer a storage generation from floating-point geometry.
+public struct AnnotationTextLayoutPayload: Codable, Equatable, Sendable {
+    public enum ChromeMode: String, Codable, Equatable, Sendable {
+        case legacyTight
+        case uniformPadded
+    }
+
+    /// Version 3 is the first renderer-ready snapshot. Earlier draft payloads
+    /// stored only container geometry and therefore cannot be treated as a
+    /// durable plan across TextKit or font-fallback changes.
+    public static let currentVersion = 3
+    private static let legacyZeroOverhangVersion = 1
+    private static let draftRuntimeRecomputedVersion = 2
+    /// The revision authored by this build. Decoding is intentionally governed
+    /// by an explicit supported set so a later authoring revision does not make
+    /// already-supported history unreadable merely because "current" moved.
+    static let currentAuthoringLayoutEngineRevision = 1
+    static let supportedLayoutEngineRevisions: Set<Int> = [1]
+
+    public let version: Int
+    public let chromeMode: ChromeMode
+    /// Canonical untransformed TextKit-container width in document points.
+    public let wrapWidth: CGFloat
+    /// Persisted ink space on either side of the TextKit container. These do
+    /// not participate in wrapping, so negative bearings and indivisible wide
+    /// graphemes can remain inside the annotation without changing line ranges.
+    public let leadingOverhang: CGFloat
+    public let trailingOverhang: CGFloat
+    /// Present only for the current renderer-ready generation. Legacy payloads
+    /// retain their wire version until AnnotationItem can migrate them with the
+    /// owning text, typography and rectangle in one atomic operation.
+    public let layoutEngineRevision: Int?
+    public let input: AnnotationTextLayoutInput?
+    public let plan: AnnotationTextLayoutPlan?
+
+    var decodedFromLegacyZeroOverhangVersion: Bool {
+        version == Self.legacyZeroOverhangVersion
+    }
+
+    var decodedFromDraftRuntimeRecomputedVersion: Bool {
+        version == Self.draftRuntimeRecomputedVersion
+    }
+
+    init(
+        chromeMode: ChromeMode,
+        wrapWidth: CGFloat,
+        leadingOverhang: CGFloat,
+        trailingOverhang: CGFloat,
+        input: AnnotationTextLayoutInput,
+        plan: AnnotationTextLayoutPlan
+    ) throws {
+        guard wrapWidth.isFinite, wrapWidth > 0 else {
+            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
+                "payload wrap width must be positive and finite"
+            )
+        }
+        guard leadingOverhang.isFinite, leadingOverhang >= 0,
+              trailingOverhang.isFinite, trailingOverhang >= 0
+        else {
+            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
+                "payload overhangs must be finite and non-negative"
+            )
+        }
+        guard abs(plan.wrapWidth - wrapWidth)
+                < AnnotationTextLayout.persistedGeometryTolerance,
+              AnnotationTextLayout.isRendererReadyPlan(plan)
+        else {
+            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
+                "payload requires its matching renderer-ready plan"
+            )
+        }
+        version = Self.currentVersion
+        self.chromeMode = chromeMode
+        self.wrapWidth = wrapWidth
+        self.leadingOverhang = leadingOverhang
+        self.trailingOverhang = trailingOverhang
+        layoutEngineRevision = Self.currentAuthoringLayoutEngineRevision
+        self.input = input
+        self.plan = plan
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case chromeMode
+        case wrapWidth
+        case leadingOverhang
+        case trailingOverhang
+        case layoutEngineRevision
+        case input
+        case plan
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let version = try container.decode(Int.self, forKey: .version)
+        guard version == Self.legacyZeroOverhangVersion
+                || version == Self.draftRuntimeRecomputedVersion
+                || version == Self.currentVersion
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .version,
+                in: container,
+                debugDescription: "Unsupported annotation text layout payload version \(version)."
+            )
+        }
+        let chromeMode = try container.decode(ChromeMode.self, forKey: .chromeMode)
+        let wrapWidth = try container.decode(CGFloat.self, forKey: .wrapWidth)
+        guard wrapWidth.isFinite && wrapWidth > 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .wrapWidth,
+                in: container,
+                debugDescription: "Annotation text layout wrap width must be positive and finite."
+            )
+        }
+        let leadingOverhang: CGFloat
+        let trailingOverhang: CGFloat
+        if version == Self.legacyZeroOverhangVersion {
+            guard !container.contains(.leadingOverhang),
+                  !container.contains(.trailingOverhang)
+            else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .version,
+                    in: container,
+                    debugDescription: "Legacy annotation text layout payloads cannot contain overhang state."
+                )
+            }
+            leadingOverhang = 0
+            trailingOverhang = 0
+        } else {
+            leadingOverhang = try container.decode(
+                CGFloat.self,
+                forKey: .leadingOverhang
+            )
+            trailingOverhang = try container.decode(
+                CGFloat.self,
+                forKey: .trailingOverhang
+            )
+            guard leadingOverhang.isFinite, leadingOverhang >= 0,
+                  trailingOverhang.isFinite, trailingOverhang >= 0
+            else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .leadingOverhang,
+                    in: container,
+                    debugDescription: "Annotation text layout overhangs must be finite and non-negative."
+                )
+            }
+        }
+        let currentOnlyKeys: [CodingKeys] = [
+            .layoutEngineRevision,
+            .input,
+            .plan
+        ]
+        if version == Self.currentVersion {
+            let layoutEngineRevision = try container.decode(
+                Int.self,
+                forKey: .layoutEngineRevision
+            )
+            guard Self.supportedLayoutEngineRevisions.contains(layoutEngineRevision) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .layoutEngineRevision,
+                    in: container,
+                    debugDescription: "Unsupported annotation text layout engine revision \(layoutEngineRevision)."
+                )
+            }
+            self.layoutEngineRevision = layoutEngineRevision
+            input = try container.decode(
+                AnnotationTextLayoutInput.self,
+                forKey: .input
+            )
+            plan = try container.decode(
+                AnnotationTextLayoutPlan.self,
+                forKey: .plan
+            )
+        } else {
+            guard currentOnlyKeys.allSatisfy({ !container.contains($0) }) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .version,
+                    in: container,
+                    debugDescription: "Legacy annotation text layout payloads cannot contain renderer-ready plan state."
+                )
+            }
+            layoutEngineRevision = nil
+            input = nil
+            plan = nil
+        }
+        self.version = version
+        self.chromeMode = chromeMode
+        self.wrapWidth = wrapWidth
+        self.leadingOverhang = leadingOverhang
+        self.trailingOverhang = trailingOverhang
+        if version == Self.currentVersion {
+            guard let input else {
+                preconditionFailure("Current annotation text payload lost its decoded input.")
+            }
+            do {
+                _ = try AnnotationTextLayout.persistedPlan(
+                    text: input.text,
+                    style: input.style,
+                    payload: self
+                )
+            } catch {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .plan,
+                    in: container,
+                    debugDescription: "Persisted annotation text plan is invalid: \(error)"
+                )
+            }
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        guard version == Self.currentVersion,
+              let layoutEngineRevision,
+              Self.supportedLayoutEngineRevisions.contains(layoutEngineRevision),
+              let input,
+              let plan,
+              AnnotationTextLayout.isRendererReadyPlan(plan)
+        else {
+            throw EncodingError.invalidValue(
+                version,
+                EncodingError.Context(
+                    codingPath: encoder.codingPath,
+                    debugDescription: "A legacy annotation text layout payload must be migrated by its owning item before encoding."
+                )
+            )
+        }
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(Self.currentVersion, forKey: .version)
+        try container.encode(chromeMode, forKey: .chromeMode)
+        try container.encode(wrapWidth, forKey: .wrapWidth)
+        try container.encode(leadingOverhang, forKey: .leadingOverhang)
+        try container.encode(trailingOverhang, forKey: .trailingOverhang)
+        try container.encode(
+            layoutEngineRevision,
+            forKey: .layoutEngineRevision
+        )
+        try container.encode(input, forKey: .input)
+        try container.encode(plan, forKey: .plan)
+    }
+
+    public static func == (
+        lhs: AnnotationTextLayoutPayload,
+        rhs: AnnotationTextLayoutPayload
+    ) -> Bool {
+        lhs.version == rhs.version
+            && lhs.chromeMode == rhs.chromeMode
+            && lhs.wrapWidth == rhs.wrapWidth
+            && lhs.leadingOverhang == rhs.leadingOverhang
+            && lhs.trailingOverhang == rhs.trailingOverhang
+            && lhs.layoutEngineRevision == rhs.layoutEngineRevision
+            && lhs.input == rhs.input
+            && lhs.plan == rhs.plan
+    }
+}
+
 public struct AnnotationItem: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public var name: String
@@ -692,7 +1006,26 @@ public struct AnnotationItem: Codable, Equatable, Identifiable, Sendable {
     public var isVisible: Bool
     public var isLocked: Bool
     public var text: String?
+    /// `nil` is the published legacy tight-layout representation. It must not
+    /// be silently materialized unless the text's layout actually changes.
+    public var textLayout: AnnotationTextLayoutPayload?
     public var counterValue: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case kind
+        case zIndex
+        case geometry
+        case style
+        case opacity
+        case transform
+        case isVisible
+        case isLocked
+        case text
+        case textLayout
+        case counterValue
+    }
 
     public init(
         id: UUID = UUID(),
@@ -706,8 +1039,31 @@ public struct AnnotationItem: Codable, Equatable, Identifiable, Sendable {
         isVisible: Bool = true,
         isLocked: Bool = false,
         text: String? = nil,
+        textLayout: AnnotationTextLayoutPayload? = nil,
         counterValue: Int? = nil
     ) {
+        precondition(
+            textLayout == nil || kind == .text,
+            "Only text annotations may own text layout state."
+        )
+        if kind == .text {
+            guard case .rect(let rect) = geometry else {
+                preconditionFailure("Text annotations require rectangle geometry.")
+            }
+            do {
+                try AnnotationTextLayout.validatePersistedTextStyle(style)
+                if let textLayout {
+                    try AnnotationTextLayout.validateExplicitLayout(
+                        text: text ?? "",
+                        style: style,
+                        rect: rect,
+                        payload: textLayout
+                    )
+                }
+            } catch {
+                preconditionFailure("Invalid annotation text state: \(error)")
+            }
+        }
         self.id = id
         self.name = name ?? kind.rawValue.capitalized
         self.kind = kind
@@ -719,6 +1075,238 @@ public struct AnnotationItem: Codable, Equatable, Identifiable, Sendable {
         self.isVisible = isVisible
         self.isLocked = isLocked
         self.text = text
+        self.textLayout = textLayout
         self.counterValue = counterValue
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        kind = try container.decode(AnnotationKind.self, forKey: .kind)
+        zIndex = try container.decode(Int.self, forKey: .zIndex)
+        geometry = try container.decode(AnnotationGeometry.self, forKey: .geometry)
+        style = try container.decode(AnnotationStyle.self, forKey: .style)
+        opacity = try container.decode(CGFloat.self, forKey: .opacity)
+        transform = try container.decode(AnnotationTransform.self, forKey: .transform)
+        isVisible = try container.decode(Bool.self, forKey: .isVisible)
+        isLocked = try container.decode(Bool.self, forKey: .isLocked)
+        text = try container.decodeIfPresent(String.self, forKey: .text)
+        counterValue = try container.decodeIfPresent(Int.self, forKey: .counterValue)
+
+        if kind == .text {
+            guard case .rect = geometry else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .geometry,
+                    in: container,
+                    debugDescription: "Text annotations require rectangle geometry."
+                )
+            }
+            do {
+                try AnnotationTextLayout.validatePersistedTextStyle(style)
+            } catch {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .style,
+                    in: container,
+                    debugDescription: "Persisted text typography is invalid: \(error)"
+                )
+            }
+        }
+
+        if container.contains(.textLayout) {
+            guard try !container.decodeNil(forKey: .textLayout) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .textLayout,
+                    in: container,
+                    debugDescription: "A present annotation text layout payload cannot be null."
+                )
+            }
+            textLayout = try container.decode(
+                AnnotationTextLayoutPayload.self,
+                forKey: .textLayout
+            )
+        } else {
+            // Absence is the sole published legacy-tight discriminator.
+            textLayout = nil
+        }
+        guard textLayout == nil || kind == .text else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .textLayout,
+                in: container,
+                debugDescription: "Only text annotations may contain text layout state."
+            )
+        }
+        if let textLayout {
+            guard case .rect(let rect) = geometry else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .textLayout,
+                    in: container,
+                    debugDescription: "Persisted text layout state requires rectangle geometry."
+                )
+            }
+            if textLayout.decodedFromLegacyZeroOverhangVersion {
+                do {
+                    try AnnotationTextLayout.validateLegacyZeroOverhangLayoutForMigration(
+                        text: text ?? "",
+                        style: style,
+                        rect: rect,
+                        payload: textLayout
+                    )
+                } catch let error as AnnotationTextRenderingError {
+                    throw error
+                } catch {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .textLayout,
+                        in: container,
+                        debugDescription: "Legacy text layout is invalid: \(error)"
+                    )
+                }
+                let baseline = AnnotationTextLayout.alignmentAnchor(
+                    in: rect,
+                    text: text ?? "",
+                    style: style,
+                    layout: textLayout
+                )
+                let safePayload: AnnotationTextLayoutPayload
+                do {
+                    safePayload = try AnnotationTextLayout.safeLayoutPayload(
+                        for: text ?? "",
+                        style: style,
+                        proposedWrapWidth: textLayout.wrapWidth,
+                        chromeMode: textLayout.chromeMode
+                    )
+                } catch let error as AnnotationTextRenderingError {
+                    throw error
+                } catch {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .textLayout,
+                        in: container,
+                        debugDescription: "Legacy text layout migration failed: \(error)"
+                    )
+                }
+                geometry = .rect(AnnotationTextLayout.annotationRect(
+                    baselineAnchor: baseline,
+                    text: text ?? "",
+                    style: style,
+                    layout: safePayload
+                ))
+                guard case .rect(let migratedRect) = geometry else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .geometry,
+                        in: container,
+                        debugDescription: "Text layout migration lost rectangle geometry."
+                    )
+                }
+                do {
+                    try AnnotationTextLayout.validateExplicitLayout(
+                        text: text ?? "",
+                        style: style,
+                        rect: migratedRect,
+                        payload: safePayload
+                    )
+                } catch {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .textLayout,
+                        in: container,
+                        debugDescription: "Migrated text layout is invalid: \(error)"
+                    )
+                }
+                self.textLayout = safePayload
+            } else if textLayout.decodedFromDraftRuntimeRecomputedVersion {
+                do {
+                    _ = try AnnotationTextLayout.validateDraftRuntimeLayoutForMigration(
+                        text: text ?? "",
+                        style: style,
+                        rect: rect,
+                        payload: textLayout
+                    )
+                    let safePayload = try AnnotationTextLayout.safeLayoutPayload(
+                        for: text ?? "",
+                        style: style,
+                        proposedWrapWidth: textLayout.wrapWidth,
+                        chromeMode: textLayout.chromeMode
+                    )
+                    try AnnotationTextLayout.validateExplicitLayout(
+                        text: text ?? "",
+                        style: style,
+                        rect: rect,
+                        payload: safePayload
+                    )
+                    self.textLayout = safePayload
+                } catch let error as AnnotationTextRenderingError {
+                    throw error
+                } catch {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .textLayout,
+                        in: container,
+                        debugDescription: "Draft text layout migration failed: \(error)"
+                    )
+                }
+            } else {
+                do {
+                    try AnnotationTextLayout.validateExplicitLayout(
+                        text: text ?? "",
+                        style: style,
+                        rect: rect,
+                        payload: textLayout
+                    )
+                } catch {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .textLayout,
+                        in: container,
+                        debugDescription: "Persisted text layout is invalid: \(error)"
+                    )
+                }
+            }
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        func invalid(_ description: String) -> EncodingError {
+            EncodingError.invalidValue(
+                self,
+                EncodingError.Context(
+                    codingPath: encoder.codingPath,
+                    debugDescription: description
+                )
+            )
+        }
+
+        guard textLayout == nil || kind == .text else {
+            throw invalid("Only text annotations may contain text layout state.")
+        }
+        if kind == .text {
+            guard case .rect(let rect) = geometry else {
+                throw invalid("Text annotations require rectangle geometry.")
+            }
+            do {
+                try AnnotationTextLayout.validatePersistedTextStyle(style)
+                if let textLayout {
+                    try AnnotationTextLayout.validateExplicitLayout(
+                        text: text ?? "",
+                        style: style,
+                        rect: rect,
+                        payload: textLayout
+                    )
+                }
+            } catch {
+                throw invalid("Annotation text state is invalid: \(error)")
+            }
+        }
+
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(zIndex, forKey: .zIndex)
+        try container.encode(geometry, forKey: .geometry)
+        try container.encode(style, forKey: .style)
+        try container.encode(opacity, forKey: .opacity)
+        try container.encode(transform, forKey: .transform)
+        try container.encode(isVisible, forKey: .isVisible)
+        try container.encode(isLocked, forKey: .isLocked)
+        try container.encodeIfPresent(text, forKey: .text)
+        try container.encodeIfPresent(textLayout, forKey: .textLayout)
+        try container.encodeIfPresent(counterValue, forKey: .counterValue)
     }
 }

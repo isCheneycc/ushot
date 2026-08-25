@@ -141,6 +141,8 @@
     "Click a shortcut, then press a modified key combination. Escape cancels recording." : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "点击快捷键，然后按下带修饰键的组合键。按 Escape 取消录入。" } } } },
     "Components" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分量" } } } },
     "Copy automatically" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "自动复制" } } } },
+    "Double-click region to copy" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "双击选区复制并关闭" } } } },
+    "After region confirmation, double-click empty space inside the selection to copy and close. Resize handles, annotations and mouse-up are unchanged." : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "区域确认后，双击选区内空白处即可复制并关闭。调整手柄、标注和松开鼠标的行为不变。" } } } },
     "Copy format" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制格式" } } } },
     "Copy rendered history image" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制渲染后的历史图片" } } } },
     "Copy rendered image" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "复制渲染图片" } } } },

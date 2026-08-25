@@ -127,6 +127,11 @@ public struct HistoryDirectoryMigrationResult: Equatable, Sendable {
 public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
     public nonisolated let rootDirectory: URL
 
+    private struct DocumentIdentity: Decodable {
+        let id: UUID
+        let schemaVersion: Int
+    }
+
     private let fileManager: FileManager
     private let imageExporter: any ImageExporting
     private let encoder: JSONEncoder
@@ -505,6 +510,11 @@ public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
                 baseImage: base,
                 previewImage: preview
             )
+        } catch let error as AnnotationTextRenderingError {
+            AppLog.history.error(
+                "History load requires unavailable annotation text rendering capability: id=\(id, privacy: .public), reason=\(self.annotationTextCapabilityReason(error), privacy: .public)"
+            )
+            throw error
         } catch let error as ScreenshotAppError {
             throw error
         } catch {
@@ -625,17 +635,29 @@ public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
         document: AnnotationDocument,
         expectedID: UUID
     ) throws {
-        guard metadata.id == expectedID, document.id == expectedID else {
+        try validate(metadata: metadata, expectedID: expectedID)
+        guard document.id == expectedID else {
             throw ScreenshotAppError.historyCorrupted(description: "Record, metadata and document identifiers do not match.")
-        }
-        guard metadata.schemaVersion == HistoryRecordMetadata.currentSchemaVersion else {
-            throw ScreenshotAppError.historyCorrupted(
-                description: "Unsupported metadata schema version \(metadata.schemaVersion)."
-            )
         }
         guard document.schemaVersion == AnnotationDocument.currentSchemaVersion else {
             throw ScreenshotAppError.historyCorrupted(
                 description: "Unsupported annotation schema version \(document.schemaVersion)."
+            )
+        }
+    }
+
+    private func validate(
+        metadata: HistoryRecordMetadata,
+        expectedID: UUID
+    ) throws {
+        guard metadata.id == expectedID else {
+            throw ScreenshotAppError.historyCorrupted(
+                description: "Record, metadata and document identifiers do not match."
+            )
+        }
+        guard metadata.schemaVersion == HistoryRecordMetadata.currentSchemaVersion else {
+            throw ScreenshotAppError.historyCorrupted(
+                description: "Unsupported metadata schema version \(metadata.schemaVersion)."
             )
         }
     }
@@ -645,22 +667,59 @@ public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
             throw ScreenshotAppError.historyCorrupted(description: "The history directory name is not a UUID.")
         }
         let metadata = try decode(HistoryRecordMetadata.self, at: directory.appendingPathComponent("metadata.json"))
-        let document = try decode(AnnotationDocument.self, at: directory.appendingPathComponent("document.json"))
-        try validate(metadata: metadata, document: document, expectedID: expectedID)
-        try validateImage(at: directory.appendingPathComponent("base.png"))
-        let previewURL = directory.appendingPathComponent("preview.png")
-        try validateImage(at: previewURL)
-        let cachedPreviewIsAuthoritative = document.isCachedPreviewCompatibleWithCurrentRenderer
-        if !cachedPreviewIsAuthoritative {
+        try validate(metadata: metadata, expectedID: expectedID)
+        let documentData = try Data(
+            contentsOf: directory.appendingPathComponent("document.json")
+        )
+        do {
+            let document = try decoder.decode(
+                AnnotationDocument.self,
+                from: documentData
+            )
+            try validate(
+                metadata: metadata,
+                document: document,
+                expectedID: expectedID
+            )
+            try validateImage(at: directory.appendingPathComponent("base.png"))
+            let previewURL = directory.appendingPathComponent("preview.png")
+            try validateImage(at: previewURL)
+            let cachedPreviewIsAuthoritative =
+                document.isCachedPreviewCompatibleWithCurrentRenderer
+            if !cachedPreviewIsAuthoritative {
+                AppLog.history.notice(
+                    "History cached preview requires renderer refresh: id=\(expectedID, privacy: .public), storedRevision=\(document.cachedPreviewRenderRevision, privacy: .public), currentRevision=\(AnnotationDocument.currentCachedPreviewRenderRevision, privacy: .public), affectedAnnotations=\(document.cachedPreviewRevisionAffectedAnnotationCount, privacy: .public)"
+                )
+            }
+            return HistoryRecordSummary(
+                metadata: metadata,
+                previewFileURL: previewURL,
+                cachedPreviewIsAuthoritative: cachedPreviewIsAuthoritative
+            )
+        } catch let error as AnnotationTextRenderingError {
+            let identity = try decoder.decode(
+                DocumentIdentity.self,
+                from: documentData
+            )
+            guard identity.id == expectedID,
+                  identity.schemaVersion == AnnotationDocument.currentSchemaVersion
+            else {
+                throw ScreenshotAppError.historyCorrupted(
+                    description: "Record, metadata and document identifiers or schemas do not match."
+                )
+            }
+            try validateImage(at: directory.appendingPathComponent("base.png"))
+            let previewURL = directory.appendingPathComponent("preview.png")
+            try validateImage(at: previewURL)
             AppLog.history.notice(
-                "History cached preview requires renderer refresh: id=\(expectedID, privacy: .public), storedRevision=\(document.cachedPreviewRenderRevision, privacy: .public), currentRevision=\(AnnotationDocument.currentCachedPreviewRenderRevision, privacy: .public), affectedAnnotations=\(document.cachedPreviewRevisionAffectedAnnotationCount, privacy: .public)"
+                "History record remains visible without an authoritative preview: id=\(expectedID, privacy: .public), reason=\(self.annotationTextCapabilityReason(error), privacy: .public)"
+            )
+            return HistoryRecordSummary(
+                metadata: metadata,
+                previewFileURL: previewURL,
+                cachedPreviewIsAuthoritative: false
             )
         }
-        return HistoryRecordSummary(
-            metadata: metadata,
-            previewFileURL: previewURL,
-            cachedPreviewIsAuthoritative: cachedPreviewIsAuthoritative
-        )
     }
 
     private func decode<T: Decodable>(_ type: T.Type, at url: URL) throws -> T {
@@ -692,5 +751,20 @@ public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
 
     private func recordDirectory(id: UUID) -> URL {
         rootDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
+    }
+
+    private func annotationTextCapabilityReason(
+        _ error: AnnotationTextRenderingError
+    ) -> String {
+        switch error {
+        case .fontUnavailable:
+            return "font-unavailable"
+        case .fontSourceUnavailable:
+            return "font-source-unavailable"
+        case .unsupportedLayoutEngineRevision:
+            return "layout-engine-revision-unsupported"
+        case .shapeChanged:
+            return "shape-changed"
+        }
     }
 }

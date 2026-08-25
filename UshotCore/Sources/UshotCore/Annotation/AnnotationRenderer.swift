@@ -168,7 +168,7 @@ public struct AnnotationVectorRenderer: Sendable {
         in context: CGContext,
         colorSpace: CGColorSpace,
         canvasBounds: CGRect? = nil
-    ) -> Bool {
+    ) throws -> Bool {
         guard handles(item.kind, canvasBounds: canvasBounds) else { return false }
 
         context.saveGState()
@@ -232,16 +232,17 @@ public struct AnnotationVectorRenderer: Sendable {
             )
         case (.text, .rect(let rect)):
             applyTransform(item.transform, around: item.geometry.boundingBox, to: context)
-            drawText(
+            try drawText(
                 item.text ?? "",
-                in: rect.standardized,
+                in: rect,
                 style: item.style,
+                layout: item.textLayout,
                 context: context,
                 colorSpace: colorSpace
             )
         case (.counter, .rect(let rect)):
             applyTransform(item.transform, around: item.geometry.boundingBox, to: context)
-            drawCounter(
+            try drawCounter(
                 item.counterValue ?? 1,
                 in: rect.standardized,
                 style: item.style,
@@ -452,30 +453,104 @@ public struct AnnotationVectorRenderer: Sendable {
         _ text: String,
         in rect: CGRect,
         style: AnnotationStyle,
+        layout: AnnotationTextLayoutPayload?,
         context: CGContext,
         colorSpace: CGColorSpace
-    ) {
+    ) throws {
+        // Published schema-1 empty text owned no layout pixels. Preserve that
+        // no-op before asking the runtime to resolve a potentially unavailable
+        // legacy font. Explicit empty text still validates its persisted caret
+        // geometry below before returning.
+        if layout == nil, text.isEmpty { return }
+        let plan: AnnotationTextLayoutPlan
+        let legacyFont: NSFont?
+        if let layout {
+            plan = try AnnotationTextLayout.validateExplicitLayout(
+                text: text,
+                style: style,
+                rect: rect,
+                payload: layout
+            )
+            legacyFont = nil
+        } else {
+            try AnnotationTextLayout.validateRawTextRectangle(rect)
+            let font = try AnnotationTextLayout.resolvedFont(style: style)
+            try AnnotationTextLayout.validateFontSources(
+                in: text,
+                primaryFont: font
+            )
+            let content = AnnotationTextLayout.contentRect(from: rect, layout: nil)
+            plan = AnnotationTextLayout.layoutPlan(
+                in: text,
+                style: style,
+                wrapWidth: max(1, content.width),
+                resolvedFont: font
+            )
+            legacyFont = font
+        }
         guard !text.isEmpty else { return }
-        let font = AnnotationTextLayout.font(style: style)
-        let attributes: [NSAttributedString.Key: Any] = [
-            NSAttributedString.Key(kCTFontAttributeName as String): font as CTFont,
-            NSAttributedString.Key(kCTForegroundColorAttributeName as String): style.strokeColor.cgColor(convertedTo: colorSpace)
-        ]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
-        let lineWidth = AnnotationTextLayout.lineMetrics(
-            for: text,
-            style: style
-        ).width
-        let x = AnnotationTextLayout.lineOriginX(
+        let foregroundColor = style.strokeColor.cgColor(convertedTo: colorSpace)
+        let typesetter: CTTypesetter
+        if let layout {
+            guard let layoutEngineRevision = layout.layoutEngineRevision else {
+                throw AnnotationTextLayoutValidationError.missingPersistedPlan
+            }
+            typesetter = try AnnotationTextLayout.renderingTypesetter(
+                text: text,
+                style: style,
+                plan: plan,
+                layoutEngineRevision: layoutEngineRevision,
+                foregroundColor: foregroundColor
+            )
+        } else {
+            guard let font = legacyFont else {
+                preconditionFailure("Legacy annotation text lost its resolved font.")
+            }
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.minimumLineHeight = plan.lineAdvance
+            paragraphStyle.maximumLineHeight = plan.lineAdvance
+            paragraphStyle.lineBreakMode = .byWordWrapping
+            switch style.textAlignment {
+            case .leading: paragraphStyle.alignment = .left
+            case .center: paragraphStyle.alignment = .center
+            case .trailing: paragraphStyle.alignment = .right
+            }
+            typesetter = CTTypesetterCreateWithAttributedString(NSAttributedString(
+                string: text.replacingOccurrences(of: "\u{000C}", with: "\n"),
+                attributes: [
+                    NSAttributedString.Key(kCTFontAttributeName as String): font as CTFont,
+                    NSAttributedString.Key(kCTForegroundColorAttributeName as String): foregroundColor,
+                    .paragraphStyle: paragraphStyle
+                ]
+            ))
+        }
+        let textContainer = AnnotationTextLayout.textContainerRect(
+            from: rect,
+            layout: layout
+        )
+        let firstBaseline = AnnotationTextLayout.baselineY(
             in: rect,
-            lineWidth: lineWidth,
-            alignment: style.textAlignment
+            style: style,
+            layout: layout,
+            plan: plan
         )
-        context.textPosition = CGPoint(
-            x: x,
-            y: AnnotationTextLayout.baselineY(in: rect, style: style)
+        let placedLines = AnnotationTextLayout.placedLines(
+            plan: plan,
+            textContainer: textContainer,
+            firstBaseline: firstBaseline
         )
-        CTLineDraw(line, context)
+        for placedLine in placedLines {
+            guard placedLine.line.utf16Range.length > 0 else { continue }
+            let line = CTTypesetterCreateLine(
+                typesetter,
+                CFRange(
+                    location: placedLine.line.utf16Range.location,
+                    length: placedLine.line.utf16Range.length
+                )
+            )
+            context.textPosition = placedLine.origin
+            CTLineDraw(line, context)
+        }
     }
 
     private func drawCounter(
@@ -484,14 +559,32 @@ public struct AnnotationVectorRenderer: Sendable {
         style: AnnotationStyle,
         context: CGContext,
         colorSpace: CGColorSpace
-    ) {
-        context.setFillColor(style.strokeColor.cgColor(convertedTo: colorSpace))
-        context.fillEllipse(in: rect)
+    ) throws {
         var textStyle = style
         textStyle.strokeColor = style.fillColor ?? .white
         textStyle.fontSize = min(rect.width, rect.height) * 0.52
         textStyle.textAlignment = .center
-        drawText("\(value)", in: rect, style: textStyle, context: context, colorSpace: colorSpace)
+        let text = "\(value)"
+        let font = try AnnotationTextLayout.resolvedFont(style: textStyle)
+        let line = CTLineCreateWithAttributedString(NSAttributedString(
+            string: text,
+            attributes: [
+                NSAttributedString.Key(kCTFontAttributeName as String): font as CTFont,
+                NSAttributedString.Key(kCTForegroundColorAttributeName as String): textStyle.strokeColor.cgColor(convertedTo: colorSpace)
+            ]
+        ))
+        let textOrigin = AnnotationTextLayout.fixedFrameSingleLineOrigin(
+            for: text,
+            in: rect,
+            style: textStyle,
+            font: font
+        )
+        // Resolve and shape the complete counter before mutating the context so
+        // a missing/invalid font cannot leave a partial circle-only frame.
+        context.setFillColor(style.strokeColor.cgColor(convertedTo: colorSpace))
+        context.fillEllipse(in: rect)
+        context.textPosition = textOrigin
+        CTLineDraw(line, context)
     }
 
     private func applyTransform(
@@ -562,7 +655,13 @@ public struct AnnotationRenderer: AnnotationRendering {
         )
 
         for item in document.orderedAnnotations where item.isVisible {
-            draw(item: item, baseImage: baseImage, canvasSize: document.canvasSize, in: context, colorSpace: colorSpace)
+            try draw(
+                item: item,
+                baseImage: baseImage,
+                canvasSize: document.canvasSize,
+                in: context,
+                colorSpace: colorSpace
+            )
         }
 
         guard var rendered = context.makeImage() else {
@@ -611,8 +710,8 @@ public struct AnnotationRenderer: AnnotationRendering {
         canvasSize: CGSize,
         in context: CGContext,
         colorSpace: CGColorSpace
-    ) {
-        if vectorRenderer.draw(
+    ) throws {
+        if try vectorRenderer.draw(
             item: item,
             in: context,
             colorSpace: colorSpace,

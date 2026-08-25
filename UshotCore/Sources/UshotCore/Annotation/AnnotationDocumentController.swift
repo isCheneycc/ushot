@@ -4,6 +4,13 @@ import Foundation
 
 @MainActor
 public final class AnnotationDocumentController: ObservableObject {
+    public struct ContinuousEditToken: Hashable, Sendable {
+        fileprivate let id: UUID
+        fileprivate let generation: UInt64
+        public let owner: String
+        public let itemID: UUID?
+    }
+
     public enum Alignment: Sendable {
         case leading, horizontalCenter, trailing, top, verticalCenter, bottom
     }
@@ -29,8 +36,18 @@ public final class AnnotationDocumentController: ObservableObject {
 
     @Published public private(set) var state: State
 
-    public private(set) var undoStack: [Change] = []
-    public private(set) var redoStack: [Change] = []
+    @Published public private(set) var undoStack: [Change] = []
+    @Published public private(set) var redoStack: [Change] = []
+
+    private struct ContinuousEdit {
+        let token: ContinuousEditToken
+        let label: String
+        let initialState: State
+        let itemKind: AnnotationKind?
+    }
+
+    private var continuousEditGeneration: UInt64 = 0
+    private var activeContinuousEdit: ContinuousEdit?
 
     public init(document: AnnotationDocument) {
         state = State(document: document, selectedItemIDs: [])
@@ -40,6 +57,8 @@ public final class AnnotationDocumentController: ObservableObject {
     public var selectedItemIDs: Set<UUID> {
         get { state.selectedItemIDs }
         set {
+            guard newValue != state.selectedItemIDs else { return }
+            commitActiveContinuousEdit(reason: "selection-change")
             publish(
                 document: state.document,
                 selectedItemIDs: newValue,
@@ -63,7 +82,113 @@ public final class AnnotationDocumentController: ObservableObject {
     public var canUndo: Bool { !undoStack.isEmpty }
     public var canRedo: Bool { !redoStack.isEmpty }
 
+    /// Starts one gesture- or focus-owned inspector edit. Preview updates made
+    /// with the returned token publish immediately but do not enter the undo
+    /// timeline until the matching token commits.
+    @discardableResult
+    public func beginContinuousEdit(
+        label: String,
+        owner: String,
+        itemID: UUID? = nil
+    ) -> ContinuousEditToken {
+        precondition(!label.isEmpty, "A continuous edit requires a non-empty undo label.")
+        precondition(!owner.isEmpty, "A continuous edit requires an observable owner.")
+        commitActiveContinuousEdit(reason: "owner-replaced")
+        precondition(
+            continuousEditGeneration < UInt64.max,
+            "Continuous edit generation exhausted."
+        )
+        continuousEditGeneration += 1
+        let itemKind: AnnotationKind?
+        if let itemID {
+            guard let item = document.annotations.first(where: { $0.id == itemID }) else {
+                preconditionFailure("A continuous item edit requires an existing annotation identity.")
+            }
+            itemKind = item.kind
+        } else {
+            itemKind = nil
+        }
+        let token = ContinuousEditToken(
+            id: UUID(),
+            generation: continuousEditGeneration,
+            owner: owner,
+            itemID: itemID
+        )
+        activeContinuousEdit = ContinuousEdit(
+            token: token,
+            label: label,
+            initialState: state,
+            itemKind: itemKind
+        )
+        AppLog.capture.debug(
+            "Began continuous annotation edit: owner=\(owner, privacy: .public), generation=\(token.generation, privacy: .public), itemScoped=\(itemID != nil, privacy: .public)"
+        )
+        return token
+    }
+
+    public func isContinuousEditActive(_ token: ContinuousEditToken) -> Bool {
+        activeContinuousEdit?.token == token
+    }
+
+    /// Publishes a live continuous-edit preview without adding an undo entry.
+    /// A stale token is rejected and cannot mutate a newer transaction.
+    @discardableResult
+    public func previewContinuousEdit(
+        _ token: ContinuousEditToken,
+        mutation: (inout AnnotationDocument) -> Void
+    ) -> Bool {
+        guard let active = activeContinuousEdit, active.token == token else {
+            logRejectedContinuousEdit(token, action: "preview")
+            return false
+        }
+        validateContinuousEditIdentity(active, in: document)
+        var preview = document
+        mutation(&preview)
+        normalizeZIndices(in: &preview)
+        validateContinuousEditIdentity(active, in: preview)
+        let validIDs = Set(preview.annotations.map(\.id))
+        let selection = selectedItemIDs.intersection(validIDs)
+        publish(
+            document: preview,
+            selectedItemIDs: selection,
+            reason: "continuous-preview-\(token.owner)"
+        )
+        return true
+    }
+
+    /// Commits the complete live preview as exactly one undo entry.
+    @discardableResult
+    public func commitContinuousEdit(_ token: ContinuousEditToken) -> Bool {
+        guard let active = activeContinuousEdit, active.token == token else {
+            logRejectedContinuousEdit(token, action: "commit")
+            return false
+        }
+        validateContinuousEditIdentity(active, in: document)
+        finishContinuousEdit(active, reason: "owner-commit")
+        return true
+    }
+
+    /// Restores the complete document and selection captured at begin time.
+    @discardableResult
+    public func cancelContinuousEdit(_ token: ContinuousEditToken) -> Bool {
+        guard let active = activeContinuousEdit, active.token == token else {
+            logRejectedContinuousEdit(token, action: "cancel")
+            return false
+        }
+        activeContinuousEdit = nil
+        publish(
+            document: active.initialState.document,
+            selectedItemIDs: active.initialState.selectedItemIDs,
+            reason: "continuous-cancel-\(token.owner)"
+        )
+        AppLog.capture.notice(
+            "Cancelled continuous annotation edit: owner=\(token.owner, privacy: .public), generation=\(token.generation, privacy: .public)"
+        )
+        return true
+    }
+
     public func perform(label: String, mutation: (inout AnnotationDocument) -> Void) {
+        commitActiveContinuousEdit(reason: "discrete-edit")
         commit(label: label, selectionAfterChange: { _, existingSelection in
             existingSelection
         }, mutation: mutation)
@@ -74,6 +199,7 @@ public final class AnnotationDocumentController: ObservableObject {
         selectionAfterChange: (AnnotationDocument, Set<UUID>) -> Set<UUID>,
         mutation: (inout AnnotationDocument) -> Void
     ) {
+        commitActiveContinuousEdit(reason: "discrete-commit")
         let before = document
         var after = document
         mutation(&after)
@@ -115,6 +241,129 @@ public final class AnnotationDocumentController: ObservableObject {
         }
     }
 
+    /// Applies an inspector-style text/content edit as one document mutation.
+    /// Geometry, typography and persisted layout ownership therefore enter the
+    /// same undo record and can never expose an intermediate clipped item.
+    public func updateTextItemLayout(
+        id: UUID,
+        text: String,
+        fontSize: CGFloat,
+        wrapWidthStrategy: AnnotationTextWrapWidthStrategy,
+        additionalMutation: (inout AnnotationItem) -> Void = { _ in }
+    ) throws {
+        guard let original = document.annotations.first(where: { $0.id == id }),
+              !original.isLocked
+        else { return }
+        guard original.kind == .text else {
+            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
+                "atomic text layout updates require a text annotation"
+            )
+        }
+        var updated = try AnnotationTextLayout.reflowedTextItem(
+            original,
+            text: text,
+            fontSize: fontSize,
+            wrapWidthStrategy: wrapWidthStrategy
+        )
+        let layoutOwnedItem = updated
+        additionalMutation(&updated)
+        guard
+            updated.id == layoutOwnedItem.id
+                && updated.kind == .text
+                && updated.text == layoutOwnedItem.text
+                && updated.style.fontSize == layoutOwnedItem.style.fontSize
+                && updated.style.fontName == layoutOwnedItem.style.fontName
+                && updated.style.fontWeight == layoutOwnedItem.style.fontWeight
+                && updated.style.textAlignment == layoutOwnedItem.style.textAlignment
+                && updated.geometry == layoutOwnedItem.geometry
+                && updated.textLayout == layoutOwnedItem.textLayout
+        else {
+            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
+                "additional inspector mutation changed layout-owned text state"
+            )
+        }
+        perform(label: "Edit text layout") { document in
+            guard let index = document.annotations.firstIndex(where: { $0.id == id }),
+                  !document.annotations[index].isLocked
+            else { return }
+            document.annotations[index] = updated
+            if original.textLayout == nil, updated.textLayout != nil {
+                AppLog.capture.notice(
+                    "Materialized explicit legacy text layout after semantic edit: id=\(id.uuidString, privacy: .public), wrapWidth=\(updated.textLayout?.wrapWidth ?? 0, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    @discardableResult
+    public func previewTextItemLayout(
+        transaction: ContinuousEditToken,
+        id: UUID,
+        text: String,
+        fontSize: CGFloat,
+        wrapWidthStrategy: AnnotationTextWrapWidthStrategy,
+        additionalMutation: (inout AnnotationItem) -> Void = { _ in }
+    ) throws -> Bool {
+        guard transaction.itemID == id else {
+            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
+                "a continuous text preview must retain its annotation identity"
+            )
+        }
+        guard let active = activeContinuousEdit, active.token == transaction else {
+            logRejectedContinuousEdit(transaction, action: "preview")
+            return false
+        }
+        validateContinuousEditIdentity(active, in: document)
+        guard let original = document.annotations.first(where: { $0.id == id }) else {
+            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
+                "a continuous text preview lost its annotation identity"
+            )
+        }
+        guard !original.isLocked else {
+            return previewContinuousEdit(transaction) { _ in }
+        }
+        guard original.kind == .text else {
+            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
+                "continuous text layout updates require a text annotation"
+            )
+        }
+        var updated = try AnnotationTextLayout.reflowedTextItem(
+            original,
+            text: text,
+            fontSize: fontSize,
+            wrapWidthStrategy: wrapWidthStrategy
+        )
+        let layoutOwnedItem = updated
+        additionalMutation(&updated)
+        guard
+            updated.id == layoutOwnedItem.id
+                && updated.kind == .text
+                && updated.text == layoutOwnedItem.text
+                && updated.style.fontSize == layoutOwnedItem.style.fontSize
+                && updated.style.fontName == layoutOwnedItem.style.fontName
+                && updated.style.fontWeight == layoutOwnedItem.style.fontWeight
+                && updated.style.textAlignment == layoutOwnedItem.style.textAlignment
+                && updated.geometry == layoutOwnedItem.geometry
+                && updated.textLayout == layoutOwnedItem.textLayout
+        else {
+            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
+                "additional inspector mutation changed layout-owned text state"
+            )
+        }
+        return previewContinuousEdit(transaction) { document in
+            guard let index = document.annotations.firstIndex(where: { $0.id == id }) else {
+                return
+            }
+            guard !document.annotations[index].isLocked else { return }
+            document.annotations[index] = updated
+            if original.textLayout == nil, updated.textLayout != nil {
+                AppLog.capture.notice(
+                    "Materialized explicit legacy text layout during continuous edit: id=\(id.uuidString, privacy: .public), wrapWidth=\(updated.textLayout?.wrapWidth ?? 0, privacy: .public)"
+                )
+            }
+        }
+    }
+
     public func deleteSelection() {
         let ids = selectedItemIDs
         let documentBeforeDeletion = document
@@ -146,6 +395,7 @@ public final class AnnotationDocumentController: ObservableObject {
                     isVisible: original.isVisible,
                     isLocked: false,
                     text: original.text,
+                    textLayout: original.textLayout,
                     counterValue: original.counterValue
                 )
                 copy.transform.translation.width += offset.width
@@ -188,6 +438,7 @@ public final class AnnotationDocumentController: ObservableObject {
     }
 
     public func undo() {
+        commitActiveContinuousEdit(reason: "undo")
         guard let change = undoStack.popLast() else { return }
         redoStack.append(change)
         let validIDs = Set(change.before.annotations.map(\.id))
@@ -199,6 +450,7 @@ public final class AnnotationDocumentController: ObservableObject {
     }
 
     public func redo() {
+        commitActiveContinuousEdit(reason: "redo")
         guard let change = redoStack.popLast() else { return }
         undoStack.append(change)
         let validIDs = Set(change.after.annotations.map(\.id))
@@ -216,6 +468,7 @@ public final class AnnotationDocumentController: ObservableObject {
         canvasSize: CGSize,
         translation: CGSize
     ) {
+        commitActiveContinuousEdit(reason: "rebase-canvas")
         precondition(
             canvasSize.width >= 2 && canvasSize.height >= 2,
             "A rebased annotation canvas must remain non-empty."
@@ -276,6 +529,7 @@ public final class AnnotationDocumentController: ObservableObject {
     /// without creating an undoable annotation action. Used when region draft
     /// geometry changes so the effective radius reclamps with selection size.
     public func applyCanvasCornerRadius(_ cornerRadius: CGFloat) {
+        commitActiveContinuousEdit(reason: "canvas-corner-radius")
         precondition(
             cornerRadius.isFinite && cornerRadius >= 0,
             "Canvas corner radius must be a finite non-negative value."
@@ -425,6 +679,52 @@ public final class AnnotationDocumentController: ObservableObject {
             item.zIndex = index
             return item
         }
+    }
+
+    private func commitActiveContinuousEdit(reason: String) {
+        guard let active = activeContinuousEdit else { return }
+        validateContinuousEditIdentity(active, in: document)
+        finishContinuousEdit(active, reason: reason)
+    }
+
+    private func finishContinuousEdit(_ active: ContinuousEdit, reason: String) {
+        precondition(
+            activeContinuousEdit?.token == active.token,
+            "Only the active continuous edit may finish its generation."
+        )
+        activeContinuousEdit = nil
+        let before = active.initialState.document
+        let after = document
+        if after != before {
+            undoStack.append(Change(label: active.label, before: before, after: after))
+            redoStack.removeAll()
+        }
+        AppLog.capture.debug(
+            "Finished continuous annotation edit: owner=\(active.token.owner, privacy: .public), generation=\(active.token.generation, privacy: .public), changed=\(after != before, privacy: .public), reason=\(reason, privacy: .public)"
+        )
+    }
+
+    private func validateContinuousEditIdentity(
+        _ active: ContinuousEdit,
+        in document: AnnotationDocument
+    ) {
+        guard let itemID = active.token.itemID else { return }
+        guard let item = document.annotations.first(where: { $0.id == itemID }) else {
+            preconditionFailure("An active continuous edit cannot lose its annotation identity.")
+        }
+        precondition(
+            item.kind == active.itemKind,
+            "An active continuous edit cannot change its annotation kind."
+        )
+    }
+
+    private func logRejectedContinuousEdit(
+        _ token: ContinuousEditToken,
+        action: String
+    ) {
+        AppLog.capture.notice(
+            "Rejected stale continuous annotation edit action: action=\(action, privacy: .public), owner=\(token.owner, privacy: .public), generation=\(token.generation, privacy: .public), activeGeneration=\(self.activeContinuousEdit?.token.generation ?? 0, privacy: .public)"
+        )
     }
 
     private func publish(
