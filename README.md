@@ -19,7 +19,7 @@ Ushot is a native screenshot and annotation utility for Apple silicon Macs runni
 Screenshot pixels, annotations, clipboard exports, color samples, history, and encoded files are processed locally. Ushot has no account, telemetry, analytics, advertising SDK, crash-report upload, or system-profile submission.
 
 > [!IMPORTANT]
-> Ushot 0.1.8 (build 9) is the current public direct-download release. Install it manually from the official immutable GitHub Release. Protected run [`32817346826`](https://github.com/isCheneycc/ushot/actions/runs/32817346826) published it with `publish_update_feed=false`; the production v1 feed remains at 0.1.6 (build 7), so **Check for Updates…** does not offer 0.1.8.
+> Ushot 0.1.9 (build 10) is the current public release and production update. Protected run [`32824113225`](https://github.com/isCheneycc/ushot/actions/runs/32824113225) published its immutable five-asset GitHub Release and extended the authenticated v1 feed with `publish_update_feed=true`; supported installed versions can now reach 0.1.9 through **Check for Updates…**.
 
 ## One capture, one continuous workflow
 
@@ -79,9 +79,9 @@ Read [PRIVACY.md](PRIVACY.md) for the complete data, permission, persistence, an
 
 ## Release status and installation
 
-Ushot 0.1.8 (build 9) is the current published direct-download release. Protected run [`32817346826`](https://github.com/isCheneycc/ushot/actions/runs/32817346826) published its immutable five-asset GitHub Release with `publish_update_feed=false`; both the workflow and an independent anonymous download verification passed. The run did not extend the signed v1 appcast, whose production bytes remain at 0.1.6 (build 7), so 0.1.8 must be installed manually. Builds taken directly from `main` remain development artifacts rather than a supported distribution channel.
+Ushot 0.1.9 (build 10) is the current published release. Protected run [`32824113225`](https://github.com/isCheneycc/ushot/actions/runs/32824113225) completed all 11 capability-separated jobs with `publish_update_feed=true`, published and anonymously verified its immutable five-asset GitHub Release, and deployed the independently authenticated v1 appcast. Builds taken directly from `main` remain development artifacts rather than a supported distribution channel.
 
-Download [Ushot-0.1.8-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.8/Ushot-0.1.8-arm64.dmg) from the immutable [Ushot v0.1.8 Release](https://github.com/isCheneycc/ushot/releases/tag/v0.1.8) and install it manually. Public artifacts are intentionally ad-hoc signed, have no Developer ID signature or Apple notarization, and are not sandboxed.
+For a first installation, download [Ushot-0.1.9-arm64.dmg](https://github.com/isCheneycc/ushot/releases/download/v0.1.9/Ushot-0.1.9-arm64.dmg) from the immutable [Ushot v0.1.9 Release](https://github.com/isCheneycc/ushot/releases/tag/v0.1.9) and install it manually. Public artifacts are intentionally ad-hoc signed, have no Developer ID signature or Apple notarization, and are not sandboxed.
 
 1. Open the DMG and drag `Ushot.app` into **Applications**.
 2. Remove only the downloaded-file quarantine attribute, then open Ushot:
@@ -99,7 +99,7 @@ The app bundle includes the applicable [third-party license notices](UshotApp/Re
 
 Update checks are manual only. Ushot does not check at launch or on a schedule, download automatically, or submit a system profile.
 
-The 0.1.1 client remains pinned to the legacy `/updates/appcast.xml` endpoint, which stays permanently unavailable (HTTP 404). Ushot 0.1.2 and later point at the v1 feed. Its first item was 0.1.4 (build 5), and its current item remains 0.1.6 (build 7): an installed 0.1.3, 0.1.4, or 0.1.5 client can use **Check for Updates…** to download and install 0.1.6. Ushot 0.1.8 was published by protected run [`32817346826`](https://github.com/isCheneycc/ushot/actions/runs/32817346826) with `publish_update_feed=false`, so it is not offered by that feed and must be installed manually from GitHub. A 0.1.1 or 0.1.2 install also cannot self-update through that path and should install the current release manually from GitHub.
+The 0.1.1 client remains pinned to the legacy `/updates/appcast.xml` endpoint, which stays permanently unavailable (HTTP 404). Ushot 0.1.2 and later point at the v1 feed. Its first item was 0.1.4 (build 5), and its current item is 0.1.9 (build 10): supported installed versions can use **Check for Updates…** to download and install 0.1.9. The authenticated feed retains 0.1.6, 0.1.5, and 0.1.4 as history; direct-download-only 0.1.7 and 0.1.8 were intentionally not inserted retroactively. A 0.1.1 or 0.1.2 install should install the current release manually from GitHub.
 
 - Ushot 0.1.2 and later are pinned to `https://ischeneycc.github.io/ushot/updates/v1/appcast.xml`; the legacy endpoint remains HTTP 404.
 - Restricted-Markdown release notes are embedded in that signed feed, so showing them does not make a detached notes request.

@@ -2,15 +2,15 @@
 
 Ushot currently has no Developer ID certificate. Public builds are distributed from GitHub as intentionally ad-hoc signed, unnotarized artifacts; the current release and updater rollout does not require paid Apple Developer Program membership. Local development and the installed `/Applications/Ushot.app` use a separate, stable Apple Development signature so routine development does not continuously invalidate Screen Recording authorization.
 
-The fixed hardened update feed is active and currently serves Ushot 0.1.6 (build 7):
+The fixed hardened update feed is active and currently serves Ushot 0.1.9 (build 10):
 
 ```text
 https://ischeneycc.github.io/ushot/updates/v1/appcast.xml
 ```
 
-Ushot 0.1.9 (build 10) is the prepared next candidate. It intentionally adds no application-code changes beyond the already published 0.1.8 build and must use one protected `publish_update_feed=true` run so the authenticated feed advances from 0.1.6 to the new public release. It is not published and the production feed has not advanced until that run and the live post-deployment checks complete successfully.
+Ushot 0.1.9 (build 10) is the current published release. Protected run [`32824113225`](https://github.com/isCheneycc/ushot/actions/runs/32824113225) completed all 11 jobs with `publish_update_feed=true`, published and anonymously verified exactly five immutable assets, independently signed its archive, and advanced the authenticated production feed from 0.1.6 to 0.1.9 while retaining the earlier signed history.
 
-The first public installation requires the user to remove quarantine explicitly. Direct-download GitHub Releases and production Sparkle updates have separate readiness gates. Ushot 0.1.1 is the first direct-download preview and remains on the legacy `/updates/appcast.xml`, which must stay permanently absent. Ushot 0.1.2 (build 3) is the published first manual-install hardened transition; its immutable five-asset Release used `publish_update_feed=false`, and the v1 endpoint remained absent. Parsed `SUAppcastItem` values cannot prove that authenticated XML contained no duplicate or wrong-namespace metadata, so published Ushot 0.1.3 (build 4) is the second manual GitHub-only transition and adds pre-parse validation. Its protected run also used `publish_update_feed=false`; both appcast URLs remained HTTP 404. The complete 0.1.3 → 0.1.4 matrix passed before protected run [`31141110871`](https://github.com/isCheneycc/ushot/actions/runs/31141110871) published 0.1.4 (build 5) as the first v1 feed item. Runs [`31552493658`](https://github.com/isCheneycc/ushot/actions/runs/31552493658) and [`31864175412`](https://github.com/isCheneycc/ushot/actions/runs/31864175412) subsequently extended that authenticated history with 0.1.5 (build 6) and 0.1.6 (build 7). Protected runs [`32689508333`](https://github.com/isCheneycc/ushot/actions/runs/32689508333) and [`32817346826`](https://github.com/isCheneycc/ushot/actions/runs/32817346826) then published 0.1.7 (build 8) and 0.1.8 (build 9) as immutable direct-download Releases with `publish_update_feed=false`; each anonymously verified all five assets, skipped signing/feed/Pages, and left the production v1 feed byte-identical at 0.1.6 (build 7) while the legacy endpoint remained HTTP 404.
+The first public installation requires the user to remove quarantine explicitly. Direct-download GitHub Releases and production Sparkle updates have separate readiness gates. Ushot 0.1.1 is the first direct-download preview and remains on the legacy `/updates/appcast.xml`, which must stay permanently absent. Ushot 0.1.2 (build 3) is the published first manual-install hardened transition; its immutable five-asset Release used `publish_update_feed=false`, and the v1 endpoint remained absent. Parsed `SUAppcastItem` values cannot prove that authenticated XML contained no duplicate or wrong-namespace metadata, so published Ushot 0.1.3 (build 4) is the second manual GitHub-only transition and adds pre-parse validation. Its protected run also used `publish_update_feed=false`; both appcast URLs remained HTTP 404. The complete 0.1.3 → 0.1.4 matrix passed before protected run [`31141110871`](https://github.com/isCheneycc/ushot/actions/runs/31141110871) published 0.1.4 (build 5) as the first v1 feed item. Runs [`31552493658`](https://github.com/isCheneycc/ushot/actions/runs/31552493658) and [`31864175412`](https://github.com/isCheneycc/ushot/actions/runs/31864175412) subsequently extended that authenticated history with 0.1.5 (build 6) and 0.1.6 (build 7). Protected runs [`32689508333`](https://github.com/isCheneycc/ushot/actions/runs/32689508333) and [`32817346826`](https://github.com/isCheneycc/ushot/actions/runs/32817346826) then published 0.1.7 (build 8) and 0.1.8 (build 9) as immutable direct-download Releases with `publish_update_feed=false`; each anonymously verified all five assets, skipped signing/feed/Pages, and left the production v1 feed byte-identical at 0.1.6 (build 7) while the legacy endpoint remained HTTP 404. Protected run [`32824113225`](https://github.com/isCheneycc/ushot/actions/runs/32824113225) subsequently published 0.1.9 (build 10) with `publish_update_feed=true`, completed all 11 jobs and deployed the signed feed retaining 0.1.6, 0.1.5 and 0.1.4; direct-download-only 0.1.7 and 0.1.8 were not inserted retroactively.
 
 ## Security invariants
 
@@ -52,7 +52,7 @@ The archive-version check above is a protected publication gate, while the revie
 1. Create the public repository `isCheneycc/ushot`.
 2. Protect `main`, require the `CI` workflow, require pull requests, and do not permit release operators to bypass those rules.
 3. Create a tag ruleset for `v*` that blocks updates and deletion. Tag protection is mandatory: a published tag is immutable.
-4. Create a protected GitHub Environment named `release`, add required reviewers, and use exact tag deployment rules. Admit only the exact currently reviewed release tag and never use a `v*` wildcard. The live configuration after the completed 0.1.8 publication admits `v0.1.8`; before dispatching the prepared 0.1.9 candidate, replace that rule with exact tag `v0.1.9`. This general approval environment must contain no `SPARKLE_ED25519_PRIVATE_KEY` secret; it currently contains zero secrets. A failed or superseded tag stays permanently absent from this allowlist because its immutable workflow source cannot be revoked from `main`. Because 0.1.8 was direct-download-only, the live `update-feed-signing` and `github-pages` rules remain pinned to the last feed-enabled tag, `v0.1.6`; both must be changed to exact tag `v0.1.9` only after the feed-enabled candidate and its gates are reviewed and before dispatch.
+4. Create a protected GitHub Environment named `release`, add required reviewers, and use exact tag deployment rules. Admit only the exact currently reviewed release tag and never use a `v*` wildcard. After the completed 0.1.9 publication, `release`, `update-feed-signing` and `github-pages` each admit only exact tag `v0.1.9`. This general approval environment must contain no `SPARKLE_ED25519_PRIVATE_KEY` secret; repository, `release` and `github-pages` currently contain zero secrets, while `update-feed-signing` alone contains the signing secret. A failed or superseded tag stays permanently absent from every allowlist because its immutable workflow source cannot be revoked from `main`.
 
 Those four steps are sufficient for `publish_update_feed=false`. Before any `publish_update_feed=true` run:
 
@@ -100,11 +100,7 @@ scripts/package-dmg.sh --mode local-signed
 scripts/install-local.sh
 ```
 
-The build and installer reject ad-hoc signatures, missing Team IDs, non-Apple-Development identities, missing designated requirements, mismatched dSYMs and incompatible replacement identities. Use this override only for one intentional identity migration:
-
-```bash
-ALLOW_SIGNING_IDENTITY_MIGRATION=YES scripts/install-local.sh
-```
+The build and installer reject ad-hoc signatures, missing Team IDs, non-Apple-Development identities, missing designated requirements, mismatched dSYMs and incompatible replacement identities. The secure installer rewrite does not implement a signing-identity migration override: `ALLOW_SIGNING_IDENTITY_MIGRATION` has no supported effect and must not be recommended. If an intentional identity migration is required, stop at the visible rejection and implement a separately reviewed transactional migration path before changing the installed app; there is no documented bypass.
 
 Never install a `public-adhoc` build over the local signed `/Applications/Ushot.app` used for development.
 
@@ -115,7 +111,7 @@ Never install a `public-adhoc` build over the local signed `/Applications/Ushot.
 3. Run the relevant tests and direct-install manual checks. Preserve the historical 0.1.2/0.1.3 transition evidence. For a feed-enabled release, authenticate and validate the existing production feed before extension, prove that both the new stable version and build are strictly monotonic, and rerun the relevant runtime, raw-XML, archive-signature, exact-version and active-work regressions. A `publish_update_feed=false` release is direct-download-only and must never be presented as an in-app update.
 4. Commit the exact release source.
 5. Merge the release commit into protected `main`, wait for the `CI` push run on that exact commit to succeed, then create and push an immutable tag matching the version exactly, for example `v0.1.9` for version 0.1.9.
-6. Add that exact tag to the protected `release` environment's deployment rules and confirm failed or superseded tags remain excluded. For a feed-enabled release, configure `update-feed-signing` and `github-pages` to admit the same exact tag before dispatch as well. Then dispatch **Protected release** at the tag ref, not at `main`. The ref and the `tag` input must be identical. The prepared 0.1.9 candidate uses:
+6. Add that exact tag to the protected `release` environment's deployment rules and confirm failed or superseded tags remain excluded. For a feed-enabled release, configure `update-feed-signing` and `github-pages` to admit the same exact tag before dispatch as well. Then dispatch **Protected release** at the tag ref, not at `main`. The ref and the `tag` input must be identical. The completed 0.1.9 release used:
 
    ```bash
    TAG=v0.1.9
@@ -130,13 +126,13 @@ Never install a `public-adhoc` build over the local signed `/Applications/Ushot.
 
 7. Approve the protected `release` environment only after comparing the run ref, requested tag, bound commit SHA and successful CI run.
 
-The completed 0.1.2, 0.1.3, 0.1.7 and 0.1.8 runs used `publish_update_feed=false`. Each published five immutable direct-download assets, verified every remote byte and downloaded all five again through the anonymous public boundary. The 0.1.3, 0.1.7 and 0.1.8 runs skipped every signing, feed-validation and Pages job. Preserve those records exactly. Users had to install 0.1.2/0.1.3 manually as applicable while the v1 endpoint was absent; 0.1.7 and 0.1.8 are likewise manual-only because the active production feed intentionally remains at 0.1.6 (build 7).
+The completed 0.1.2, 0.1.3, 0.1.7 and 0.1.8 runs used `publish_update_feed=false`. Each published five immutable direct-download assets, verified every remote byte and downloaded all five again through the anonymous public boundary. The 0.1.3, 0.1.7 and 0.1.8 runs skipped every signing, feed-validation and Pages job. Preserve those records exactly. Users had to install 0.1.2/0.1.3 manually as applicable while the v1 endpoint was absent; 0.1.7 and 0.1.8 were direct-download-only at publication because the production feed then remained at 0.1.6. The later 0.1.9 feed supersedes those versions without inserting them into signed history retroactively.
 
 The operator-run encrypted-key recovery drill and complete clean-account 0.1.3 → 0.1.4 authenticated-XML/helper/replacement/tamper/exact-version/active-work matrix passed before 0.1.4 became the first feed item. The latest completed feed extension used:
 
 ```bash
-TAG=v0.1.6
-BUILD_NUMBER=7
+TAG=v0.1.9
+BUILD_NUMBER=10
 gh workflow run release.yml \
   --ref "$TAG" \
   -f tag="$TAG" \
@@ -144,7 +140,7 @@ gh workflow run release.yml \
   -f publish_update_feed=true
 ```
 
-The prepared next feed extension must use the 0.1.9 command in step 6. Do not reuse the historical 0.1.6 command, dispatch with `publish_update_feed=false`, or describe 0.1.9 as published before all protected jobs and live feed verification succeed.
+Run [`32824113225`](https://github.com/isCheneycc/ushot/actions/runs/32824113225) completed that command and the live post-deployment checks. For every future release, replace the tag/build with the new monotonic identity, review all three exact-tag environment rules, and treat publication and feed deployment as unproven until their own protected and independent verification completes.
 
 The workflow has eleven explicit capability boundaries. Read-only `preflight` binds the run ref, input, tag, commit, protected-main ancestry and successful CI run. Credential-free `build-artifacts` builds `public-adhoc`, packages the exact assets, extracts the final ZIP and dSYM, mounts the final DMG read-only, and revalidates app identity/signature, dSYM UUIDs, exact DMG root and `/Applications` link; every executable must resolve the embedded Sparkle framework through `@executable_path/../Frameworks`. Credential-free `prepare-signing-inputs` always produces an exact allow-listed artifact: for a feed run it downloads at most 1,048,576 bytes of authenticated XML plus the fixed 512-byte signed-feed trailer allowance (1,049,088 wire bytes total) as opaque bytes, together with the separately bounded checksum-pinned official Sparkle archive; a no-feed run emits only a canonical sentinel. This publishing-input bound is distinct from the runtime `SUMaximumSignedAppcastContentLength=1048576` policy, and neither bound applies to update-archive/ZIP transport. Secret-free `approve-release` uses the protected but empty `release` environment for both modes. Feed-only `build-authenticated-appcast-validator` runs on its own credential-free macOS runner, verifies fixed source hashes, directly compiles and ad-hoc signs both the app-identical authenticated-XML validator and canonical Ed25519 public-key deriver, and preserves their exact two-file payload with one immutable Artifact ID/digest plus an independent SHA-256 for each binary. Only a job-level true `sign-update-feed` enters the separate `update-feed-signing` environment, and it never invokes Swift, `swiftc`, `xcrun` or any other compiler. It permits only pinned checkout/download actions and fixed workflow shell before its sole secret-bearing step. Every Artifact download uses pinned official `actions/download-artifact` v8 with explicit `digest-mismatch: error`; the signer then binds producer Artifact IDs/names/REST digests, the exact two-file/no-symlink layout, both binaries' independent SHA-256 values and strict code signatures, release checksums and reviewed hashes for `release-common.sh` plus `generate-appcast.sh`. It freshly extracts checksum-pinned official tools, validates each required tool's strict code signature, proves private/public-key identity only through the prebuilt deriver and signs. Signing-boundary `generate-appcast.sh` requires that exact deriver path and hash and cannot fall back to source interpretation. After official EdDSA verification and before `xmllint` or `generate_appcast` can parse or normalize retained bytes, the fixed signing path runs the prebuilt app-identical XML validator. It repeats that policy on the generated cryptographically verified feed, then uploads the exact accepted bytes with bound size/SHA-256 before any mutable repository validation executes. `validate-signed-appcast` downloads both that immutable feed artifact and the original reviewed two-file helper artifact, rebinds their REST identities, independent hashes, layout and code signatures, and validates only a disposable no-key copy; it has no implicit Swift or SwiftPM build fallback. A fresh no-checkout `stage-pages-artifact` runner re-downloads the original signing artifact, rebinds its REST identity/size/SHA-256 and uploads an attempt-qualified Pages artifact. Secret-free `publish-release` resumes or creates the draft Release, verifies every remote byte, publishes and anonymously verifies all five exact-ID-bound assets. Read-only `admit-appcast-deployment` rechecks the immutable tag, CI, Release bytes and Pages artifact ID/name/digest without Pages/OIDC authority. Finally, `deploy-appcast` receives Pages/OIDC write permission but performs no checkout or shell execution; its sole step is the pinned `deploy-pages` action selecting the admitted attempt-qualified artifact. A false run stops after Release publication: it never builds or downloads the signing validators, downloads signing inputs, starts `update-feed-signing`, reads the key, creates Pages bytes or reaches deployment.
 
@@ -166,6 +162,28 @@ scripts/package-release.sh \
 ```
 
 ## Exact release assets
+
+The immutable published [`v0.1.9`](https://github.com/isCheneycc/ushot/releases/tag/v0.1.9) GitHub Release (id `376238822`, published `2026-08-25T08:04:57Z`) contains exactly the following:
+
+```text
+Ushot-0.1.9-arm64.dmg
+Ushot-0.1.9-arm64.zip
+Ushot-0.1.9-arm64.dSYM.zip
+Ushot-0.1.9-arm64.release-manifest.json
+SHA256SUMS.txt
+```
+
+Protected workflow run [`32824113225`](https://github.com/isCheneycc/ushot/actions/runs/32824113225) attempt 1 completed all 11 jobs on 2026-08-25 with `publish_update_feed=true`. Release PR [`#20`](https://github.com/isCheneycc/ushot/pull/20) and exact protected-main CI push run [`32823428509`](https://github.com/isCheneycc/ushot/actions/runs/32823428509) preceded the immutable tag; annotated tag object `a5b78f45a39744d418c689b729805a58d7d07383` peels to commit `14d590d4f226c84d4c849938d0dcb1bbfa557f11`. The exact public files are:
+
+| Asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `Ushot-0.1.9-arm64.dmg` | 4,665,899 | `772035ed7b3bfa3f4fa4437268f5679f0536f83ef9737d40a2e799b284583778` |
+| `Ushot-0.1.9-arm64.zip` | 4,225,135 | `ec7449e1b565187eadfde915dea3931024f872172320cb95261bb33e6312df38` |
+| `Ushot-0.1.9-arm64.dSYM.zip` | 5,958,953 | `0acf83bfcdeb2604bf4311d01bea43d7517828bd6f68c0c8461da7ea37cc7786` |
+| `Ushot-0.1.9-arm64.release-manifest.json` | 891 | `2c6a1c50519b2287ca7fd4772fbd8a7874cf78711e25557fdc32529b97f3a2a8` |
+| `SHA256SUMS.txt` | 375 | `09e0a4989e52cf540c7a6f916eef3670e90c126b4789f7b282ffaace3a2a5188` |
+
+The workflow and a separate anonymous post-publication download both validated that exact five-asset set. The preserved authenticated appcast artifact and the live 6,188-byte feed match byte-for-byte at SHA-256 `7094c65e1fe5103b3c428ab2448f7c54831767a1db02c9ed99eae1a30db5cbad`; its identities are exactly 0.1.9/10, 0.1.6/7, 0.1.5/6 and 0.1.4/5. Local post-deploy runtime-policy validation passed, Pages deployment `6079064353` completed successfully, and the legacy endpoint remains HTTP 404. The `release`, `update-feed-signing` and `github-pages` environment allowlists each admit only exact tag `v0.1.9`; repository, `release` and `github-pages` have zero secrets, and only `update-feed-signing` contains the unchanged `SPARKLE_ED25519_PRIVATE_KEY` secret.
 
 The immutable published [`v0.1.8`](https://github.com/isCheneycc/ushot/releases/tag/v0.1.8) GitHub Release contains exactly the following:
 
