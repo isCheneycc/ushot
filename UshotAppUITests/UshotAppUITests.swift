@@ -844,42 +844,88 @@ final class UshotAppUITests: XCTestCase {
     }
 
     @MainActor
-    func testPinnedScreenshotPersistsAcrossDeactivationReplacesPreviousAndClosesWithEscape() {
-        let app = launch(arguments: ["--uitest-reset-settings", "--uitest-pinned-lifecycle"])
+    func testPinnedScreenshotsPersistAcrossDeactivationAndCloseIndependently() {
+        let app = launch(arguments: [
+            "--uitest-reset-settings",
+            "--uitest-multiple-pinned-lifecycle"
+        ])
         defer { app.terminate() }
 
         let pinnedImages = app.dialogs.matching(identifier: "pinned.image")
         let imagePanel = pinnedImages.firstMatch
         XCTAssertTrue(imagePanel.waitForExistence(timeout: 5))
-        XCTAssertEqual(pinnedImages.count, 1, "A replacement capture must close the previous screenshot.")
+        waitForCount(
+            of: pinnedImages,
+            toEqual: 2,
+            message: "A new capture must preserve the previous pinned screenshot."
+        )
 
         let toolbars = app.descendants(matching: .any).matching(identifier: "pinned.toolbar.window")
         let toolbar = toolbars.firstMatch
         XCTAssertTrue(toolbar.waitForExistence(timeout: 3))
-        XCTAssertEqual(toolbars.count, 1, "A replacement capture must close the previous toolbar.")
+        waitForCount(
+            of: toolbars,
+            toEqual: 2,
+            message: "Each pinned screenshot must retain its own toolbar."
+        )
 
-        let canvas = app.groups["pinned.canvas"]
-        XCTAssertTrue(canvas.waitForExistence(timeout: 3))
-        XCTAssertEqual(canvas.frame.width, 260, accuracy: 2)
-        XCTAssertEqual(canvas.frame.height, 160, accuracy: 2)
+        let canvases = app.groups.matching(identifier: "pinned.canvas")
+        waitForCount(
+            of: canvases,
+            toEqual: 2,
+            message: "Each pinned screenshot must retain an independent canvas."
+        )
+        let canvasWidths = (0..<canvases.count).map {
+            canvases.element(boundBy: $0).frame.width
+        }
+        XCTAssertTrue(canvasWidths.contains { abs($0 - 340) <= 2 })
+        XCTAssertTrue(canvasWidths.contains { abs($0 - 260) <= 2 })
+        XCTAssertNotEqual(
+            pinnedImages.element(boundBy: 0).frame.origin,
+            pinnedImages.element(boundBy: 1).frame.origin,
+            "Consecutive pinned screenshots must not be hidden at the exact same origin."
+        )
 
         let finder = XCUIApplication(bundleIdentifier: "com.apple.finder")
         finder.activate()
         XCTAssertTrue(
             imagePanel.waitForExistence(timeout: 3),
-            "The current screenshot must remain visible when Ushot deactivates."
+            "Pinned screenshots must remain visible when Ushot deactivates."
         )
         XCTAssertTrue(
             toolbar.waitForExistence(timeout: 3),
-            "The current toolbar must remain visible when Ushot deactivates."
+            "Pinned toolbars must remain visible when Ushot deactivates."
         )
-        XCTAssertEqual(pinnedImages.count, 1)
-        XCTAssertEqual(toolbars.count, 1)
+        XCTAssertEqual(pinnedImages.count, 2)
+        XCTAssertEqual(toolbars.count, 2)
 
         app.activate()
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertTrue(imagePanel.waitForNonExistence(timeout: 3))
-        XCTAssertTrue(toolbar.waitForNonExistence(timeout: 3))
+        waitForCount(
+            of: pinnedImages,
+            toEqual: 1,
+            message: "Escape must close only the active pinned screenshot."
+        )
+        waitForCount(
+            of: toolbars,
+            toEqual: 1,
+            message: "Closing one pinned screenshot must leave the other toolbar intact."
+        )
+
+        let remainingImage = pinnedImages.firstMatch
+        XCTAssertTrue(remainingImage.exists)
+        remainingImage.click()
+        app.typeKey(.escape, modifierFlags: [])
+        waitForCount(
+            of: pinnedImages,
+            toEqual: 0,
+            message: "The remaining pinned screenshot must close independently."
+        )
+        waitForCount(
+            of: toolbars,
+            toEqual: 0,
+            message: "The remaining pinned toolbar must close with its screenshot."
+        )
     }
 
     @MainActor
@@ -1872,6 +1918,24 @@ final class UshotAppUITests: XCTestCase {
             result,
             .completed,
             "Expected accessibility value to contain '\(expected)'; actual value: \(actualValue)"
+        )
+    }
+
+    @MainActor
+    private func waitForCount(
+        of query: XCUIElementQuery,
+        toEqual expectedCount: Int,
+        timeout: TimeInterval = 3,
+        message: String
+    ) {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in query.count == expectedCount },
+            object: nil
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [expectation], timeout: timeout),
+            .completed,
+            message
         )
     }
 
