@@ -87,7 +87,7 @@ For a first installation, download [Ushot-0.1.9-arm64.dmg](https://github.com/is
 2. Remove only the downloaded-file quarantine attribute, then open Ushot:
 
    ```bash
-   xattr -dr com.apple.quarantine "/Applications/Ushot.app"
+   xattr -d com.apple.quarantine "/Applications/Ushot.app"
    open "/Applications/Ushot.app"
    ```
 
@@ -127,7 +127,7 @@ swift build --configuration debug
 scripts/test-clt.sh
 ```
 
-If an installed `Ushot.app` is already running, quit it before UI tests or give the test build an isolated identity with `APP_BUNDLE_IDENTIFIER=io.github.ischeneycc.ushot.uitests`.
+Debug hosts automatically use the isolated bundle identifier `io.github.ischeneycc.ushot.debug`; the UI-test runner uses its own `.uitests` identity. Neither may reuse the production Screen Recording, preferences, login-item or Application Support identity.
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md) and complete the relevant checks in [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md).
 

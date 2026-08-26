@@ -11,6 +11,49 @@ VERSION=""
 BUILD_NUMBER=""
 CONFIGURATION="Release"
 BUILD_ROOT="${BUILD_ROOT:-$PROJECT_ROOT/build/release}"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+launch_services_contains_exact_path() {
+  local app_path="$1"
+  local launch_services_dump
+
+  if ! launch_services_dump="$("$LSREGISTER" -dump)"; then
+    release_die "Could not inspect LaunchServices before cleaning disposable build products."
+  fi
+  printf '%s\n' "$launch_services_dump" \
+    | awk -v expected="$app_path" '
+        /^[[:space:]]*path:[[:space:]]+/ {
+          candidate = $0
+          sub(/^[[:space:]]*path:[[:space:]]+/, "", candidate)
+          sub(/[[:space:]]+\(0x[[:xdigit:]]+\)[[:space:]]*$/, "", candidate)
+          if (candidate == expected) {
+            found = 1
+          }
+        }
+        END { exit found ? 0 : 1 }
+      '
+}
+
+unregister_disposable_build_product() {
+  local app_path="$1"
+
+  [[ -d "$app_path" && ! -L "$app_path" ]] \
+    || release_die "Disposable build product must be a real application directory: $app_path"
+  case "$app_path" in
+    "$MODE_ROOT"/*) ;;
+    *) release_die "Refusing to unregister a build product outside the selected mode root: $app_path" ;;
+  esac
+  if ! launch_services_contains_exact_path "$app_path"; then
+    release_log "Disposable build product was not registered with LaunchServices; no cleanup needed: $app_path"
+    return 0
+  fi
+  "$LSREGISTER" -u "$app_path" \
+    || release_die "Could not unregister disposable build product from LaunchServices: $app_path"
+  if launch_services_contains_exact_path "$app_path"; then
+    release_die "Disposable build product remained registered with LaunchServices after cleanup: $app_path"
+  fi
+  release_log "Removed disposable build product from LaunchServices attribution: $app_path"
+}
 
 usage() {
   printf '%s\n' \
@@ -67,6 +110,7 @@ release_require_command codesign
 release_require_command dwarfdump
 release_require_command file
 release_require_command xcrun
+release_require_command "$LSREGISTER"
 
 if ! xcodebuild -version >/dev/null 2>&1; then
   release_die "A full Xcode installation is required. Select it with: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
@@ -159,5 +203,7 @@ ditto --rsrc --extattr "$BUILT_DSYM" "$OUTPUT_DSYM"
 release_validate_app_identity "$OUTPUT_APP" "$VERSION" "$BUILD_NUMBER"
 release_verify_signature_mode "$OUTPUT_APP" "$MODE"
 release_verify_dsym "$OUTPUT_APP" "$OUTPUT_DSYM"
+unregister_disposable_build_product "$BUILT_APP"
+unregister_disposable_build_product "$OUTPUT_APP"
 release_log "Build complete: mode=$MODE version=$VERSION build=$BUILD_NUMBER"
 printf '%s\n' "$OUTPUT_APP"

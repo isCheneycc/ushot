@@ -87,7 +87,7 @@ Ushot 0.1.9（build 10）是当前已发布版本。受保护运行 [`3282411322
 2. 只移除下载文件的隔离属性，然后打开 Ushot：
 
    ```bash
-   xattr -dr com.apple.quarantine "/Applications/Ushot.app"
+   xattr -d com.apple.quarantine "/Applications/Ushot.app"
    open "/Applications/Ushot.app"
    ```
 
@@ -127,7 +127,7 @@ swift build --configuration debug
 scripts/test-clt.sh
 ```
 
-如果已经有一个安装好的 `Ushot.app` 正在运行，请在 UI 测试前退出它，或使用 `APP_BUNDLE_IDENTIFIER=io.github.ischeneycc.ushot.uitests` 为测试构建提供隔离身份。
+Debug 宿主会自动使用隔离的 Bundle ID `io.github.ischeneycc.ushot.debug`，UI 测试 Runner 则使用独立的 `.uitests` 身份；二者都不得复用正式版的屏幕录制授权、偏好设置、登录项或 Application Support 数据。
 
 请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，并完成 [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md) 中与改动相关的检查。
 

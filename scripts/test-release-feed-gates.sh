@@ -394,11 +394,15 @@ PREFLIGHT_ROOT="$TEST_ROOT/preflight-repository"
 mkdir -p \
   "$PREFLIGHT_ROOT/Config" \
   "$PREFLIGHT_ROOT/scripts" \
+  "$PREFLIGHT_ROOT/UshotApp" \
   "$PREFLIGHT_ROOT/UshotCore/Sources/UshotCore/Product" \
   "$PREFLIGHT_ROOT/updates/release-notes" \
   "$PREFLIGHT_ROOT/updates/v1"
 cp "$SCRIPT_DIR/release-common.sh" "$PREFLIGHT_ROOT/scripts/release-common.sh"
 cp "$SCRIPT_DIR/release-preflight.sh" "$PREFLIGHT_ROOT/scripts/release-preflight.sh"
+cp "$PROJECT_ROOT/Config/Debug.xcconfig" "$PREFLIGHT_ROOT/Config/Debug.xcconfig"
+cp "$PROJECT_ROOT/Config/Release.xcconfig" "$PREFLIGHT_ROOT/Config/Release.xcconfig"
+cp "$PROJECT_ROOT/UshotApp/Info.plist" "$PREFLIGHT_ROOT/UshotApp/Info.plist"
 cp "$DERIVE_KEY_SCRIPT" "$PREFLIGHT_ROOT/scripts/derive-sparkle-public-key.swift"
 cp \
   "$PROJECT_ROOT/UshotCore/Sources/UshotCore/Product/ProductIdentity.swift" \
@@ -415,6 +419,7 @@ write_preflight_config() {
   cat > "$PREFLIGHT_ROOT/Config/Base.xcconfig" <<EOF
 PRODUCT_NAME = Ushot
 APP_BUNDLE_IDENTIFIER = io.github.ischeneycc.ushot
+REGISTER_WITH_LAUNCH_SERVICES = NO
 SPARKLE_KEY_ACCOUNT = io.github.ischeneycc.ushot.20260806
 SPARKLE_PUBLIC_ED_KEY = $USHOT_SPARKLE_PUBLIC_ED_KEY
 LD_RUNPATH_SEARCH_PATHS = \$(inherited) @executable_path/../Frameworks
@@ -441,6 +446,300 @@ run_versioned_preflight() {
 }
 
 expect_success "release preflight validates the versioned seed path" run_versioned_preflight
+
+cp "$PREFLIGHT_ROOT/Config/Debug.xcconfig" "$PREFLIGHT_ROOT/Config/Debug.xcconfig.valid"
+/usr/bin/sed -i '' \
+  "s/$USHOT_DEBUG_BUNDLE_IDENTIFIER/$USHOT_BUNDLE_IDENTIFIER/" \
+  "$PREFLIGHT_ROOT/Config/Debug.xcconfig"
+expect_failure_containing \
+  "source gate rejects a Debug build that reuses the production identity" \
+  "Debug APP_BUNDLE_IDENTIFIER must be isolated" \
+  release_validate_source_settings \
+  "$PREFLIGHT_ROOT" \
+  "0.1.3" \
+  "4"
+mv "$PREFLIGHT_ROOT/Config/Debug.xcconfig.valid" "$PREFLIGHT_ROOT/Config/Debug.xcconfig"
+
+INSTALL_REGISTRATION_ROOT="$TEST_ROOT/local-install-registration"
+mkdir -p "$INSTALL_REGISTRATION_ROOT/Ushot.app/Contents/MacOS"
+printf '#!/bin/bash\nexit 0\n' > "$INSTALL_REGISTRATION_ROOT/Ushot.app/Contents/MacOS/Ushot"
+chmod +x "$INSTALL_REGISTRATION_ROOT/Ushot.app/Contents/MacOS/Ushot"
+
+registration_precedes_launch() (
+  local order_log="$INSTALL_REGISTRATION_ROOT/success-order.log"
+  DESTINATION_APP="$INSTALL_REGISTRATION_ROOT/Ushot.app"
+  DESTINATION_EXECUTABLE="$DESTINATION_APP/Contents/MacOS/Ushot"
+  LEGACY_DESTINATION_APP="$INSTALL_REGISTRATION_ROOT/UshotApp.app"
+  invoke_launch_services_registration() {
+    printf '%s\n' register >> "$order_log"
+  }
+  launch_services_contains_exact_path() {
+    return 0
+  }
+  launch_exact_app() {
+    printf '%s\n' launch >> "$order_log"
+  }
+  register_and_launch_installed_app \
+    "$DESTINATION_APP" \
+    "$DESTINATION_EXECUTABLE" \
+    "$(release_file_id "$DESTINATION_APP")" \
+    "$(release_inode "$DESTINATION_EXECUTABLE")" \
+    "test Ushot"
+  [[ "$(<"$order_log")" == $'register\nlaunch' ]]
+)
+
+registration_failure_blocks_launch() (
+  local order_log="$INSTALL_REGISTRATION_ROOT/failure-order.log"
+  DESTINATION_APP="$INSTALL_REGISTRATION_ROOT/Ushot.app"
+  DESTINATION_EXECUTABLE="$DESTINATION_APP/Contents/MacOS/Ushot"
+  LEGACY_DESTINATION_APP="$INSTALL_REGISTRATION_ROOT/UshotApp.app"
+  invoke_launch_services_registration() {
+    printf '%s\n' register >> "$order_log"
+    return 1
+  }
+  launch_exact_app() {
+    printf '%s\n' launch >> "$order_log"
+  }
+  if register_and_launch_installed_app \
+      "$DESTINATION_APP" \
+      "$DESTINATION_EXECUTABLE" \
+      "$(release_file_id "$DESTINATION_APP")" \
+      "$(release_inode "$DESTINATION_EXECUTABLE")" \
+      "test Ushot"; then
+    return 1
+  fi
+  [[ "$(<"$order_log")" == "register" ]]
+)
+
+registration_rejects_changed_identity() (
+  local invocation_log="$INSTALL_REGISTRATION_ROOT/changed-identity.log"
+  DESTINATION_APP="$INSTALL_REGISTRATION_ROOT/Ushot.app"
+  DESTINATION_EXECUTABLE="$DESTINATION_APP/Contents/MacOS/Ushot"
+  LEGACY_DESTINATION_APP="$INSTALL_REGISTRATION_ROOT/UshotApp.app"
+  invoke_launch_services_registration() {
+    printf '%s\n' invoked >> "$invocation_log"
+  }
+  if register_exact_installed_app \
+      "$DESTINATION_APP" \
+      "$DESTINATION_EXECUTABLE" \
+      "$(release_file_id "$DESTINATION_APP")" \
+      "999999999" \
+      "test Ushot"; then
+    return 1
+  fi
+  [[ ! -e "$invocation_log" ]]
+)
+
+registration_requires_retained_exact_path() (
+  DESTINATION_APP="$INSTALL_REGISTRATION_ROOT/Ushot.app"
+  DESTINATION_EXECUTABLE="$DESTINATION_APP/Contents/MacOS/Ushot"
+  LEGACY_DESTINATION_APP="$INSTALL_REGISTRATION_ROOT/UshotApp.app"
+  invoke_launch_services_registration() {
+    return 0
+  }
+  launch_services_contains_exact_path() {
+    return 1
+  }
+  if register_exact_installed_app \
+      "$DESTINATION_APP" \
+      "$DESTINATION_EXECUTABLE" \
+      "$(release_file_id "$DESTINATION_APP")" \
+      "$(release_inode "$DESTINATION_EXECUTABLE")" \
+      "test Ushot"; then
+    return 1
+  fi
+)
+
+rollback_restart_requires_verified_registration() (
+  local launch_log="$INSTALL_REGISTRATION_ROOT/unverified-restart.log"
+
+  launch_exact_app() {
+    printf '%s\n' launch >> "$launch_log"
+  }
+  if restart_previous_app_if_needed \
+      "YES" \
+      "$INSTALL_REGISTRATION_ROOT/Ushot.app" \
+      "$INSTALL_REGISTRATION_ROOT/Ushot.app/Contents/MacOS/Ushot" \
+      "test Ushot" \
+      "12345" \
+      "NO"; then
+    return 1
+  fi
+  [[ ! -e "$launch_log" ]]
+)
+
+rollback_registration_failure_blocks_restored_restart() (
+  local rollback_root="$INSTALL_REGISTRATION_ROOT/rollback-registration-failure"
+  local registration_log="$rollback_root/registration.log"
+  local launch_log="$rollback_root/launch.log"
+
+  mkdir -p \
+    "$rollback_root/backup/Ushot.app.backup/Contents/MacOS"
+  printf '#!/bin/bash\nexit 0\n' \
+    > "$rollback_root/backup/Ushot.app.backup/Contents/MacOS/Ushot"
+  chmod +x "$rollback_root/backup/Ushot.app.backup/Contents/MacOS/Ushot"
+
+  DESTINATION_APP="$rollback_root/Ushot.app"
+  DESTINATION_EXECUTABLE="$DESTINATION_APP/Contents/MacOS/Ushot"
+  LEGACY_DESTINATION_APP="$rollback_root/UshotApp.app"
+  LEGACY_DESTINATION_EXECUTABLE="$LEGACY_DESTINATION_APP/Contents/MacOS/UshotApp"
+  BACKUP_ROOT="$rollback_root/backup"
+  BACKUP_ROOT_FILE_ID="$(release_file_id "$BACKUP_ROOT")"
+  CURRENT_BACKUP_APP="$BACKUP_ROOT/Ushot.app.backup"
+  LEGACY_BACKUP_APP="$BACKUP_ROOT/UshotApp.app.backup"
+  FAILED_NEW_BACKUP_APP=""
+  STAGING_ROOT=""
+  STAGED_APP=""
+  STAGED_FILE_ID=""
+  STAGED_EXECUTABLE_INODE=""
+  SOURCE_VERSION="0.1.10"
+  SOURCE_BUILD="11"
+  SOURCE_TEAM="TESTTEAM01"
+  SOURCE_REQUIREMENT="replacement requirement"
+  SOURCE_BINARY_SHA="replacement sha"
+  CURRENT_ORIGINAL_FILE_ID="$(release_file_id "$CURRENT_BACKUP_APP")"
+  CURRENT_ORIGINAL_EXECUTABLE_INODE="$(release_inode "$CURRENT_BACKUP_APP/Contents/MacOS/Ushot")"
+  CURRENT_ORIGINAL_REQUIREMENT="previous requirement"
+  LEGACY_ORIGINAL_FILE_ID=""
+  LEGACY_ORIGINAL_EXECUTABLE_INODE=""
+  LEGACY_ORIGINAL_REQUIREMENT=""
+  CURRENT_WAS_RUNNING="YES"
+  LEGACY_WAS_RUNNING="NO"
+  PROCESS_SHUTDOWN_BEGAN="YES"
+  CURRENT_MOVE_BEGAN="YES"
+  LEGACY_MOVE_BEGAN="NO"
+  NEW_MOVE_BEGAN="NO"
+  CURRENT_MOVED="YES"
+  LEGACY_MOVED="NO"
+  NEW_INSTALLED="NO"
+  INSTALL_LOCK_HELD="NO"
+
+  validate_current_recovery_app() {
+    return 0
+  }
+  register_exact_installed_app() {
+    printf '%s\n' register >> "$registration_log"
+    return 1
+  }
+  launch_exact_app() {
+    printf '%s\n' launch >> "$launch_log"
+  }
+
+  if rollback_install; then
+    return 1
+  fi
+  [[ -d "$DESTINATION_APP" \
+      && "$(<"$registration_log")" == "register" \
+      && ! -e "$launch_log" ]]
+)
+
+rollback_unregisters_failed_first_install() (
+  local rollback_root="$INSTALL_REGISTRATION_ROOT/rollback-first-install"
+  local registration_log="$rollback_root/registration-order.log"
+  local registered_state="YES"
+
+  mkdir -p "$rollback_root/Ushot.app/Contents/MacOS" "$rollback_root/backup"
+  printf '#!/bin/bash\nexit 0\n' > "$rollback_root/Ushot.app/Contents/MacOS/Ushot"
+  chmod +x "$rollback_root/Ushot.app/Contents/MacOS/Ushot"
+
+  DESTINATION_APP="$rollback_root/Ushot.app"
+  DESTINATION_EXECUTABLE="$DESTINATION_APP/Contents/MacOS/Ushot"
+  LEGACY_DESTINATION_APP="$rollback_root/UshotApp.app"
+  LEGACY_DESTINATION_EXECUTABLE="$LEGACY_DESTINATION_APP/Contents/MacOS/UshotApp"
+  BACKUP_ROOT="$rollback_root/backup"
+  BACKUP_ROOT_FILE_ID="$(release_file_id "$BACKUP_ROOT")"
+  CURRENT_BACKUP_APP="$BACKUP_ROOT/Ushot.app"
+  LEGACY_BACKUP_APP="$BACKUP_ROOT/UshotApp.app"
+  FAILED_NEW_BACKUP_APP=""
+  STAGING_ROOT=""
+  STAGED_APP=""
+  STAGED_FILE_ID="$(release_file_id "$DESTINATION_APP")"
+  STAGED_EXECUTABLE_INODE="$(release_inode "$DESTINATION_EXECUTABLE")"
+  SOURCE_VERSION="0.1.9"
+  SOURCE_BUILD="10"
+  SOURCE_TEAM="TESTTEAM01"
+  SOURCE_REQUIREMENT="test requirement"
+  SOURCE_BINARY_SHA="test sha"
+  CURRENT_ORIGINAL_FILE_ID=""
+  CURRENT_ORIGINAL_EXECUTABLE_INODE=""
+  CURRENT_ORIGINAL_REQUIREMENT=""
+  LEGACY_ORIGINAL_FILE_ID=""
+  LEGACY_ORIGINAL_EXECUTABLE_INODE=""
+  LEGACY_ORIGINAL_REQUIREMENT=""
+  CURRENT_MOVE_BEGAN="NO"
+  LEGACY_MOVE_BEGAN="NO"
+  NEW_MOVE_BEGAN="NO"
+  CURRENT_MOVED="NO"
+  LEGACY_MOVED="NO"
+  NEW_INSTALLED="YES"
+  PROCESS_SHUTDOWN_BEGAN="NO"
+  INSTALL_LOCK_HELD="NO"
+
+  validate_replacement_recovery_app() {
+    return 0
+  }
+  stop_exact_executable() {
+    return 0
+  }
+  launch_services_contains_exact_path() {
+    [[ "$registered_state" == "YES" ]]
+  }
+  invoke_launch_services_unregistration() {
+    [[ "$1" == "$DESTINATION_APP" && -d "$DESTINATION_APP" ]] || return 1
+    printf '%s\n' unregister >> "$registration_log"
+    registered_state="NO"
+  }
+
+  rollback_install
+  [[ "$registered_state" == "NO" \
+      && "$(<"$registration_log")" == "unregister" \
+      && ! -e "$DESTINATION_APP" \
+      && -d "$BACKUP_ROOT/Ushot-failed-install.app.backup" ]]
+)
+
+expect_success \
+  "local installer registers the exact final app before launch" \
+  registration_precedes_launch
+expect_success \
+  "local installer blocks launch when LaunchServices registration fails" \
+  registration_failure_blocks_launch
+expect_success \
+  "local installer refuses registration after executable identity changes" \
+  registration_rejects_changed_identity
+expect_success \
+  "local installer verifies that LaunchServices retained the exact registered path" \
+  registration_requires_retained_exact_path
+expect_success \
+  "rollback restart requires verified exact LaunchServices registration" \
+  rollback_restart_requires_verified_registration
+expect_success \
+  "rollback registration failure blocks restart of the restored app" \
+  rollback_registration_failure_blocks_restored_restart
+expect_success \
+  "first-install rollback unregisters a failed replacement before moving it" \
+  rollback_unregisters_failed_first_install
+grep -F \
+  '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister' \
+  "$SCRIPT_DIR/install-local.sh" >/dev/null \
+  || fail "local installer must call the fixed system LaunchServices registrar"
+pass "local installer pins the system LaunchServices registrar path"
+grep -F 'CURRENT_BACKUP_APP="$BACKUP_ROOT/$USHOT_APP_BUNDLE.backup"' \
+  "$SCRIPT_DIR/install-local.sh" >/dev/null \
+  || fail "local installer must preserve recoverable app bundles outside LaunchServices-discoverable .app paths"
+[[ "$(grep -Fc 'unregister_exact_installed_app \' "$SCRIPT_DIR/install-local.sh")" == "3" ]] \
+  || fail "local installer must unregister current, legacy and failed replacement backup paths"
+pass "local installer keeps recoverable backups out of LaunchServices attribution"
+[[ "$(grep -Fc 'unregister_disposable_build_product "$BUILT_APP"' "$SCRIPT_DIR/build-release.sh")" == "1" \
+    && "$(grep -Fc 'unregister_disposable_build_product "$OUTPUT_APP"' "$SCRIPT_DIR/build-release.sh")" == "1" ]] \
+  || fail "release build must unregister both disposable production-identity app paths"
+pass "release build unregisters disposable production-identity app paths"
+grep -F 'if ! launch_services_contains_exact_path "$app_path"; then' \
+  "$SCRIPT_DIR/build-release.sh" >/dev/null \
+  || fail "release build must distinguish an unregistered disposable app from an unregister failure"
+grep -F 'if launch_services_contains_exact_path "$app_path"; then' \
+  "$SCRIPT_DIR/build-release.sh" >/dev/null \
+  || fail "release build must verify that a disposable app is absent after unregistering it"
+pass "release build verifies disposable LaunchServices cleanup without treating absence as failure"
 
 /usr/bin/sed -i '' \
   "s#$USHOT_SPARKLE_PUBLIC_ED_KEY#$USHOT_PRE_ROTATION_SPARKLE_PUBLIC_ED_KEY#" \
@@ -552,12 +851,17 @@ chmod +x \
   "$TEST_APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
 printf 'notices' > "$TEST_APP/Contents/Resources/ThirdPartyNotices.txt"
 printf 'license' > "$TEST_APP/Contents/Resources/LICENSE"
+printf 'icon' > "$TEST_APP/Contents/Resources/AppIcon.icns"
+printf 'assets' > "$TEST_APP/Contents/Resources/Assets.car"
 cat > "$TEST_APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleIdentifier</key><string>$USHOT_BUNDLE_IDENTIFIER</string>
+  <key>CFBundleDisplayName</key><string>$USHOT_PRODUCT_NAME</string>
   <key>CFBundleName</key><string>$USHOT_PRODUCT_NAME</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleExecutable</key><string>$USHOT_EXECUTABLE_NAME</string>
   <key>CFBundleShortVersionString</key><string>0.1.3</string>
   <key>CFBundleVersion</key><string>4</string>
@@ -593,6 +897,86 @@ validate_hardened_app() {
 }
 
 expect_success "built-app gate accepts host requirements and all framework markers" validate_hardened_app
+DISPLAY_IDENTITY_BOUNDARY_APP="$TEST_ROOT/display-identity-boundary/Ushot.app"
+mkdir -p "$(dirname "$DISPLAY_IDENTITY_BOUNDARY_APP")"
+cp -R "$TEST_APP" "$DISPLAY_IDENTITY_BOUNDARY_APP"
+/usr/libexec/PlistBuddy -c 'Delete :CFBundleDisplayName' \
+  "$DISPLAY_IDENTITY_BOUNDARY_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' \
+  "$DISPLAY_IDENTITY_BOUNDARY_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Delete :CFBundleIconFile' \
+  "$DISPLAY_IDENTITY_BOUNDARY_APP/Contents/Info.plist"
+rm "$DISPLAY_IDENTITY_BOUNDARY_APP/Contents/Resources/AppIcon.icns"
+rm "$DISPLAY_IDENTITY_BOUNDARY_APP/Contents/Resources/Assets.car"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 0.1.9' \
+  "$DISPLAY_IDENTITY_BOUNDARY_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 10' \
+  "$DISPLAY_IDENTITY_BOUNDARY_APP/Contents/Info.plist"
+validate_legacy_display_identity_boundary() {
+  PATH="$APP_MOCK_BIN:$PATH" release_validate_app_identity \
+    "$DISPLAY_IDENTITY_BOUNDARY_APP" \
+    "0.1.9" \
+    "10"
+}
+expect_success \
+  "built-app gate preserves 0.1.9 compatibility without newer display metadata" \
+  validate_legacy_display_identity_boundary
+/usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 0.1.10' \
+  "$DISPLAY_IDENTITY_BOUNDARY_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 11' \
+  "$DISPLAY_IDENTITY_BOUNDARY_APP/Contents/Info.plist"
+validate_current_display_identity_boundary() {
+  PATH="$APP_MOCK_BIN:$PATH" release_validate_app_identity \
+    "$DISPLAY_IDENTITY_BOUNDARY_APP" \
+    "0.1.10" \
+    "11"
+}
+expect_failure_containing \
+  "built-app gate requires display metadata beginning with 0.1.10" \
+  "Missing CFBundleDisplayName" \
+  validate_current_display_identity_boundary
+RECOVERY_NAME_TEST_APP="$TEST_ROOT/Ushot.app.backup"
+cp -R "$TEST_APP" "$RECOVERY_NAME_TEST_APP"
+validate_explicit_recovery_bundle_name() {
+  PATH="$APP_MOCK_BIN:$PATH" release_validate_app_identity \
+    "$RECOVERY_NAME_TEST_APP" \
+    "0.1.3" \
+    "4" \
+    "Ushot.app.backup"
+}
+validate_ordinary_recovery_bundle_name() {
+  PATH="$APP_MOCK_BIN:$PATH" release_validate_app_identity \
+    "$RECOVERY_NAME_TEST_APP" \
+    "0.1.3" \
+    "4"
+}
+expect_success \
+  "built-app gate accepts the explicit installer recovery suffix" \
+  validate_explicit_recovery_bundle_name
+expect_failure_containing \
+  "ordinary built-app validation still rejects the installer recovery suffix" \
+  "Release product must be named Ushot.app" \
+  validate_ordinary_recovery_bundle_name
+/usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Ushot.app' "$TEST_APP/Contents/Info.plist"
+expect_failure_containing \
+  "built-app gate rejects a fallback-style display name" \
+  "unexpected display name" \
+  validate_hardened_app
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $USHOT_PRODUCT_NAME" "$TEST_APP/Contents/Info.plist"
+rm "$TEST_APP/Contents/Resources/AppIcon.icns"
+ln -s missing.icns "$TEST_APP/Contents/Resources/AppIcon.icns"
+expect_failure_containing \
+  "built-app gate rejects a symbolic or missing application icon" \
+  "nonempty regular AppIcon.icns" \
+  validate_hardened_app
+rm "$TEST_APP/Contents/Resources/AppIcon.icns"
+printf 'icon' > "$TEST_APP/Contents/Resources/AppIcon.icns"
+: > "$TEST_APP/Contents/Resources/Assets.car"
+expect_failure_containing \
+  "built-app gate rejects an empty compiled asset catalog" \
+  "nonempty regular Assets.car" \
+  validate_hardened_app
+printf 'assets' > "$TEST_APP/Contents/Resources/Assets.car"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 0.1.7' "$TEST_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 8' "$TEST_APP/Contents/Info.plist"
 validate_weak_linked_capture_app() {
@@ -799,6 +1183,11 @@ cp -R "$BASELINE_TEST_APP" "$TRANSITION_TEST_APP"
   "$TRANSITION_TEST_APP/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist"
 /usr/libexec/PlistBuddy -c 'Add :SUUpdateVersionIdentityHardeningVersion integer 1' \
   "$TRANSITION_TEST_APP/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist"
+/usr/libexec/PlistBuddy -c 'Delete :CFBundleDisplayName' "$TRANSITION_TEST_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$TRANSITION_TEST_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Delete :CFBundleIconFile' "$TRANSITION_TEST_APP/Contents/Info.plist"
+rm "$TRANSITION_TEST_APP/Contents/Resources/AppIcon.icns"
+rm "$TRANSITION_TEST_APP/Contents/Resources/Assets.car"
 
 validate_historical_update_transition() {
   PATH="$APP_MOCK_BIN:$PATH" release_validate_app_identity \
@@ -808,7 +1197,7 @@ validate_historical_update_transition() {
 }
 
 expect_success \
-  "built-app gate preserves the historical 0.1.2 public-key identity" \
+  "built-app gate preserves the historical 0.1.2 identity without newer display metadata" \
   validate_historical_update_transition
 /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $USHOT_SPARKLE_PUBLIC_ED_KEY" \
   "$TRANSITION_TEST_APP/Contents/Info.plist"

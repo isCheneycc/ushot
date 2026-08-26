@@ -1,6 +1,6 @@
 # Architecture
 
-Ushot is a native, local-first macOS application with bundle identifier `io.github.ischeneycc.ushot`. The shipping `UshotApp` target is an AppKit/SwiftUI hybrid and the reusable implementation lives in `UshotCore`. `Package.swift` compiles the same sources used by the Xcode project, so command-line validation cannot drift into a second implementation.
+Ushot is a native, local-first macOS application with production bundle identifier `io.github.ischeneycc.ushot`. Debug hosts use `io.github.ischeneycc.ushot.debug`, with a separate preferences domain and Application Support directory. Disposable Ushot host apps are not registered with LaunchServices; only the transactional installer registers the validated final `/Applications/Ushot.app`. These boundaries prevent DerivedData/UI-test hosts from becoming the Screen Recording or LaunchServices identity of the installed Release app. The shipping `UshotApp` target is an AppKit/SwiftUI hybrid and the reusable implementation lives in `UshotCore`. `Package.swift` compiles the same sources used by the Xcode project, so command-line validation cannot drift into a second implementation.
 
 ## Boundaries
 
@@ -13,7 +13,7 @@ Ushot is a native, local-first macOS application with bundle identifier `io.gith
 - `UshotCore/History`: versioned atomic on-disk records. Disabled by default.
 - `UshotCore/Color` and `UshotCore/Measurement`: system-managed live pixel sampling and point/pixel ruler calculations.
 - `UshotCore/Settings`: a versioned Codable settings schema and its persistence boundary.
-- `UshotCore/Product`: the single source of truth for the public name, permanent bundle identifier, Application Support namespace and legacy identity migration keys.
+- `UshotCore/Product`: the single source of truth for the public name, permanent production identity, isolated Debug runtime identity, Application Support namespaces and legacy identity migration keys.
 - `UshotCore/FeatureGating`: the single future entitlement seam. Capture and drawing code never contains payment checks.
 - `UshotCore/Logging`: privacy-safe OSLog categories. Pixel data and user content are never logged.
 - The application update adapter: the only network-capable boundary. It wraps Sparkle for explicit manual checks and remains replaceable through `UpdateChecking`.

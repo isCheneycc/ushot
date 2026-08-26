@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-26
+
+### Fixed
+
+- Keep Screen Recording authorization attached to the installed Ushot release by giving Debug hosts a distinct bundle identity and isolated preferences and Application Support storage.
+- Make macOS display the Ushot name and application icon consistently by embedding an explicit display name and validating every public build's complete icon resources.
+- Prevent disposable build products and recoverable installation backups from becoming LaunchServices attribution candidates, and verify exact registration of the final `/Applications/Ushot.app` before launch.
+- Make local-install rollback unregister a failed replacement before moving it away, then re-register and verify the restored application before relaunch.
+
 ## [0.1.9] - 2026-08-25
 
 ### Changed
@@ -145,7 +154,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Limited the manual Gatekeeper workaround to removing `com.apple.quarantine` from an official Ushot release instead of clearing every extended attribute.
 - Defined the Sparkle EdDSA private key as release-critical secret material requiring protected storage, an independent encrypted backup and an exercised recovery process.
 
-[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/isCheneycc/ushot/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/isCheneycc/ushot/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/isCheneycc/ushot/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/isCheneycc/ushot/compare/v0.1.6...v0.1.7

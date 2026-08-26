@@ -17,6 +17,7 @@ private enum AppEnvironmentConfigurationError: Error, LocalizedError {
 
 @MainActor
 final class AppEnvironment: ObservableObject {
+    let runtimeIdentity: ProductIdentity.RuntimeIdentity
     let entitlementProvider: any FeatureEntitlementChecking
     let updateChecker: any UpdateChecking
     let settingsStore: SettingsStore
@@ -28,6 +29,7 @@ final class AppEnvironment: ObservableObject {
     let historyStore: any ScreenshotHistoryStoring
 
     init(
+        runtimeIdentity: ProductIdentity.RuntimeIdentity,
         entitlementProvider: any FeatureEntitlementChecking,
         updateChecker: any UpdateChecking,
         settingsStore: SettingsStore,
@@ -38,6 +40,7 @@ final class AppEnvironment: ObservableObject {
         pixelSamplerFactory: any PixelSamplerCreating,
         historyStore: any ScreenshotHistoryStoring
     ) {
+        self.runtimeIdentity = runtimeIdentity
         self.entitlementProvider = entitlementProvider
         self.updateChecker = updateChecker
         self.settingsStore = settingsStore
@@ -51,48 +54,55 @@ final class AppEnvironment: ObservableObject {
 
     static func live() throws -> AppEnvironment {
         let actualBundleIdentifier = Bundle.main.bundleIdentifier
-#if DEBUG
-        let arguments = ProcessInfo.processInfo.arguments
-        let isUITestLaunch = arguments.contains { $0.hasPrefix("--uitest-") }
-        let isolatedTestBundleIdentifiers = [
-            "\(ProductIdentity.bundleIdentifier).tests",
-            "\(ProductIdentity.bundleIdentifier).uitests"
-        ]
-        let usesExplicitUITestIdentity = isUITestLaunch
-            && actualBundleIdentifier.map(isolatedTestBundleIdentifiers.contains) == true
         guard
-            actualBundleIdentifier == ProductIdentity.bundleIdentifier
-                || usesExplicitUITestIdentity
+            let actualBundleIdentifier,
+            let runtimeIdentity = ProductIdentity.runtimeIdentity(
+                forBundleIdentifier: actualBundleIdentifier
+            )
         else {
             let error = AppEnvironmentConfigurationError.bundleIdentifierMismatch(
                 actual: actualBundleIdentifier
             )
             AppLog.lifecycle.fault(
-                "Application identity mismatch: expected=\(ProductIdentity.bundleIdentifier, privacy: .public), actual=\(actualBundleIdentifier ?? "missing", privacy: .public), explicitUITest=\(isUITestLaunch, privacy: .public)"
+                "Application identity is unsupported: actual=\(actualBundleIdentifier ?? "missing", privacy: .public)"
             )
             throw error
         }
-        if usesExplicitUITestIdentity {
-            AppLog.lifecycle.notice(
-                "Accepted isolated UI-test application identity: identifier=\(actualBundleIdentifier ?? "missing", privacy: .public)"
-            )
-        }
-#else
-        guard actualBundleIdentifier == ProductIdentity.bundleIdentifier else {
+#if DEBUG
+        guard runtimeIdentity.kind == .debug else {
             let error = AppEnvironmentConfigurationError.bundleIdentifierMismatch(
                 actual: actualBundleIdentifier
             )
             AppLog.lifecycle.fault(
-                "Release application identity mismatch: expected=\(ProductIdentity.bundleIdentifier, privacy: .public), actual=\(actualBundleIdentifier ?? "missing", privacy: .public)"
+                "Debug application identity mismatch: expected=\(ProductIdentity.debugBundleIdentifier, privacy: .public), actual=\(actualBundleIdentifier, privacy: .public)"
+            )
+            throw error
+        }
+#else
+        guard runtimeIdentity.kind == .production else {
+            let error = AppEnvironmentConfigurationError.bundleIdentifierMismatch(
+                actual: actualBundleIdentifier
+            )
+            AppLog.lifecycle.fault(
+                "Release application identity mismatch: expected=\(ProductIdentity.bundleIdentifier, privacy: .public), actual=\(actualBundleIdentifier, privacy: .public)"
             )
             throw error
         }
 #endif
+        AppLog.lifecycle.notice(
+            "Admitted application runtime identity: kind=\(String(describing: runtimeIdentity.kind), privacy: .public), identifier=\(runtimeIdentity.bundleIdentifier, privacy: .public)"
+        )
 
-        let settingsConfiguration = settingsDefaults()
+        let settingsConfiguration = settingsDefaults(for: runtimeIdentity)
         if settingsConfiguration.migratesLegacyDomain {
-            try migrateLegacySettingsIfNeeded(into: settingsConfiguration.defaults)
-            try migrateLegacyHistoryIfNeeded(using: settingsConfiguration.defaults)
+            try migrateLegacySettingsIfNeeded(
+                into: settingsConfiguration.defaults,
+                runtimeIdentity: runtimeIdentity
+            )
+            try migrateLegacyHistoryIfNeeded(
+                using: settingsConfiguration.defaults,
+                runtimeIdentity: runtimeIdentity
+            )
         }
 
         let settingsStore = SettingsStore(defaults: settingsConfiguration.defaults)
@@ -106,11 +116,12 @@ final class AppEnvironment: ObservableObject {
             )
         } else {
             AppLog.lifecycle.debug(
-                "Skipped launch-at-login reconciliation for an isolated UI-test identity"
+                "Skipped production launch-at-login reconciliation for runtime identifier=\(runtimeIdentity.bundleIdentifier, privacy: .public)"
             )
         }
 
         return try AppEnvironment(
+            runtimeIdentity: runtimeIdentity,
             entitlementProvider: OpenSourceEntitlementProvider(),
             updateChecker: SparkleUpdateChecker.makeFailClosed(),
             settingsStore: settingsStore,
@@ -120,35 +131,52 @@ final class AppEnvironment: ObservableObject {
             capturer: ScreenCaptureKitCapturer(),
             pixelSamplerFactory: ScreenCaptureKitPixelSamplerFactory(),
             historyStore: try SystemScreenshotHistoryStore.applicationSupportStore(
-                bundleIdentifier: ProductIdentity.applicationSupportDirectoryName
+                bundleIdentifier: runtimeIdentity.applicationSupportDirectoryName
             )
         )
     }
 
-    private static func settingsDefaults() -> (
+    private static func settingsDefaults(
+        for runtimeIdentity: ProductIdentity.RuntimeIdentity
+    ) -> (
         defaults: UserDefaults,
         migratesLegacyDomain: Bool
     ) {
 #if DEBUG
         let arguments = ProcessInfo.processInfo.arguments
         let isUITestLaunch = arguments.contains { $0.hasPrefix("--uitest-") }
-        guard isUITestLaunch else { return (.standard, true) }
-        guard let suiteName = ProcessInfo.processInfo.environment[
-            "USHOT_UI_TEST_SETTINGS_SUITE"
-        ], !suiteName.isEmpty else {
-            preconditionFailure("UI tests must provide an isolated settings suite.")
+        if isUITestLaunch {
+            guard let suiteName = ProcessInfo.processInfo.environment[
+                "USHOT_UI_TEST_SETTINGS_SUITE"
+            ], !suiteName.isEmpty else {
+                preconditionFailure("UI tests must provide an isolated settings suite.")
+            }
+            guard let defaults = UserDefaults(suiteName: suiteName) else {
+                preconditionFailure("The isolated UI-test settings suite could not be created.")
+            }
+            AppLog.lifecycle.debug("Using an isolated settings suite for UI testing")
+            return (defaults, false)
         }
-        guard let defaults = UserDefaults(suiteName: suiteName) else {
-            preconditionFailure("The isolated UI-test settings suite could not be created.")
-        }
-        AppLog.lifecycle.debug("Using an isolated settings suite for UI testing")
-        return (defaults, false)
+
+        // Identity admission above guarantees that `.standard` resolves to the
+        // Debug bundle's own persistent domain, never the production domain.
+        AppLog.lifecycle.debug(
+            "Using Debug settings domain: identifier=\(runtimeIdentity.bundleIdentifier, privacy: .public)"
+        )
+        return (.standard, false)
 #else
         return (.standard, true)
 #endif
     }
 
-    private static func migrateLegacySettingsIfNeeded(into defaults: UserDefaults) throws {
+    private static func migrateLegacySettingsIfNeeded(
+        into defaults: UserDefaults,
+        runtimeIdentity: ProductIdentity.RuntimeIdentity
+    ) throws {
+        precondition(
+            runtimeIdentity.isProduction,
+            "Legacy settings migration is valid only for the production identity."
+        )
         guard defaults.object(forKey: SettingsStore.storageKey) == nil else {
             AppLog.lifecycle.debug(
                 "Skipped legacy settings migration because the current settings key already exists"
@@ -189,7 +217,14 @@ final class AppEnvironment: ObservableObject {
         )
     }
 
-    private static func migrateLegacyHistoryIfNeeded(using defaults: UserDefaults) throws {
+    private static func migrateLegacyHistoryIfNeeded(
+        using defaults: UserDefaults,
+        runtimeIdentity: ProductIdentity.RuntimeIdentity
+    ) throws {
+        precondition(
+            runtimeIdentity.isProduction,
+            "Legacy history migration is valid only for the production identity."
+        )
         guard !defaults.bool(forKey: ProductIdentity.legacyHistoryMigrationMarkerKey) else {
             AppLog.lifecycle.debug("Skipped completed legacy history migration")
             return
@@ -197,7 +232,7 @@ final class AppEnvironment: ObservableObject {
 
         let result = try SystemScreenshotHistoryStore.migrateApplicationSupportHistory(
             fromBundleIdentifier: ProductIdentity.legacyApplicationSupportDirectoryName,
-            toBundleIdentifier: ProductIdentity.applicationSupportDirectoryName
+            toBundleIdentifier: runtimeIdentity.applicationSupportDirectoryName
         )
         defaults.set(true, forKey: ProductIdentity.legacyHistoryMigrationMarkerKey)
         AppLog.lifecycle.notice(

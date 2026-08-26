@@ -12,6 +12,7 @@ LEGACY_DESTINATION_APP="/Applications/$USHOT_LEGACY_APP_BUNDLE"
 DESTINATION_EXECUTABLE="$DESTINATION_APP/Contents/MacOS/$USHOT_EXECUTABLE_NAME"
 LEGACY_DESTINATION_EXECUTABLE="$LEGACY_DESTINATION_APP/Contents/MacOS/$USHOT_LEGACY_EXECUTABLE_NAME"
 INSTALL_LOCK_DIR="/Applications/.Ushot-local-install.lock"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 INSTALL_LOCK_FILE_ID=""
 INSTALL_LOCK_HELD="NO"
@@ -239,6 +240,153 @@ launch_exact_app() {
   release_log "$label is running from its exact installed path (PIDs: $(tr '\n' ' ' <<<"$pids" | sed 's/[[:space:]]*$//'))"
 }
 
+invoke_launch_services_registration() {
+  local app_path="$1"
+  "$LSREGISTER" -f "$app_path"
+}
+
+invoke_launch_services_unregistration() {
+  local app_path="$1"
+  "$LSREGISTER" -u "$app_path"
+}
+
+invoke_launch_services_dump() {
+  "$LSREGISTER" -dump
+}
+
+launch_services_contains_exact_path() {
+  local app_path="$1"
+  local launch_services_dump
+
+  if ! launch_services_dump="$(invoke_launch_services_dump)"; then
+    release_warn "Could not inspect LaunchServices attribution for exact path: $app_path"
+    return 2
+  fi
+  printf '%s\n' "$launch_services_dump" \
+    | awk -v expected="$app_path" '
+        /^[[:space:]]*path:[[:space:]]+/ {
+          candidate = $0
+          sub(/^[[:space:]]*path:[[:space:]]+/, "", candidate)
+          sub(/[[:space:]]+\(0x[[:xdigit:]]+\)[[:space:]]*$/, "", candidate)
+          if (candidate == expected) {
+            found = 1
+          }
+        }
+        END { exit found ? 0 : 1 }
+      '
+}
+
+register_exact_installed_app() {
+  local app_path="$1"
+  local executable_path="$2"
+  local expected_bundle_file_id="$3"
+  local expected_executable_inode="$4"
+  local label="$5"
+
+  case "$app_path" in
+    "$DESTINATION_APP"|"$LEGACY_DESTINATION_APP") ;;
+    *)
+      release_warn "Refusing to register an unexpected application path: $app_path"
+      return 1
+      ;;
+  esac
+  [[ -d "$app_path" && ! -L "$app_path" \
+      && -x "$executable_path" && ! -L "$executable_path" \
+      && -n "$expected_bundle_file_id" \
+      && -n "$expected_executable_inode" \
+      && "$(release_file_id "$app_path" 2>/dev/null || true)" == "$expected_bundle_file_id" \
+      && "$(release_inode "$executable_path" 2>/dev/null || true)" == "$expected_executable_inode" ]] || {
+    release_warn "Refusing to register $label because its validated bundle or executable identity changed."
+    return 1
+  }
+  invoke_launch_services_registration "$app_path" || {
+    release_warn "LaunchServices rejected exact registration for $label: $app_path"
+    return 1
+  }
+  [[ "$(release_file_id "$app_path" 2>/dev/null || true)" == "$expected_bundle_file_id" \
+      && "$(release_inode "$executable_path" 2>/dev/null || true)" == "$expected_executable_inode" ]] || {
+    release_warn "$label changed while LaunchServices registration was in progress."
+    return 1
+  }
+  launch_services_contains_exact_path "$app_path" || {
+    release_warn "LaunchServices did not retain the exact registered path for $label: $app_path"
+    return 1
+  }
+  release_log "Registered exact $label application path with LaunchServices: $app_path"
+}
+
+unregister_exact_installed_app() {
+  local app_path="$1"
+  local executable_path="$2"
+  local expected_bundle_file_id="$3"
+  local expected_executable_inode="$4"
+  local label="$5"
+  local lookup_status
+
+  case "$app_path" in
+    "$DESTINATION_APP"|"$LEGACY_DESTINATION_APP"|"$CURRENT_BACKUP_APP"|"$LEGACY_BACKUP_APP"|"$FAILED_NEW_BACKUP_APP") ;;
+    *)
+      release_warn "Refusing to unregister an unexpected application path: $app_path"
+      return 1
+      ;;
+  esac
+  [[ -d "$app_path" && ! -L "$app_path" \
+      && -x "$executable_path" && ! -L "$executable_path" \
+      && -n "$expected_bundle_file_id" \
+      && -n "$expected_executable_inode" \
+      && "$(release_file_id "$app_path" 2>/dev/null || true)" == "$expected_bundle_file_id" \
+      && "$(release_inode "$executable_path" 2>/dev/null || true)" == "$expected_executable_inode" ]] || {
+    release_warn "Refusing to unregister $label because its validated bundle or executable identity changed."
+    return 1
+  }
+
+  if launch_services_contains_exact_path "$app_path"; then
+    :
+  else
+    lookup_status=$?
+    if [[ "$lookup_status" -eq 1 ]]; then
+      release_log "$label was not registered with LaunchServices; no rollback cleanup needed: $app_path"
+      return 0
+    fi
+    return 1
+  fi
+
+  invoke_launch_services_unregistration "$app_path" || {
+    release_warn "LaunchServices rejected exact unregistration for $label: $app_path"
+    return 1
+  }
+  [[ "$(release_file_id "$app_path" 2>/dev/null || true)" == "$expected_bundle_file_id" \
+      && "$(release_inode "$executable_path" 2>/dev/null || true)" == "$expected_executable_inode" ]] || {
+    release_warn "$label changed while LaunchServices unregistration was in progress."
+    return 1
+  }
+  if launch_services_contains_exact_path "$app_path"; then
+    release_warn "LaunchServices retained $label after exact unregistration: $app_path"
+    return 1
+  else
+    lookup_status=$?
+    [[ "$lookup_status" -eq 1 ]] || return 1
+  fi
+  release_log "Removed exact $label application path from LaunchServices: $app_path"
+}
+
+register_and_launch_installed_app() {
+  local app_path="$1"
+  local executable_path="$2"
+  local expected_bundle_file_id="$3"
+  local expected_executable_inode="$4"
+  local label="$5"
+
+  register_exact_installed_app \
+    "$app_path" \
+    "$executable_path" \
+    "$expected_bundle_file_id" \
+    "$expected_executable_inode" \
+    "$label" \
+    || return 1
+  launch_exact_app "$app_path" "$executable_path" "$label"
+}
+
 validate_current_local_app() {
   local app_path="$1"
   local expected_team="$2"
@@ -276,13 +424,21 @@ validate_current_recovery_app() {
   local build_number
   local installed_team
   local installed_requirement
+  local expected_bundle_name="$USHOT_APP_BUNDLE"
 
   require_real_app_directory "$app_path" "Recoverable Ushot backup"
+  if [[ "$app_path" == "$CURRENT_BACKUP_APP" ]]; then
+    expected_bundle_name="$USHOT_APP_BUNDLE.backup"
+  fi
   version="$(release_plist_value "$info_plist" CFBundleShortVersionString)"
   build_number="$(release_plist_value "$info_plist" CFBundleVersion)"
   release_validate_version "$version"
   release_validate_build_number "$build_number"
-  release_validate_supported_installed_app_identity "$app_path" "$version" "$build_number"
+  release_validate_supported_installed_app_identity \
+    "$app_path" \
+    "$version" \
+    "$build_number" \
+    "$expected_bundle_name"
   release_verify_signature_mode "$app_path" local-signed
   installed_team="$(release_team_identifier "$app_path")"
   [[ "$installed_team" == "$expected_team" ]] \
@@ -299,10 +455,14 @@ validate_legacy_local_app() {
   local version
   local build_number
   local installed_team
+  local expected_bundle_name="$USHOT_LEGACY_APP_BUNDLE"
 
   require_real_app_directory "$app_path" "Legacy Ushot"
-  [[ "$(basename "$app_path")" == "$USHOT_LEGACY_APP_BUNDLE" ]] \
-    || release_die "Legacy app must use the exact bundle name $USHOT_LEGACY_APP_BUNDLE."
+  if [[ "$app_path" == "$LEGACY_BACKUP_APP" ]]; then
+    expected_bundle_name="$USHOT_LEGACY_APP_BUNDLE.backup"
+  fi
+  [[ "$(basename "$app_path")" == "$expected_bundle_name" ]] \
+    || release_die "Legacy app must use the exact bundle name $expected_bundle_name."
   [[ -f "$info_plist" ]] || release_die "Legacy app Info.plist is missing: $info_plist"
   [[ "$(release_plist_value "$info_plist" CFBundleIdentifier)" == "$USHOT_LEGACY_BUNDLE_IDENTIFIER" ]] \
     || release_die "Refusing an unknown app at $app_path: unexpected legacy bundle identifier."
@@ -454,9 +614,14 @@ restart_previous_app_if_needed() {
   local executable_path="$3"
   local label="$4"
   local expected_executable_inode="$5"
+  local registration_verified="$6"
   local existing_pids
 
   [[ "$was_running" == "YES" ]] || return 0
+  [[ "$registration_verified" == "YES" ]] || {
+    release_warn "Refusing to restart the previously running $label because exact LaunchServices registration was not verified."
+    return 1
+  }
   existing_pids="$(exact_executable_pids "$executable_path")"
   if [[ -n "$existing_pids" ]]; then
     all_pids_use_executable_inode "$existing_pids" "$executable_path" "$expected_executable_inode" || {
@@ -482,6 +647,10 @@ rollback_install() {
   local rollback_failed="NO"
   local destination_file_id=""
   local replacement_stopped="YES"
+  local current_registration_attempted="NO"
+  local current_registration_verified="NO"
+  local legacy_registration_attempted="NO"
+  local legacy_registration_verified="NO"
 
   release_warn "Local Ushot installation failed; starting rollback."
 
@@ -558,24 +727,34 @@ rollback_install() {
             "$SOURCE_TEAM" \
             "$SOURCE_REQUIREMENT" \
             "$SOURCE_BINARY_SHA"); then
-        FAILED_NEW_BACKUP_APP="$BACKUP_ROOT/Ushot-failed-install.app"
-        if [[ "$(release_file_id "$BACKUP_ROOT" 2>/dev/null || true)" != "$BACKUP_ROOT_FILE_ID" ]]; then
-          release_warn "Backup directory identity changed; refusing to move the failed replacement: $BACKUP_ROOT"
+        if ! unregister_exact_installed_app \
+            "$DESTINATION_APP" \
+            "$DESTINATION_EXECUTABLE" \
+            "$STAGED_FILE_ID" \
+            "$STAGED_EXECUTABLE_INODE" \
+            "failed replacement Ushot"; then
+          release_warn "Refusing to move the failed replacement while its LaunchServices attribution may remain active."
           rollback_failed="YES"
-        elif path_exists "$FAILED_NEW_BACKUP_APP"; then
-          release_warn "Cannot preserve failed replacement because the recovery path already exists: $FAILED_NEW_BACKUP_APP"
-          rollback_failed="YES"
-        elif /bin/mv "$DESTINATION_APP" "$FAILED_NEW_BACKUP_APP"; then
-          if [[ "$(release_file_id "$FAILED_NEW_BACKUP_APP" 2>/dev/null || true)" == "$STAGED_FILE_ID" ]]; then
-            release_warn "Failed replacement preserved at: $FAILED_NEW_BACKUP_APP"
-            NEW_INSTALLED="NO"
+        else
+          FAILED_NEW_BACKUP_APP="$BACKUP_ROOT/Ushot-failed-install.app.backup"
+          if [[ "$(release_file_id "$BACKUP_ROOT" 2>/dev/null || true)" != "$BACKUP_ROOT_FILE_ID" ]]; then
+            release_warn "Backup directory identity changed; refusing to move the failed replacement: $BACKUP_ROOT"
+            rollback_failed="YES"
+          elif path_exists "$FAILED_NEW_BACKUP_APP"; then
+            release_warn "Cannot preserve failed replacement because the recovery path already exists: $FAILED_NEW_BACKUP_APP"
+            rollback_failed="YES"
+          elif /bin/mv "$DESTINATION_APP" "$FAILED_NEW_BACKUP_APP"; then
+            if [[ "$(release_file_id "$FAILED_NEW_BACKUP_APP" 2>/dev/null || true)" == "$STAGED_FILE_ID" ]]; then
+              release_warn "Failed replacement preserved at: $FAILED_NEW_BACKUP_APP"
+              NEW_INSTALLED="NO"
+            else
+              release_warn "Failed replacement move did not preserve its validated directory identity: $FAILED_NEW_BACKUP_APP"
+              rollback_failed="YES"
+            fi
           else
-            release_warn "Failed replacement move did not preserve its validated directory identity: $FAILED_NEW_BACKUP_APP"
+            release_warn "Could not move the failed replacement to Trash: $DESTINATION_APP"
             rollback_failed="YES"
           fi
-        else
-          release_warn "Could not move the failed replacement to Trash: $DESTINATION_APP"
-          rollback_failed="YES"
         fi
       else
         release_warn "Refusing to move an unrecognized app from the current destination during rollback: $DESTINATION_APP"
@@ -601,6 +780,17 @@ rollback_install() {
           && "$(release_inode "$DESTINATION_EXECUTABLE" 2>/dev/null || true)" == "$CURRENT_ORIGINAL_EXECUTABLE_INODE" ]] \
           && (validate_current_recovery_app "$DESTINATION_APP" "$SOURCE_TEAM" "$CURRENT_ORIGINAL_REQUIREMENT"); then
         release_warn "Restored previous Ushot to: $DESTINATION_APP"
+        current_registration_attempted="YES"
+        if register_exact_installed_app \
+            "$DESTINATION_APP" \
+            "$DESTINATION_EXECUTABLE" \
+            "$CURRENT_ORIGINAL_FILE_ID" \
+            "$CURRENT_ORIGINAL_EXECUTABLE_INODE" \
+            "restored Ushot"; then
+          current_registration_verified="YES"
+        else
+          rollback_failed="YES"
+        fi
       else
         release_warn "Previous Ushot was moved back but failed post-restore validation: $DESTINATION_APP"
         rollback_failed="YES"
@@ -630,6 +820,17 @@ rollback_install() {
           && (validate_legacy_local_app "$LEGACY_DESTINATION_APP" "$SOURCE_TEAM") \
           && [[ "$(release_designated_requirement "$LEGACY_DESTINATION_APP" 2>/dev/null || true)" == "$LEGACY_ORIGINAL_REQUIREMENT" ]]; then
         release_warn "Restored legacy Ushot to: $LEGACY_DESTINATION_APP"
+        legacy_registration_attempted="YES"
+        if register_exact_installed_app \
+            "$LEGACY_DESTINATION_APP" \
+            "$LEGACY_DESTINATION_EXECUTABLE" \
+            "$LEGACY_ORIGINAL_FILE_ID" \
+            "$LEGACY_ORIGINAL_EXECUTABLE_INODE" \
+            "restored legacy UshotApp"; then
+          legacy_registration_verified="YES"
+        else
+          rollback_failed="YES"
+        fi
       else
         release_warn "Legacy UshotApp was moved back but failed post-restore validation: $LEGACY_DESTINATION_APP"
         rollback_failed="YES"
@@ -641,12 +842,52 @@ rollback_install() {
   fi
 
   if [[ "$PROCESS_SHUTDOWN_BEGAN" == "YES" ]]; then
+    if [[ "$CURRENT_WAS_RUNNING" == "YES" \
+        && "$current_registration_attempted" != "YES" ]]; then
+      current_registration_attempted="YES"
+      if [[ "$CURRENT_MOVED" != "YES" \
+          && "$(release_file_id "$DESTINATION_APP" 2>/dev/null || true)" == "$CURRENT_ORIGINAL_FILE_ID" \
+          && "$(release_inode "$DESTINATION_EXECUTABLE" 2>/dev/null || true)" == "$CURRENT_ORIGINAL_EXECUTABLE_INODE" ]] \
+          && (validate_current_recovery_app "$DESTINATION_APP" "$SOURCE_TEAM" "$CURRENT_ORIGINAL_REQUIREMENT") \
+          && register_exact_installed_app \
+            "$DESTINATION_APP" \
+            "$DESTINATION_EXECUTABLE" \
+            "$CURRENT_ORIGINAL_FILE_ID" \
+            "$CURRENT_ORIGINAL_EXECUTABLE_INODE" \
+            "previous Ushot retained during rollback"; then
+        current_registration_verified="YES"
+      else
+        release_warn "Could not verify exact LaunchServices registration for the previous Ushot before rollback relaunch."
+        rollback_failed="YES"
+      fi
+    fi
+    if [[ "$LEGACY_WAS_RUNNING" == "YES" \
+        && "$legacy_registration_attempted" != "YES" ]]; then
+      legacy_registration_attempted="YES"
+      if [[ "$LEGACY_MOVED" != "YES" \
+          && "$(release_file_id "$LEGACY_DESTINATION_APP" 2>/dev/null || true)" == "$LEGACY_ORIGINAL_FILE_ID" \
+          && "$(release_inode "$LEGACY_DESTINATION_EXECUTABLE" 2>/dev/null || true)" == "$LEGACY_ORIGINAL_EXECUTABLE_INODE" ]] \
+          && (validate_legacy_local_app "$LEGACY_DESTINATION_APP" "$SOURCE_TEAM") \
+          && [[ "$(release_designated_requirement "$LEGACY_DESTINATION_APP" 2>/dev/null || true)" == "$LEGACY_ORIGINAL_REQUIREMENT" ]] \
+          && register_exact_installed_app \
+            "$LEGACY_DESTINATION_APP" \
+            "$LEGACY_DESTINATION_EXECUTABLE" \
+            "$LEGACY_ORIGINAL_FILE_ID" \
+            "$LEGACY_ORIGINAL_EXECUTABLE_INODE" \
+            "previous legacy UshotApp retained during rollback"; then
+        legacy_registration_verified="YES"
+      else
+        release_warn "Could not verify exact LaunchServices registration for the previous legacy UshotApp before rollback relaunch."
+        rollback_failed="YES"
+      fi
+    fi
     restart_previous_app_if_needed \
       "$CURRENT_WAS_RUNNING" \
       "$DESTINATION_APP" \
       "$DESTINATION_EXECUTABLE" \
       "Ushot" \
       "$CURRENT_ORIGINAL_EXECUTABLE_INODE" \
+      "$current_registration_verified" \
       || rollback_failed="YES"
     restart_previous_app_if_needed \
       "$LEGACY_WAS_RUNNING" \
@@ -654,6 +895,7 @@ rollback_install() {
       "$LEGACY_DESTINATION_EXECUTABLE" \
       "legacy UshotApp" \
       "$LEGACY_ORIGINAL_EXECUTABLE_INODE" \
+      "$legacy_registration_verified" \
       || rollback_failed="YES"
   fi
 
@@ -719,6 +961,7 @@ release_require_command find
 release_require_command stat
 release_require_command shasum
 release_require_command lsof
+release_require_command "$LSREGISTER"
 
 require_real_app_directory "$SOURCE_APP_INPUT" "Signed source app"
 SOURCE_APP="$(cd "$(dirname "$SOURCE_APP_INPUT")" && pwd -P)/$(basename "$SOURCE_APP_INPUT")"
@@ -775,8 +1018,10 @@ STAGED_EXECUTABLE_INODE="$(release_inode "$STAGED_APP/Contents/MacOS/$USHOT_EXEC
 TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
 BACKUP_ROOT="$(/usr/bin/mktemp -d "$HOME/.Trash/Ushot-local-install-backup-$TIMESTAMP.XXXXXX")"
 BACKUP_ROOT_FILE_ID="$(release_file_id "$BACKUP_ROOT")"
-CURRENT_BACKUP_APP="$BACKUP_ROOT/$USHOT_APP_BUNDLE"
-LEGACY_BACKUP_APP="$BACKUP_ROOT/$USHOT_LEGACY_APP_BUNDLE"
+# Keep recoverable bundles out of LaunchServices discovery. Rollback moves the
+# validated directory back to its canonical .app path before registration.
+CURRENT_BACKUP_APP="$BACKUP_ROOT/$USHOT_APP_BUNDLE.backup"
+LEGACY_BACKUP_APP="$BACKUP_ROOT/$USHOT_LEGACY_APP_BUNDLE.backup"
 
 # Immediately re-establish each bundle and executable identity before looking
 # up or signalling an exact-path PID. If an app appeared, disappeared or was
@@ -893,6 +1138,13 @@ if path_exists "$DESTINATION_APP"; then
   [[ "$(release_file_id "$CURRENT_BACKUP_APP")" == "$CURRENT_ORIGINAL_FILE_ID" ]] \
     || release_die "Current Ushot backup did not preserve the validated directory identity."
   validate_current_recovery_app "$CURRENT_BACKUP_APP" "$SOURCE_TEAM" "$CURRENT_ORIGINAL_REQUIREMENT"
+  unregister_exact_installed_app \
+    "$CURRENT_BACKUP_APP" \
+    "$CURRENT_BACKUP_APP/Contents/MacOS/$USHOT_EXECUTABLE_NAME" \
+    "$CURRENT_ORIGINAL_FILE_ID" \
+    "$CURRENT_ORIGINAL_EXECUTABLE_INODE" \
+    "recoverable previous Ushot backup" \
+    || release_die "Could not remove the recoverable previous Ushot backup from LaunchServices attribution."
   [[ -z "$(exact_executable_pids "$DESTINATION_EXECUTABLE")" ]] \
     || release_die "A current Ushot process appeared during its backup move; rolling back."
 fi
@@ -914,6 +1166,13 @@ if path_exists "$LEGACY_DESTINATION_APP"; then
   validate_legacy_local_app "$LEGACY_BACKUP_APP" "$SOURCE_TEAM"
   [[ "$(release_designated_requirement "$LEGACY_BACKUP_APP")" == "$LEGACY_ORIGINAL_REQUIREMENT" ]] \
     || release_die "Legacy UshotApp backup designated requirement changed during its move."
+  unregister_exact_installed_app \
+    "$LEGACY_BACKUP_APP" \
+    "$LEGACY_BACKUP_APP/Contents/MacOS/$USHOT_LEGACY_EXECUTABLE_NAME" \
+    "$LEGACY_ORIGINAL_FILE_ID" \
+    "$LEGACY_ORIGINAL_EXECUTABLE_INODE" \
+    "recoverable legacy UshotApp backup" \
+    || release_die "Could not remove the recoverable legacy UshotApp backup from LaunchServices attribution."
   [[ -z "$(exact_executable_pids "$LEGACY_DESTINATION_EXECUTABLE")" ]] \
     || release_die "A legacy UshotApp process appeared during its backup move; rolling back."
 fi
@@ -948,8 +1207,13 @@ INSTALLED_BINARY_SHA="$(release_sha256 "$DESTINATION_APP/Contents/MacOS/$USHOT_E
 [[ "$SOURCE_BINARY_SHA" == "$INSTALLED_BINARY_SHA" ]] \
   || release_die "Installed executable does not match the local-signed artifact."
 
-launch_exact_app "$DESTINATION_APP" "$DESTINATION_EXECUTABLE" "Installed Ushot" \
-  || release_die "Installed Ushot did not remain running; the installer will restore the previous app state."
+register_and_launch_installed_app \
+  "$DESTINATION_APP" \
+  "$DESTINATION_EXECUTABLE" \
+  "$STAGED_FILE_ID" \
+  "$STAGED_EXECUTABLE_INODE" \
+  "Installed Ushot" \
+  || release_die "Installed Ushot could not be registered and launched from its exact path; the installer will restore the previous app state."
 
 INSTALL_SUCCEEDED="YES"
 if /bin/rmdir "$STAGING_ROOT"; then

@@ -521,7 +521,7 @@ jobs:
           SIGNED_APPCAST_POLICY_SOURCE='UshotCore/Sources/UshotCore/Update/SignedAppcastPolicy.swift'
           VALIDATOR_MAIN_SOURCE='Tools/AuthenticatedAppcastValidator/main.swift'
           PUBLIC_KEY_DERIVER_SOURCE='scripts/derive-sparkle-public-key.swift'
-          EXPECTED_PRODUCT_IDENTITY_SOURCE_SHA256='08d194b45558315eac33ee62c2852de9ca9f10236ce4c1ac792aa8ca78065389'
+          EXPECTED_PRODUCT_IDENTITY_SOURCE_SHA256='0de429d6e52dcce1fb918cf28d2b55cfe3eedf9a91ed3f2f89a26358588f0667'
           EXPECTED_UPDATE_CHECKING_SOURCE_SHA256='512a3167383eb0e2834557516a71a04454b1c8f124796ebd1058716e968069ba'
           EXPECTED_SIGNED_APPCAST_POLICY_SOURCE_SHA256='e51074a3314b696fb9acac25182e3c08f2d5509e6e79974bc1813f311105f3ed'
           EXPECTED_VALIDATOR_MAIN_SOURCE_SHA256='8268ea1712b5cba7cd6907c8f2743b3c19e1b0455b60b2ea4e5f830ba966d6b8'
@@ -870,7 +870,7 @@ jobs:
 
           RELEASE_COMMON_SCRIPT='scripts/release-common.sh'
           GENERATE_APPCAST_SCRIPT='scripts/generate-appcast.sh'
-          EXPECTED_RELEASE_COMMON_SCRIPT_SHA256='7d492c3b0b7927dd27b7ffe5ec2a95c6caff6c4644672e3e2b7821deb1be7b2a'
+          EXPECTED_RELEASE_COMMON_SCRIPT_SHA256='2d49e08191bec7603e068cc2418e32aa25be30ad188e1395ec1b1a869d750475'
           EXPECTED_GENERATE_APPCAST_SCRIPT_SHA256='36325f7edbfb3dc5b3eebf9e8aea23aa2b38dadd7c665085c125d56c0f63d3df'
           verify_reviewed_signing_script() {
             local script_path="$1"
