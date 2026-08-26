@@ -13,7 +13,8 @@ final class PinnedShotManager {
     private let historyStore: any ScreenshotHistoryStoring
     private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
     private let admitAppWork: @MainActor () throws -> Void
-    private var currentController: PinnedShotPanelController?
+    private var pinnedControllers: [UUID: PinnedShotPanelController] = [:]
+    private var pinnedControllerOrder: [UUID] = []
     private var regionDraftController: PinnedShotPanelController?
     private var preparedRegionDraftToolbarController: PinnedShotToolbarController?
     private var canvasEditorLeases: [ObjectIdentifier: UUID] = [:]
@@ -22,7 +23,7 @@ final class PinnedShotManager {
     var hasBlockingUpdateActivity: Bool {
         !canvasEditorLeases.isEmpty
             || regionDraftController != nil
-            || currentController?.hasBlockingUpdateActivity == true
+            || pinnedControllers.values.contains(where: \.hasBlockingUpdateActivity)
     }
 
     init(
@@ -42,10 +43,15 @@ final class PinnedShotManager {
             queue: .main
         )
         source.setEventHandler { [weak self] in
-            self?.currentController?.releaseRebuildableCaches()
-            self?.regionDraftController?.releaseRebuildableCaches()
-            self?.preparedRegionDraftToolbarController = nil
-            AppLog.capture.notice("Released current pinned-shot export cache after memory pressure")
+            guard let self else { return }
+            for controller in self.pinnedControllers.values {
+                controller.releaseRebuildableCaches()
+            }
+            self.regionDraftController?.releaseRebuildableCaches()
+            self.preparedRegionDraftToolbarController = nil
+            AppLog.capture.notice(
+                "Released pinned-shot export caches after memory pressure: pinnedCount=\(self.pinnedControllers.count, privacy: .public), regionDraft=\(self.regionDraftController != nil, privacy: .public)"
+            )
         }
         source.resume()
         memoryPressureSource = source
@@ -113,13 +119,8 @@ final class PinnedShotManager {
         }
         let showsToolbar = captureSettings.showsQuickToolbar
 
-        let replacesCurrentScreenshot = currentController != nil
-        if let currentController {
-            AppLog.capture.notice(
-                "Replacing current screenshot: previous=\(currentController.identifier.uuidString, privacy: .public), replacement=\(identifier.uuidString, privacy: .public)"
-            )
-            recycleRegionDraftToolbar(from: currentController)
-            currentController.close(reason: .replacement)
+        let occupiedPinnedFrames = pinnedControllerOrder.compactMap {
+            pinnedControllers[$0]?.presentedFrame
         }
 
         let controller = PinnedShotPanelController(
@@ -133,8 +134,7 @@ final class PinnedShotManager {
             admitAppWork: admitAppWork
         )
         controller.onClose = { [weak self] identifier in
-            guard self?.currentController?.identifier == identifier else { return }
-            self?.currentController = nil
+            self?.unregisterPinnedController(identifier: identifier)
         }
         controller.onOpenEditor = { [weak self] session in
             self?.presentCanvasEditor(for: session, reason: "pinned-toolbar-action")
@@ -142,14 +142,15 @@ final class PinnedShotManager {
         controller.onError = { [weak self] error in
             self?.onError?(error)
         }
-        currentController = controller
+        registerPinnedController(controller)
         if captureSettings.automaticallyOpensCanvasEditor {
             controller.beginCanvasEditorPresentation(reason: "automatic-editor-before-pinned-presentation")
         } else if canvasEditorLeases[ObjectIdentifier(session)] != nil {
             controller.beginCanvasEditorPresentation(reason: "automatic-editor-already-presented")
         }
         controller.present(
-            entranceStyle: replacesCurrentScreenshot ? .replacement : .initial
+            entranceStyle: .initial,
+            avoidingPinnedFrames: occupiedPinnedFrames
         )
         if captureSettings.automaticallyOpensCanvasEditor {
             presentCanvasEditor(for: session, reason: "automatic-capture-action")
@@ -222,12 +223,10 @@ final class PinnedShotManager {
             admitAppWork: admitAppWork
         )
         controller.onClose = { [weak self] identifier in
-            if self?.currentController?.identifier == identifier {
-                self?.currentController = nil
-            }
             if self?.regionDraftController?.identifier == identifier {
                 self?.regionDraftController = nil
             }
+            self?.unregisterPinnedController(identifier: identifier)
         }
         controller.onOpenEditor = { [weak self] session in
             self?.presentCanvasEditor(for: session, reason: "region-toolbar-action")
@@ -242,13 +241,8 @@ final class PinnedShotManager {
             else {
                 preconditionFailure("Only the active region confirmation may transition into a pinned screenshot.")
             }
-            let previousPinnedController = self.currentController
             self.regionDraftController = nil
-            self.currentController = controller
-            if let previousPinnedController, previousPinnedController !== controller {
-                self.recycleRegionDraftToolbar(from: previousPinnedController)
-                previousPinnedController.close(reason: .replacement)
-            }
+            self.registerPinnedController(controller)
             onPin()
             self.completeCaptureActions(for: session)
         }
@@ -350,7 +344,12 @@ final class PinnedShotManager {
 
     func closeForApplicationTermination() {
         regionDraftController?.close(reason: .applicationTermination)
-        currentController?.close(reason: .applicationTermination)
+        let pinnedControllers = pinnedControllerOrder.compactMap {
+            self.pinnedControllers[$0]
+        }
+        for controller in pinnedControllers {
+            controller.close(reason: .applicationTermination)
+        }
     }
 
     func canvasEditorDidClose(session: AnnotationEditingSession, leaseID: UUID) {
@@ -367,7 +366,9 @@ final class PinnedShotManager {
                 AppLog.capture.notice("Kept exclusive canvas-editor ownership after an immediate reopen")
                 return
             }
-            self.currentController?.endCanvasEditorPresentation(for: session)
+            for controller in self.pinnedControllers.values {
+                controller.endCanvasEditorPresentation(for: session)
+            }
             self.regionDraftController?.endCanvasEditorPresentation(for: session)
             AppLog.capture.notice("Released exclusive canvas-editor ownership")
         }
@@ -387,15 +388,21 @@ final class PinnedShotManager {
         guard let onOpenEditor else {
             preconditionFailure("Canvas-editor presentation requires an installed application coordinator.")
         }
-        let currentAdmission = currentController?.beginCanvasEditorPresentation(
+        let pinnedAdmissions = pinnedControllerOrder.compactMap { identifier in
+            pinnedControllers[identifier]?.beginCanvasEditorPresentation(
+                for: session,
+                reason: reason
+            )
+        }
+        precondition(
+            pinnedAdmissions.count <= 1,
+            "An annotation session may belong to only one pinned screenshot."
+        )
+        let admission = pinnedAdmissions.first ?? regionDraftController?.beginCanvasEditorPresentation(
             for: session,
             reason: reason
         )
-        let regionAdmission = regionDraftController?.beginCanvasEditorPresentation(
-            for: session,
-            reason: reason
-        )
-        guard (currentAdmission ?? regionAdmission) == true else {
+        guard admission == true else {
             AppLog.capture.notice(
                 "Rejected exclusive canvas-editor ownership because active text could not commit: reason=\(reason, privacy: .public)"
             )
@@ -410,6 +417,40 @@ final class PinnedShotManager {
         onOpenEditor(session, leaseID)
     }
 
+    private var mostRecentlyPresentedPinnedController: PinnedShotPanelController? {
+        for identifier in pinnedControllerOrder.reversed() {
+            if let controller = pinnedControllers[identifier] {
+                return controller
+            }
+        }
+        return nil
+    }
+
+    private func registerPinnedController(_ controller: PinnedShotPanelController) {
+        let identifier = controller.identifier
+        precondition(
+            pinnedControllers[identifier] == nil
+                && !pinnedControllerOrder.contains(identifier),
+            "A pinned screenshot identifier may be registered only once."
+        )
+        pinnedControllers[identifier] = controller
+        pinnedControllerOrder.append(identifier)
+        AppLog.capture.notice(
+            "Registered pinned screenshot: id=\(identifier.uuidString, privacy: .public), pinnedCount=\(self.pinnedControllers.count, privacy: .public)"
+        )
+    }
+
+    private func unregisterPinnedController(identifier: UUID) {
+        guard pinnedControllers.removeValue(forKey: identifier) != nil else { return }
+        guard let orderIndex = pinnedControllerOrder.firstIndex(of: identifier) else {
+            preconditionFailure("A registered pinned screenshot must retain its presentation order entry.")
+        }
+        pinnedControllerOrder.remove(at: orderIndex)
+        AppLog.capture.notice(
+            "Unregistered pinned screenshot: id=\(identifier.uuidString, privacy: .public), pinnedCount=\(self.pinnedControllers.count, privacy: .public)"
+        )
+    }
+
     private func recycleRegionDraftToolbar(from controller: PinnedShotPanelController) {
         guard preparedRegionDraftToolbarController == nil,
               let toolbarController = controller.takeRegionDraftToolbarForReuse()
@@ -420,28 +461,28 @@ final class PinnedShotManager {
 
 #if DEBUG
     func runLineWidthRoutingRegression() {
-        guard let currentController else {
+        guard let currentController = mostRecentlyPresentedPinnedController else {
             preconditionFailure("Line-width routing regression requires a current screenshot.")
         }
         currentController.runLineWidthRoutingRegression()
     }
 
     func runReadOnlyWindowPressCursorRegression() {
-        guard let currentController else {
+        guard let currentController = mostRecentlyPresentedPinnedController else {
             preconditionFailure("Pinned cursor regression requires a current screenshot.")
         }
         currentController.runReadOnlyWindowPressCursorRegression()
     }
 
     func runInlineTextStabilityRegression() {
-        guard let currentController else {
+        guard let currentController = mostRecentlyPresentedPinnedController else {
             preconditionFailure("Inline text stability regression requires a current screenshot.")
         }
         currentController.runInlineTextStabilityRegression()
     }
 
     func prepareInlineTextResizeUITest() {
-        guard let currentController else {
+        guard let currentController = mostRecentlyPresentedPinnedController else {
             preconditionFailure("Inline text resize UI testing requires a current screenshot.")
         }
         currentController.prepareInlineTextResizeUITest()
@@ -573,7 +614,6 @@ private enum PinnedShotPresentationMode {
 
 private enum PinnedShotEntranceStyle: String {
     case initial
-    case replacement
     case none
 }
 
@@ -581,7 +621,6 @@ private enum PinnedShotCloseReason: String {
     case applicationTermination = "application-termination"
     case copied
     case escape
-    case replacement
     case regionCopied = "region-copied"
     case regionSaved = "region-saved"
     case regionSelectionCancelled = "region-selection-cancelled"
@@ -718,6 +757,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private var entranceAnimationTimer: Timer?
 
     var isRegionDraft: Bool { presentationMode.isRegionDraft }
+    var presentedFrame: CGRect { imagePanel.frame }
     private var exportInProgress: Bool { activeExportTransaction != nil }
     /// The pinned image panel draws exactly one shadow around the screenshot.
     /// A window capture captured with "Keep window shadow" already contains
@@ -836,7 +876,10 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         }
     }
 
-    func present(entranceStyle: PinnedShotEntranceStyle) {
+    func present(
+        entranceStyle: PinnedShotEntranceStyle,
+        avoidingPinnedFrames: [CGRect] = []
+    ) {
         precondition(
             !presentationMode.isRegionDraft || entranceStyle == .none,
             "Region confirmation presentation must remain animation-free."
@@ -845,7 +888,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             presentationMode.isRegionDraft || entranceStyle != .none,
             "Every non-region screenshot preview requires an entrance style."
         )
-        positionImagePanel()
+        positionImagePanel(avoidingPinnedFrames: avoidingPinnedFrames)
         if presentationMode.isRegionDraft {
             // Desktop-frame geometry is the authority. Synchronize content
             // layout against it before first paint so the confirmation surface
@@ -887,7 +930,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         }
         installKeyboardMonitor()
         AppLog.capture.notice(
-            "Presented current screenshot: id=\(self.identifier.uuidString, privacy: .public), imageKey=\(self.imagePanel.isKeyWindow, privacy: .public), toolbarVisible=\(self.presentationMode.showsToolbar, privacy: .public), regionDraft=\(self.presentationMode.isRegionDraft, privacy: .public)"
+            "Presented screenshot surface: id=\(self.identifier.uuidString, privacy: .public), imageKey=\(self.imagePanel.isKeyWindow, privacy: .public), toolbarVisible=\(self.presentationMode.showsToolbar, privacy: .public), regionDraft=\(self.presentationMode.isRegionDraft, privacy: .public)"
         )
         if !presentationMode.isRegionDraft {
             logScreenshotSampling(reason: "initial-presentation")
@@ -908,15 +951,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         case (.initial, false):
             duration = 0.14
             initialAlpha = 0
-        case (.replacement, false):
-            duration = 0.10
-            initialAlpha = 0.82
         case (.initial, true):
             duration = 0.08
             initialAlpha = 0.82
-        case (.replacement, true):
-            duration = 0.06
-            initialAlpha = 0.92
         case (.none, _):
             preconditionFailure("A non-region screenshot cannot disable its entrance transition.")
         }
@@ -1443,7 +1480,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         closeReason = reason
         disableAnnotationEditing(reason: "close-\(reason.rawValue)")
         AppLog.capture.notice(
-            "Closing current screenshot: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason.rawValue, privacy: .public)"
+            "Closing pinned screenshot: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason.rawValue, privacy: .public)"
         )
         imagePanel.close()
     }
@@ -3097,7 +3134,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         ))
     }
 
-    private func positionImagePanel() {
+    private func positionImagePanel(avoidingPinnedFrames: [CGRect]) {
         if capturedImage.sourceMetadata.kind == .region {
             let captureFrame = capturedImage.sourceMetadata.desktopFrame.standardized
             precondition(
@@ -3113,20 +3150,54 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             )
             return
         }
-        positionNearMouse()
+        positionNearMouse(avoidingPinnedFrames: avoidingPinnedFrames)
     }
 
-    private func positionNearMouse() {
+    private func positionNearMouse(avoidingPinnedFrames: [CGRect]) {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
         guard let visible = screen?.visibleFrame else {
             imagePanel.center()
             return
         }
-        var origin = CGPoint(x: mouse.x + 18, y: mouse.y - imagePanel.frame.height - 18)
-        origin.x = min(max(origin.x, visible.minX), visible.maxX - imagePanel.frame.width)
-        origin.y = min(max(origin.y, visible.minY + 52), visible.maxY - imagePanel.frame.height)
+        let baseOrigin = clampedPinnedOrigin(
+            CGPoint(x: mouse.x + 18, y: mouse.y - imagePanel.frame.height - 18),
+            within: visible
+        )
+        let offsets: [CGPoint] = (1...8).flatMap { ring in
+            let distance = CGFloat(ring) * 24
+            return [
+                CGPoint(x: distance, y: -distance),
+                CGPoint(x: -distance, y: -distance),
+                CGPoint(x: distance, y: distance),
+                CGPoint(x: -distance, y: distance)
+            ]
+        }
+        let candidates = [baseOrigin] + offsets.map {
+            clampedPinnedOrigin(
+                CGPoint(x: baseOrigin.x + $0.x, y: baseOrigin.y + $0.y),
+                within: visible
+            )
+        }
+        let origin = candidates.first { candidate in
+            !avoidingPinnedFrames.contains { frame in
+                abs(frame.minX - candidate.x) < 1
+                    && abs(frame.minY - candidate.y) < 1
+            }
+        } ?? baseOrigin
         imagePanel.setFrameOrigin(origin)
+        if origin != baseOrigin {
+            AppLog.capture.notice(
+                "Offset pinned screenshot to keep multiple images discoverable: id=\(self.identifier.uuidString, privacy: .public), x=\(origin.x, privacy: .public), y=\(origin.y, privacy: .public), existingCount=\(avoidingPinnedFrames.count, privacy: .public)"
+            )
+        }
+    }
+
+    private func clampedPinnedOrigin(_ origin: CGPoint, within visible: CGRect) -> CGPoint {
+        CGPoint(
+            x: min(max(origin.x, visible.minX), visible.maxX - imagePanel.frame.width),
+            y: min(max(origin.y, visible.minY + 52), visible.maxY - imagePanel.frame.height)
+        )
     }
 
     private func repositionToolbar() {

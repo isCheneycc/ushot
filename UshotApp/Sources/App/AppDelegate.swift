@@ -468,7 +468,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return true
         }
-        if arguments.contains("--uitest-pinned-lifecycle") {
+        if arguments.contains("--uitest-pinned-lifecycle")
+            || arguments.contains("--uitest-multiple-pinned-lifecycle")
+        {
             let displayID = CGMainDisplayID()
             let first = try makeUITestCapturedImage(
                 logicalSize: CGSize(width: 340, height: 210),
@@ -476,14 +478,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 displayID: displayID,
                 scale: 1
             )
-            let replacement = try makeUITestCapturedImage(
+            let second = try makeUITestCapturedImage(
                 logicalSize: CGSize(width: 260, height: 160),
                 desktopFrame: CGRect(x: 0, y: 0, width: 260, height: 160),
                 displayID: displayID,
                 scale: 1
             )
-            pinnedShotManager?.present(.image(first))
-            pinnedShotManager?.present(.image(replacement))
+            if arguments.contains("--uitest-multiple-pinned-lifecycle") {
+                pinnedShotManager?.present(.image(first))
+            }
+            pinnedShotManager?.present(.image(second))
             return true
         }
         return false
