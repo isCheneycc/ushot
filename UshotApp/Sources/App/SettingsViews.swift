@@ -2286,7 +2286,7 @@ private struct AdvancedSettingsView: View {
                 create: true
             )
             let directory = root.appendingPathComponent(
-                ProductIdentity.applicationSupportDirectoryName,
+                environment.runtimeIdentity.applicationSupportDirectoryName,
                 isDirectory: true
             )
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

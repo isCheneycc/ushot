@@ -6,6 +6,7 @@
 USHOT_PRODUCT_NAME="Ushot"
 USHOT_APP_BUNDLE="Ushot.app"
 USHOT_BUNDLE_IDENTIFIER="io.github.ischeneycc.ushot"
+USHOT_DEBUG_BUNDLE_IDENTIFIER="io.github.ischeneycc.ushot.debug"
 USHOT_EXECUTABLE_NAME="Ushot"
 USHOT_LEGACY_APP_BUNDLE="UshotApp.app"
 USHOT_LEGACY_BUNDLE_IDENTIFIER="com.example.UshotApp"
@@ -43,6 +44,7 @@ USHOT_SIGNED_FEED_VALIDATION_TRANSITION_BUILD="4"
 USHOT_FIRST_FEED_VERSION="0.1.4"
 USHOT_FIRST_FEED_BUILD="5"
 USHOT_SCREEN_CAPTURE_KIT_WEAK_LINK_VERSION="0.1.7"
+USHOT_DISPLAY_IDENTITY_LEGACY_MAX_VERSION="0.1.9"
 
 release_log() {
   printf 'release: %s\n' "$*"
@@ -321,13 +323,31 @@ release_validate_source_settings() {
   local expected_version="${2:-}"
   local expected_build="${3:-}"
   local base_config="$project_root/Config/Base.xcconfig"
+  local debug_config="$project_root/Config/Debug.xcconfig"
+  local release_config="$project_root/Config/Release.xcconfig"
+  local info_plist="$project_root/UshotApp/Info.plist"
   local product_identity_source="$project_root/UshotCore/Sources/UshotCore/Product/ProductIdentity.swift"
 
   [[ -f "$base_config" ]] || release_die "Missing source-of-truth configuration: $base_config"
+  [[ -f "$debug_config" ]] || release_die "Missing Debug configuration: $debug_config"
+  [[ -f "$release_config" ]] || release_die "Missing Release configuration: $release_config"
+  [[ -f "$info_plist" && ! -L "$info_plist" ]] \
+    || release_die "Missing or symbolic application Info.plist: $info_plist"
   [[ "$(release_xcconfig_value PRODUCT_NAME "$base_config")" == "$USHOT_PRODUCT_NAME" ]] \
     || release_die "PRODUCT_NAME must be $USHOT_PRODUCT_NAME."
   [[ "$(release_xcconfig_value APP_BUNDLE_IDENTIFIER "$base_config")" == "$USHOT_BUNDLE_IDENTIFIER" ]] \
     || release_die "APP_BUNDLE_IDENTIFIER must be $USHOT_BUNDLE_IDENTIFIER."
+  [[ "$(release_xcconfig_value REGISTER_WITH_LAUNCH_SERVICES "$base_config")" == "NO" ]] \
+    || release_die "Build products must not register with LaunchServices before installation."
+  [[ "$(release_xcconfig_value APP_BUNDLE_IDENTIFIER "$debug_config")" == "$USHOT_DEBUG_BUNDLE_IDENTIFIER" ]] \
+    || release_die "Debug APP_BUNDLE_IDENTIFIER must be isolated as $USHOT_DEBUG_BUNDLE_IDENTIFIER."
+  [[ -z "$(release_xcconfig_value APP_BUNDLE_IDENTIFIER "$release_config")" ]] \
+    || release_die "Release.xcconfig must inherit the canonical production bundle identifier from Base.xcconfig."
+  [[ -z "$(release_xcconfig_value PRODUCT_BUNDLE_IDENTIFIER "$debug_config")" \
+      && -z "$(release_xcconfig_value PRODUCT_BUNDLE_IDENTIFIER "$release_config")" ]] \
+    || release_die "Build configurations must select identity through APP_BUNDLE_IDENTIFIER only."
+  [[ "$(release_plist_value "$info_plist" CFBundleDisplayName)" == '$(PRODUCT_NAME)' ]] \
+    || release_die "Source Info.plist CFBundleDisplayName must resolve from PRODUCT_NAME."
   [[ "$(release_xcconfig_value SPARKLE_KEY_ACCOUNT "$base_config")" == "$USHOT_SPARKLE_KEY_ACCOUNT" ]] \
     || release_die "SPARKLE_KEY_ACCOUNT must be $USHOT_SPARKLE_KEY_ACCOUNT."
   [[ "$(release_xcconfig_value LD_RUNPATH_SEARCH_PATHS "$base_config")" == '$(inherited) @executable_path/../Frameworks' ]] \
@@ -360,6 +380,35 @@ release_validate_source_settings() {
   fi
 }
 
+release_validate_app_display_identity() {
+  local app_path="$1"
+  local info_plist="$app_path/Contents/Info.plist"
+  local icon_file="$app_path/Contents/Resources/AppIcon.icns"
+  local asset_catalog="$app_path/Contents/Resources/Assets.car"
+  local string_key
+
+  for string_key in \
+    CFBundleDisplayName \
+    CFBundleName \
+    CFBundleIconName \
+    CFBundleIconFile
+  do
+    release_require_plist_type "$info_plist" "$string_key" string
+  done
+  [[ "$(release_plist_value "$info_plist" CFBundleDisplayName)" == "$USHOT_PRODUCT_NAME" ]] \
+    || release_die "Built app has an unexpected display name."
+  [[ "$(release_plist_value "$info_plist" CFBundleName)" == "$USHOT_PRODUCT_NAME" ]] \
+    || release_die "Built app has an unexpected product name."
+  [[ "$(release_plist_value "$info_plist" CFBundleIconName)" == "AppIcon" ]] \
+    || release_die "Built app has an unexpected icon catalog name."
+  [[ "$(release_plist_value "$info_plist" CFBundleIconFile)" == "AppIcon" ]] \
+    || release_die "Built app has an unexpected legacy icon file name."
+  [[ -f "$icon_file" && ! -L "$icon_file" && -s "$icon_file" ]] \
+    || release_die "Built app must contain a nonempty regular AppIcon.icns file."
+  [[ -f "$asset_catalog" && ! -L "$asset_catalog" && -s "$asset_catalog" ]] \
+    || release_die "Built app must contain a nonempty regular Assets.car file."
+}
+
 release_plist_value() {
   local plist_path="$1"
   local key="$2"
@@ -381,6 +430,7 @@ release_require_plist_type() {
 
 release_validate_public_update_baseline_app_identity() {
   local app_path="$1"
+  local expected_bundle_name="${2:-$USHOT_APP_BUNDLE}"
   local info_plist="$app_path/Contents/Info.plist"
   local executable="$app_path/Contents/MacOS/$USHOT_EXECUTABLE_NAME"
   local sparkle_binary="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
@@ -390,8 +440,8 @@ release_validate_public_update_baseline_app_identity() {
   local absent_key
 
   [[ -d "$app_path" ]] || release_die "Public update baseline app bundle not found: $app_path"
-  [[ "$(basename "$app_path")" == "$USHOT_APP_BUNDLE" ]] \
-    || release_die "Public update baseline must be named $USHOT_APP_BUNDLE: $app_path"
+  [[ "$(basename "$app_path")" == "$expected_bundle_name" ]] \
+    || release_die "Public update baseline must be named $expected_bundle_name: $app_path"
   [[ -f "$info_plist" ]] || release_die "Public update baseline Info.plist not found: $info_plist"
 
   for string_key in \
@@ -507,13 +557,14 @@ release_validate_supported_installed_app_identity() {
   local app_path="$1"
   local version="$2"
   local build_number="$3"
+  local expected_bundle_name="${4:-$USHOT_APP_BUNDLE}"
 
   if [[ "$version" == "$USHOT_PUBLIC_UPDATE_BASELINE_VERSION" \
       && "$build_number" == "$USHOT_PUBLIC_UPDATE_BASELINE_BUILD" ]]; then
-    release_validate_public_update_baseline_app_identity "$app_path"
+    release_validate_public_update_baseline_app_identity "$app_path" "$expected_bundle_name"
     return
   fi
-  release_validate_app_identity "$app_path" "$version" "$build_number"
+  release_validate_app_identity "$app_path" "$version" "$build_number" "$expected_bundle_name"
 }
 
 release_validate_screen_capture_kit_runtime_compatibility() {
@@ -581,6 +632,7 @@ release_validate_app_identity() {
   local app_path="$1"
   local expected_version="$2"
   local expected_build="$3"
+  local expected_bundle_name="${4:-$USHOT_APP_BUNDLE}"
   local info_plist="$app_path/Contents/Info.plist"
   local executable="$app_path/Contents/MacOS/$USHOT_EXECUTABLE_NAME"
   local sparkle_binary="$app_path/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
@@ -599,8 +651,8 @@ release_validate_app_identity() {
   fi
 
   [[ -d "$app_path" ]] || release_die "App bundle not found: $app_path"
-  [[ "$(basename "$app_path")" == "$USHOT_APP_BUNDLE" ]] \
-    || release_die "Release product must be named $USHOT_APP_BUNDLE: $app_path"
+  [[ "$(basename "$app_path")" == "$expected_bundle_name" ]] \
+    || release_die "Release product must be named $expected_bundle_name: $app_path"
   [[ -f "$info_plist" ]] || release_die "App Info.plist not found: $info_plist"
   local string_key
   for string_key in \
@@ -649,6 +701,12 @@ release_validate_app_identity() {
     || release_die "Built app has an unexpected bundle identifier."
   [[ "$(release_plist_value "$info_plist" CFBundleName)" == "$USHOT_PRODUCT_NAME" ]] \
     || release_die "Built app has an unexpected product name."
+  if /usr/bin/plutil -type CFBundleDisplayName "$info_plist" >/dev/null 2>&1 \
+      || release_version_is_strictly_greater \
+        "$expected_version" \
+        "$USHOT_DISPLAY_IDENTITY_LEGACY_MAX_VERSION"; then
+    release_validate_app_display_identity "$app_path"
+  fi
   [[ "$(release_plist_value "$info_plist" CFBundleExecutable)" == "$USHOT_EXECUTABLE_NAME" ]] \
     || release_die "Built app has an unexpected executable name."
   [[ "$(release_plist_value "$info_plist" CFBundleShortVersionString)" == "$expected_version" ]] \

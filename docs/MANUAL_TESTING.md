@@ -19,7 +19,8 @@ This section covers four rollout stages with independent publication gates: hist
 
 ### Public artifact identity
 
-- [ ] From a clean release workspace, confirm the tag, `CFBundleShortVersionString`, `CFBundleVersion` and release manifest agree and the bundle identifier is exactly `io.github.ischeneycc.ushot`
+- [ ] From a clean release workspace, confirm the tag, `CFBundleShortVersionString`, `CFBundleVersion` and release manifest agree; the Release bundle identifier is exactly `io.github.ischeneycc.ushot`, `xcodebuild -showBuildSettings` resolves the Debug host to exactly `io.github.ischeneycc.ushot.debug`, and both configurations resolve `REGISTER_WITH_LAUNCH_SERVICES=NO`
+- [ ] Confirm the built Release has `CFBundleDisplayName=Ushot`, `CFBundleName=Ushot`, `CFBundleIconName=AppIcon`, `CFBundleIconFile=AppIcon`, and nonempty regular `AppIcon.icns` and `Assets.car` resources
 - [ ] Confirm the release contains exactly the expected versioned assets: `Ushot-<semver>-arm64.dmg`, `Ushot-<semver>-arm64.zip`, `Ushot-<semver>-arm64.dSYM.zip`, `Ushot-<semver>-arm64.release-manifest.json` and `SHA256SUMS.txt`; verify every checksum after downloading the assets back from GitHub
 - [ ] Inspect the public app and confirm it is intentionally ad-hoc signed, has no Team ID, Apple Development/Developer ID authority or `get-task-allow`, and uses the public configuration with Hardened Runtime disabled. Confirm the DMG is unsigned and not notarized. A local Apple Development-signed result is not a substitute
 - [ ] Confirm the ZIP contains the same application bytes and metadata as the DMG's `Ushot.app`; neither archive may contain private keys, credentials, local paths, history, screenshots or unrelated build products
@@ -49,8 +50,8 @@ This section covers four rollout stages with independent publication gates: hist
 ### First installation
 
 - [ ] Download the DMG only from `https://github.com/isCheneycc/ushot/releases`, compare it with `SHA256SUMS.txt`, drag `Ushot.app` into `/Applications`, and record the initial Gatekeeper result on a clean standard user account
-- [ ] Run `xattr -dr com.apple.quarantine "/Applications/Ushot.app"`, then verify only `com.apple.quarantine` was removed and unrelated extended attributes were not cleared. Confirm `xattr -cr`, `sudo` and a broad recursive path are never required
-- [ ] Run `open "/Applications/Ushot.app"`; confirm the expected Ushot process launches from `/Applications/Ushot.app`, its bundle identity/version match the release manifest, and no update request occurs during launch or idle time
+- [ ] Run `xattr -d com.apple.quarantine "/Applications/Ushot.app"`, then verify only the app bundle's `com.apple.quarantine` attribute was removed and unrelated extended attributes were not cleared. Confirm `xattr -cr`, recursive removal, `sudo` and a broad path are never required
+- [ ] Run `open "/Applications/Ushot.app"`; confirm the expected Ushot process launches from `/Applications/Ushot.app`, its bundle identity/version match the release manifest, System Settings shows `Ushot` with the real application icon, and no update request occurs during launch or idle time
 - [ ] Repeat with a copy from an untrusted/mutated location only as a negative documentation review: instructions must never tell the user to bypass Gatekeeper for that copy
 
 ### Manual update privacy
@@ -74,6 +75,14 @@ This section covers four rollout stages with independent publication gates: hist
 - [ ] Re-test Screen Recording and optional Accessibility behavior after replacement. Record whether each authorization survives; if either must be granted again, verify the shipped README and release notes say so accurately
 - [ ] Choose **Check for Updates…** again from the new version and confirm Sparkle reports that 0.1.4 is current without downloading the same archive
 - [ ] Repeat with a skipped-version path when two or more public versions exist. Confirm update ordering follows the appcast and never installs an older/equal build as a newer release
+
+### 0.1.9 → 0.1.10 Screen Recording identity repair
+
+- [ ] Start from the exact published Ushot 0.1.9 public app on a clean or disposable account. Record the installed path, code-signing identity, LaunchServices record and Screen Recording row before update; confirm the public bundle contains `CFBundleName=Ushot` and both icon resources but lacks the new explicit display-name gate
+- [ ] Exercise the signed 0.1.9 → 0.1.10 update through the exact production URL. After atomic replacement and relaunch, confirm the running executable and manifest identify 0.1.10 (build 11), System Settings shows `Ushot` with the real icon, capture succeeds after any required visible reauthorization, and no deleted Debug, UI-test, mounted image or backup path owns the production permission identity
+- [ ] Build and launch a Debug host after the update. Confirm its identifier is exactly `io.github.ischeneycc.ushot.debug`, its preferences and Application Support data are isolated, it does not appear as the production Ushot permission row, and the installed Release remains the sole production LaunchServices record
+- [ ] Exercise local install registration failure, launch failure and rollback fixtures. Confirm a failed replacement is unregistered before it moves to a `.app.backup` path, the restored application is registered and verified before relaunch, and no recoverable or disposable bundle remains attributable under `io.github.ischeneycc.ushot`
+- [ ] Choose **Check for Updates…** from the updated app and confirm Sparkle reports 0.1.10 as current without downloading again. Close and reopen System Settings once to prove its displayed name and icon do not depend on a stale preference pane snapshot
 
 ### Authenticity and failure handling
 

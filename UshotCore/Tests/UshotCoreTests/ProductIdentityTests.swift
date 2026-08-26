@@ -27,6 +27,43 @@ final class ProductIdentityTests: XCTestCase {
         )
     }
 
+    func testRuntimeIdentitySeparatesDebugFromProductionState() throws {
+        let production = try XCTUnwrap(ProductIdentity.runtimeIdentity(
+            forBundleIdentifier: ProductIdentity.bundleIdentifier
+        ))
+        let debug = try XCTUnwrap(ProductIdentity.runtimeIdentity(
+            forBundleIdentifier: ProductIdentity.debugBundleIdentifier
+        ))
+
+        XCTAssertEqual(production.kind, .production)
+        XCTAssertTrue(production.isProduction)
+        XCTAssertEqual(
+            production.applicationSupportDirectoryName,
+            "io.github.ischeneycc.ushot"
+        )
+
+        XCTAssertEqual(debug.kind, .debug)
+        XCTAssertFalse(debug.isProduction)
+        XCTAssertEqual(debug.bundleIdentifier, "io.github.ischeneycc.ushot.debug")
+        XCTAssertEqual(
+            debug.applicationSupportDirectoryName,
+            "io.github.ischeneycc.ushot.debug"
+        )
+        XCTAssertNotEqual(
+            debug.applicationSupportDirectoryName,
+            production.applicationSupportDirectoryName
+        )
+    }
+
+    func testRuntimeIdentityRejectsUnknownBundleIdentifiers() {
+        XCTAssertNil(ProductIdentity.runtimeIdentity(
+            forBundleIdentifier: "io.github.ischeneycc.ushot.tests"
+        ))
+        XCTAssertNil(ProductIdentity.runtimeIdentity(
+            forBundleIdentifier: "com.example.untrusted"
+        ))
+    }
+
     func testLegacyIdentityRemainsAvailableForOneTimeMigration() {
         XCTAssertEqual(ProductIdentity.legacyBundleIdentifier, "com.example.UshotApp")
         XCTAssertEqual(

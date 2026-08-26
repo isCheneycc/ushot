@@ -2,8 +2,14 @@ import AppKit
 import XCTest
 
 final class UshotAppUITests: XCTestCase {
+    private let isolatedTargetBundleIdentifier = "io.github.ischeneycc.ushot.debug"
     private let isolatedSettingsSuiteName =
         "io.github.ischeneycc.ushot.UITests.\(UUID().uuidString)"
+
+    func testTargetApplicationUsesTheIsolatedDebugIdentity() throws {
+        let targetBundle = try XCTUnwrap(Bundle(url: targetApplicationURL()))
+        XCTAssertEqual(targetBundle.bundleIdentifier, isolatedTargetBundleIdentifier)
+    }
 
     @MainActor
     func testSettingsOpensAndDockToggleChangesValue() {
@@ -2107,6 +2113,10 @@ final class UshotAppUITests: XCTestCase {
         precondition(
             FileManager.default.fileExists(atPath: applicationURL.path),
             "The UI test target application is missing at \(applicationURL.path)."
+        )
+        precondition(
+            Bundle(url: applicationURL)?.bundleIdentifier == isolatedTargetBundleIdentifier,
+            "UI tests must not launch Ushot with the production bundle identifier."
         )
         return applicationURL
     }
