@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-08-27
+
+### Changed
+
+- Keep newly drawn region-confirmation annotations visually unselected after commit, and show their supported edit controls only after a later explicit selection.
+- Replace Option-Up/Down smart-snap hierarchy navigation with Tab and Shift-Tab while retaining Option-scroll.
+
+### Fixed
+
+- Remove the initial dead zone and closed-hand cursor flash when slowly resizing a selected region annotation.
+- Reset a manually raised smart-snap ancestor when the deepest hovered control changes, keeping the HUD level, visible border and accepted capture frame synchronized.
+- Keep region-confirmation resize controls from stealing near-edge annotation gestures by limiting the invisible border band to 2 pt inside the canvas while retaining the complete border and exterior margin as resize targets.
+- Clear the selected region annotation when empty canvas is short-clicked with a gesture-creation tool still active, without requiring a switch back to Select.
+
 ## [0.1.11] - 2026-08-26
 
 ### Added
@@ -160,7 +174,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Limited the manual Gatekeeper workaround to removing `com.apple.quarantine` from an official Ushot release instead of clearing every extended attribute.
 - Defined the Sparkle EdDSA private key as release-critical secret material requiring protected storage, an independent encrypted backup and an exercised recovery process.
 
-[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.12...HEAD
+[0.1.12]: https://github.com/isCheneycc/ushot/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/isCheneycc/ushot/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/isCheneycc/ushot/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/isCheneycc/ushot/compare/v0.1.8...v0.1.9

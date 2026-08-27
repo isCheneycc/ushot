@@ -223,9 +223,12 @@ public final class AnnotationDocumentController: ObservableObject {
         )
     }
 
-    public func add(_ item: AnnotationItem) {
+    /// Adds an annotation and publishes its document plus post-add selection
+    /// as one state. Region confirmation passes `false` so a committed mark
+    /// has no edit chrome until the user explicitly selects it later.
+    public func add(_ item: AnnotationItem, selectsAddedItem: Bool = true) {
         commit(label: "Add \(item.kind.rawValue)", selectionAfterChange: { _, _ in
-            [item.id]
+            selectsAddedItem ? [item.id] : []
         }) { document in
             var item = item
             item.zIndex = document.annotations.count

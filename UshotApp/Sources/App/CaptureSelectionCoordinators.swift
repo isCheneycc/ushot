@@ -552,17 +552,16 @@ final class RegionSelectionCoordinator {
             }
         case 49:
             if !isSelectionLocked { isSpacePressed = true }
+        case 48:
+            let unsupportedModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
+            guard event.modifierFlags.intersection(unsupportedModifiers).isEmpty else { break }
+            let towardParent = !event.modifierFlags.contains(.shift)
+            cycleSnapTarget(
+                towardParent: towardParent,
+                reason: towardParent ? "tab" : "shift-tab"
+            )
         case 123, 124, 125, 126:
-            if !isSelectionLocked,
-               selection == nil,
-               event.modifierFlags.contains(.option),
-               (event.keyCode == 125 || event.keyCode == 126)
-            {
-                cycleSnapTarget(
-                    towardParent: event.keyCode == 126,
-                    reason: "option-arrow"
-                )
-            } else if !isSelectionLocked {
+            if !isSelectionLocked {
                 nudgeSelection(keyCode: event.keyCode, largeStep: event.modifierFlags.contains(.shift))
             }
         default:
@@ -708,16 +707,19 @@ final class RegionSelectionCoordinator {
                         && $0.contains(point)
                         && $0 != windowFrame
                 }
-            if snapCandidateKind == .interfaceElement,
-               let snapCandidate,
-               snapCandidate.contains(point),
-               !controlFrames.contains(snapCandidate)
-            {
-                // The frozen target cannot move underneath the overlay. Retain
-                // a previously verified frame when a web accessibility tree
-                // transiently returns a different descendant path.
-                controlFrames.append(snapCandidate)
+            // The frozen target cannot move underneath the overlay. Retain the
+            // complete previously verified control path while each frame still
+            // contains the pointer, so a transient web accessibility response
+            // cannot discard the child level needed to descend from a parent.
+            let retainedControlFrames = snapTargets.compactMap { target -> CGRect? in
+                guard target.kind == .interfaceElement,
+                      target.frame.contains(point),
+                      target.frame != windowFrame,
+                      !controlFrames.contains(target.frame)
+                else { return nil }
+                return target.frame
             }
+            controlFrames.append(contentsOf: retainedControlFrames)
             controlFrames = controlFrames.reduce(into: []) { result, frame in
                 if !result.contains(frame) {
                     result.append(frame)
@@ -738,16 +740,25 @@ final class RegionSelectionCoordinator {
             let targets = controlFrames.map {
                 SnapTarget(frame: $0, kind: .interfaceElement)
             } + [SnapTarget(frame: windowFrame, kind: .window)]
+            let hierarchyLeafIsUnchanged = snapWindowID == request.window.id
+                && snapTargets.first == targets.first
+            let preservesUserAdjustment = snapLevelWasUserAdjusted
+                && hierarchyLeafIsUnchanged
+            if snapLevelWasUserAdjusted && !preservesUserAdjustment {
+                AppLog.capture.debug(
+                    "Reset smart region hierarchy choice after hovered leaf changed: windowID=\(request.window.id, privacy: .public), previousLevel=\(self.selectedSnapTargetIndex + 1, privacy: .public)/\(self.snapTargets.count, privacy: .public), newLevels=\(targets.count, privacy: .public)"
+                )
+            }
             let selectedIndex = selectedIndex(
                 in: targets,
-                preserving: snapCandidate,
-                userAdjusted: snapLevelWasUserAdjusted
+                preserving: hierarchyLeafIsUnchanged ? snapCandidate : nil,
+                userAdjusted: preservesUserAdjustment
             )
             publishSnapTargets(
                 targets,
                 selectedIndex: selectedIndex,
                 windowID: request.window.id,
-                userAdjusted: snapLevelWasUserAdjusted,
+                userAdjusted: preservesUserAdjustment,
                 reason: "accessibility-hierarchy"
             )
         case .accessibilityPermissionRequired:

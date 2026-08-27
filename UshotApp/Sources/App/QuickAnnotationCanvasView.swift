@@ -246,6 +246,9 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     var onEditingContextWillChange: ((String) -> Void)?
 
     private let session: AnnotationEditingSession
+    /// Region confirmation keeps newly committed annotations visually clean.
+    /// Other editing surfaces retain their existing add-and-select workflow.
+    private let selectsNewAnnotationsAfterCommit: Bool
     private let vectorRenderer = AnnotationVectorRenderer()
     /// Drawing is demand-driven and may repeat many times for one document
     /// generation. Keep deterministic vector failures visible without
@@ -3227,9 +3230,14 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 #endif
 
-    init(session: AnnotationEditingSession, drawsBaseImage: Bool = true) {
+    init(
+        session: AnnotationEditingSession,
+        drawsBaseImage: Bool = true,
+        selectsNewAnnotationsAfterCommit: Bool = true
+    ) {
         self.session = session
         self.drawsBaseImage = drawsBaseImage
+        self.selectsNewAnnotationsAfterCommit = selectsNewAnnotationsAfterCommit
         baseImage = NSImage(cgImage: session.baseImage.image, size: session.baseImage.logicalSize)
         previewImage = NSImage(cgImage: session.previewImage.image, size: session.previewImage.logicalSize)
         authoritativeImage = NSImage(
@@ -4352,6 +4360,14 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         }
         if event.modifierFlags.contains(.option) { return }
         if session.currentTool == .select { return }
+        if let startPoint,
+           resolveRegionCreationToolClick(
+               from: startPoint,
+               to: end
+           )
+        {
+            return
+        }
         if session.currentTool == .text {
             guard let startPoint,
                   !textInteractionExceededDragThreshold(from: startPoint, to: end)
@@ -4361,6 +4377,38 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         }
         guard let startPoint else { return }
         commit(tool: session.currentTool, start: startPoint, end: end)
+    }
+
+    private func resolveRegionCreationToolClick(
+        from start: CGPoint,
+        to end: CGPoint
+    ) -> Bool {
+        guard !selectsNewAnnotationsAfterCommit,
+              !textInteractionExceededDragThreshold(from: start, to: end)
+        else { return false }
+        switch session.currentTool {
+        case .rectangle, .ellipse, .line, .arrow, .freehand,
+             .mosaic, .blur, .highlight, .spotlight:
+            break
+        case .select, .text, .counter, .crop:
+            return false
+        }
+        if let item = session.controller.topmostItem(at: end) {
+            session.controller.selectedItemIDs = [item.id]
+            session.adoptCurrentStyle(item.style, origin: .existingAnnotation)
+            AppLog.capture.notice(
+                "Selected an existing region annotation after a creation-tool click: kind=\(item.kind.rawValue, privacy: .public), tool=\(self.session.currentTool.rawValue, privacy: .public)"
+            )
+        } else {
+            let clearedSelectionCount = session.controller.selectedItemIDs.count
+            session.controller.selectedItemIDs.removeAll()
+            if clearedSelectionCount > 0 {
+                AppLog.capture.notice(
+                    "Cleared region annotation selection after an empty creation-tool click: tool=\(self.session.currentTool.rawValue, privacy: .public), clearedSelection=\(clearedSelectionCount, privacy: .public)"
+                )
+            }
+        }
+        return true
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
@@ -4541,7 +4589,12 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             add(kind: .arrow, geometry: .line(start: start, end: end), style: style, minimumRect: rect)
         case .freehand:
             guard freehandPoints.count > 1 else { return }
-            session.controller.add(AnnotationItem(kind: .freehand, zIndex: zIndex, geometry: .path(freehandPoints), style: style))
+            addNewAnnotation(AnnotationItem(
+                kind: .freehand,
+                zIndex: zIndex,
+                geometry: .path(freehandPoints),
+                style: style
+            ))
         case .mosaic:
             add(kind: .mosaic, geometry: .rect(rect), style: style, minimumRect: rect)
         case .blur:
@@ -4567,8 +4620,23 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             minimumRect: CGRect
         ) {
             guard minimumRect.width >= 2, minimumRect.height >= 2 else { return }
-            session.controller.add(AnnotationItem(kind: kind, zIndex: zIndex, geometry: geometry, style: style))
+            addNewAnnotation(AnnotationItem(
+                kind: kind,
+                zIndex: zIndex,
+                geometry: geometry,
+                style: style
+            ))
         }
+    }
+
+    private func addNewAnnotation(_ item: AnnotationItem) {
+        session.controller.add(
+            item,
+            selectsAddedItem: selectsNewAnnotationsAfterCommit
+        )
+        AppLog.capture.notice(
+            "Committed new canvas annotation: kind=\(item.kind.rawValue, privacy: .public), selectsAddedItem=\(self.selectsNewAnnotationsAfterCommit, privacy: .public), selectedAfterCommit=\(self.session.controller.selectedItemIDs.count, privacy: .public)"
+        )
     }
 
     private func style(for tool: AnnotationTool) -> AnnotationStyle {
@@ -4588,7 +4656,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         let diameter: CGFloat = 28
         var style = style(for: .counter)
         style.fontSize = 15
-        session.controller.add(AnnotationItem(
+        addNewAnnotation(AnnotationItem(
             kind: .counter,
             zIndex: session.controller.document.annotations.count,
             geometry: .rect(CGRect(x: point.x - diameter / 2, y: point.y - diameter / 2, width: diameter, height: diameter)),
@@ -4864,7 +4932,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     text: text,
                     textLayout: commitLayout.payload
                 )
-                session.controller.add(item)
+                addNewAnnotation(item)
                 committedStyleForSession = editingState.style
             }
             outcome = "committed"
@@ -5360,13 +5428,23 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             return
         }
         if !interaction.hasMoved {
-            interaction.hasMoved = textInteractionExceededDragThreshold(
-                from: interaction.startPoint,
-                to: point
-            )
+            switch interaction.mode {
+            case .stationary:
+                preconditionFailure("A stationary annotation interaction cannot begin moving.")
+            case .move:
+                interaction.hasMoved = textInteractionExceededDragThreshold(
+                    from: interaction.startPoint,
+                    to: point
+                )
+            case .resize:
+                interaction.hasMoved = selectionResizeHasPointerMovement(
+                    from: interaction.startPoint,
+                    to: point
+                )
+            }
             guard interaction.hasMoved else {
                 selectionInteraction = interaction
-                NSCursor.closedHand.set()
+                activeSelectionInteractionCursor?.set()
                 return
             }
         }
@@ -8156,6 +8234,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         let viewStart = viewPoint(fromDocumentPoint: start)
         let viewEnd = viewPoint(fromDocumentPoint: end)
         return hypot(viewEnd.x - viewStart.x, viewEnd.y - viewStart.y) >= 4
+    }
+
+    private func selectionResizeHasPointerMovement(from start: CGPoint, to end: CGPoint) -> Bool {
+        viewPoint(fromDocumentPoint: start) != viewPoint(fromDocumentPoint: end)
     }
 
     private func maxFrameDelta(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
