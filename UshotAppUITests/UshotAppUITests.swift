@@ -342,7 +342,7 @@ final class UshotAppUITests: XCTestCase {
     }
 
     @MainActor
-    func testRegionSelectionKeepsBrowserControlStableAndCyclesParents() {
+    func testRegionSelectionKeepsBrowserControlStableAndResetsParentForNewLeaf() {
         let app = launch(arguments: [
             "--uitest-reset-settings",
             "--uitest-region-selection",
@@ -364,7 +364,7 @@ final class UshotAppUITests: XCTestCase {
         waitForValue(of: overlay, containing: "snapLevel=1/3")
         waitForValue(of: overlay, containing: "snapStabilityFallbacks=0")
 
-        app.typeKey(.upArrow, modifierFlags: .option)
+        app.typeKey(.tab, modifierFlags: [])
         waitForValue(of: overlay, containing: "snapLevel=2/3")
 
         // Move outside the inner control but remain inside its selected parent.
@@ -374,26 +374,31 @@ final class UshotAppUITests: XCTestCase {
         waitForValue(of: overlay, containing: "snapLevel=1/2")
         waitForValue(of: overlay, containing: "snapStabilityFallbacks=0")
 
-        app.typeKey(.upArrow, modifierFlags: .option)
+        app.typeKey(.tab, modifierFlags: [])
         waitForValue(of: overlay, containing: "snap=window")
         waitForValue(of: overlay, containing: "snapLevel=2/2")
-        app.typeKey(.downArrow, modifierFlags: .option)
+        app.typeKey(.tab, modifierFlags: .shift)
         waitForValue(of: overlay, containing: "snap=interface-element")
         waitForValue(of: overlay, containing: "snapLevel=1/2")
 
-        overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.50)).click()
+        // Returning to the deepest control must reset the prior parent choice.
+        // The HUD level and accepted frame must advance as one state update.
+        overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.40, dy: 0.48)).hover()
+        waitForValue(of: overlay, containing: "snap=interface-element")
+        waitForValue(of: overlay, containing: "snapLevel=1/3")
+        overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.40, dy: 0.48)).click()
         let canvas = app.groups["pinned.canvas"]
         XCTAssertTrue(canvas.waitForExistence(timeout: 3))
-        let expectedParent = CGRect(
-            x: overlay.frame.minX + overlay.frame.width * 0.22,
-            y: overlay.frame.minY + overlay.frame.height * (1 - 0.24 - 0.40),
-            width: overlay.frame.width * 0.44,
-            height: overlay.frame.height * 0.40
+        let expectedControl = CGRect(
+            x: overlay.frame.minX + overlay.frame.width * 0.32,
+            y: overlay.frame.minY + overlay.frame.height * (1 - 0.38 - 0.20),
+            width: overlay.frame.width * 0.24,
+            height: overlay.frame.height * 0.20
         ).integral
-        XCTAssertEqual(canvas.frame.minX, expectedParent.minX, accuracy: 3)
-        XCTAssertEqual(canvas.frame.minY, expectedParent.minY, accuracy: 3)
-        XCTAssertEqual(canvas.frame.width, expectedParent.width, accuracy: 3)
-        XCTAssertEqual(canvas.frame.height, expectedParent.height, accuracy: 3)
+        XCTAssertEqual(canvas.frame.minX, expectedControl.minX, accuracy: 3)
+        XCTAssertEqual(canvas.frame.minY, expectedControl.minY, accuracy: 3)
+        XCTAssertEqual(canvas.frame.width, expectedControl.width, accuracy: 3)
+        XCTAssertEqual(canvas.frame.height, expectedControl.height, accuracy: 3)
         app.buttons["capture.region.cancel"].click()
         XCTAssertTrue(overlay.waitForNonExistence(timeout: 3))
     }
@@ -438,6 +443,9 @@ final class UshotAppUITests: XCTestCase {
         waitForValue(of: resizeChrome, containing: "handleAlignment=border")
         waitForValue(of: resizeChrome, containing: "borderHitTarget=full")
         waitForValue(of: resizeChrome, containing: "interiorHitTarget=canvas")
+        waitForValue(of: resizeChrome, containing: "edgeInteriorHitDepth=2")
+        waitForValue(of: resizeChrome, containing: "handleInteriorHitDepth=4")
+        waitForValue(of: resizeChrome, containing: "exteriorHitDepth=10")
         XCTAssertTrue(app.descendants(matching: .any)["capture.region.toolbar"].waitForExistence(timeout: 3))
         let rectangleTool = app.checkBoxes["pinned.tool.rectangle"]
         XCTAssertTrue(rectangleTool.waitForExistence(timeout: 3))
@@ -1411,6 +1419,14 @@ final class UshotAppUITests: XCTestCase {
             withNormalizedOffset: CGVector(dx: 0.62, dy: 0.58)
         )
         thinStart.press(forDuration: 0.1, thenDragTo: thinEnd)
+        waitForValue(of: canvas, containing: "selectionHandles=0")
+        documentCoordinate(
+            CGPoint(
+                x: canvas.frame.width * 0.43,
+                y: canvas.frame.height * 0.54
+            ),
+            in: canvas
+        ).click()
         let thinBounds = try waitForSerializedRect(
             in: canvas,
             marker: "selectionBounds=",
@@ -1448,21 +1464,16 @@ final class UshotAppUITests: XCTestCase {
         )
         XCTAssertGreaterThan(resizedBounds.height, thinBounds.height * 5)
 
-        let select = app.checkBoxes["pinned.tool.select"]
-        XCTAssertTrue(select.waitForExistence(timeout: 3))
-        select.click()
-        waitForValue(of: canvas, containing: "tool=select")
-        waitForValue(of: canvas, containing: "color=#FF3B30")
-
         documentCoordinate(
             CGPoint(x: canvas.frame.width * 0.85, y: canvas.frame.height * 0.15),
             in: canvas
         ).click()
         waitForValue(of: canvas, containing: "selectionHandles=0")
+        waitForValue(of: canvas, containing: "tool=highlight")
         assertSameFrame(
             resizedBounds,
             try annotationBounds(of: canvas),
-            message: "Deselecting a resized highlight must not mutate its document geometry."
+            message: "Deselecting a resized highlight with its creation tool active must not mutate its document geometry."
         )
 
         documentCoordinate(

@@ -446,7 +446,7 @@ private struct InterfaceElementRecognitionSettingsSection: View {
             }
             Text("Window snapping works without extra permission. Accessibility access adds controls such as buttons, text fields, sidebars, and panels.")
                 .foregroundStyle(.secondary)
-            Text("During capture, use Option-Up/Down or Option-scroll to choose a control's parent or child level.")
+            Text("During capture, use Tab or Shift-Tab to choose the next or previous control level. Option-scroll remains available.")
                 .foregroundStyle(.secondary)
             HStack {
                 Button("Request Accessibility Access", action: onRequestAccessibility)

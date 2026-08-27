@@ -1856,6 +1856,33 @@ final class UshotCoreFoundationTests: XCTestCase {
     }
 
     @MainActor
+    func testAnnotationAddCanRemainUnselectedUntilExplicitReselection() {
+        let controller = AnnotationDocumentController(document: AnnotationTestSupport.document())
+        let item = AnnotationItem(
+            kind: .rectangle,
+            zIndex: 0,
+            geometry: .rect(CGRect(x: 4, y: 6, width: 24, height: 18))
+        )
+        var observedStates: [AnnotationDocumentController.State] = []
+        let observation = controller.$state.sink { observedStates.append($0) }
+
+        controller.add(item, selectsAddedItem: false)
+
+        XCTAssertEqual(controller.document.annotations.map(\.id), [item.id])
+        XCTAssertTrue(controller.selectedItemIDs.isEmpty)
+        XCTAssertEqual(observedStates.count, 2)
+        XCTAssertEqual(observedStates.last?.document.annotations.map(\.id), [item.id])
+        XCTAssertTrue(observedStates.last?.selectedItemIDs.isEmpty == true)
+
+        controller.selectedItemIDs = [item.id]
+
+        XCTAssertEqual(controller.selectedItemIDs, [item.id])
+        XCTAssertEqual(observedStates.count, 3)
+        XCTAssertEqual(observedStates.last?.selectedItemIDs, [item.id])
+        withExtendedLifetime(observation) {}
+    }
+
+    @MainActor
     func testAnnotationCanvasRebasePreservesUndoRedoTimeline() {
         var document = AnnotationTestSupport.document()
         document.crop = CropState(rect: CGRect(x: 10, y: 20, width: 40, height: 30))
@@ -4301,6 +4328,33 @@ func blurAndMosaicRemainAnchoredWhenSelectionMoves() {
         #expect(selectionGeometry.handlePoints(for: item).isEmpty)
     }
     #expect(selectionGeometry.handlePoints(for: items[2]).count == 8)
+}
+
+@Test @MainActor
+func annotationAddCanRemainUnselectedUntilExplicitReselection() {
+    let controller = AnnotationDocumentController(document: AnnotationTestSupport.document())
+    let item = AnnotationItem(
+        kind: .rectangle,
+        zIndex: 0,
+        geometry: .rect(CGRect(x: 4, y: 6, width: 24, height: 18))
+    )
+    var observedStates: [AnnotationDocumentController.State] = []
+    let observation = controller.$state.sink { observedStates.append($0) }
+
+    controller.add(item, selectsAddedItem: false)
+
+    #expect(controller.document.annotations.map(\.id) == [item.id])
+    #expect(controller.selectedItemIDs.isEmpty)
+    #expect(observedStates.count == 2)
+    #expect(observedStates.last?.document.annotations.map(\.id) == [item.id])
+    #expect(observedStates.last?.selectedItemIDs.isEmpty == true)
+
+    controller.selectedItemIDs = [item.id]
+
+    #expect(controller.selectedItemIDs == [item.id])
+    #expect(observedStates.count == 3)
+    #expect(observedStates.last?.selectedItemIDs == [item.id])
+    withExtendedLifetime(observation) {}
 }
 
 @Test @MainActor

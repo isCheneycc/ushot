@@ -844,7 +844,8 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         )
         self.imageView = QuickAnnotationCanvasView(
             session: session,
-            drawsBaseImage: !presentationMode.isRegionDraft
+            drawsBaseImage: !presentationMode.isRegionDraft,
+            selectsNewAnnotationsAfterCommit: !presentationMode.isRegionDraft
         )
         let toolbarController = preparedToolbarController ?? PinnedShotToolbarController(
                 initialStyle: session.currentStyle,
@@ -3488,7 +3489,7 @@ private final class RegionDraftChromeView: NSView {
     }
 
     private let handleDiameter: CGFloat = 8
-    private let handleHitDiameter: CGFloat = 18
+    private let borderInteriorHitDepth: CGFloat = 2
     private var activeHandle: RegionSelectionResizeHandle?
 
     override init(frame frameRect: NSRect) {
@@ -3603,25 +3604,118 @@ private final class RegionDraftChromeView: NSView {
 
     private var accessibilityValue: String {
         let cornerRadius = effectiveCornerRadius(for: selectionRect.size)
-        return "handles=8; resize=\(isResizeEnabled ? "enabled" : "disabled"); borderInset=\(Int(Self.panelOutset)); handleAlignment=border; borderHitTarget=full; interiorHitTarget=canvas; cornerRadius=\(cornerRadius)"
+        return "handles=8; resize=\(isResizeEnabled ? "enabled" : "disabled"); borderInset=\(Int(Self.panelOutset)); handleAlignment=border; borderHitTarget=full; interiorHitTarget=canvas; edgeInteriorHitDepth=\(Int(borderInteriorHitDepth)); handleInteriorHitDepth=\(Int(handleDiameter / 2)); exteriorHitDepth=\(Int(Self.panelOutset)); cornerRadius=\(cornerRadius)"
     }
 
     private func resizeHitRegions() -> [(RegionSelectionResizeHandle, CGRect)] {
         let rect = selectionRect
-        let half = handleHitDiameter / 2
-        let cornerSpan = handleHitDiameter
-        let horizontalLength = max(0, rect.width - cornerSpan * 2)
-        let verticalLength = max(0, rect.height - cornerSpan * 2)
-        return [
-            (.northWest, CGRect(x: rect.minX - half, y: rect.maxY - half, width: handleHitDiameter, height: handleHitDiameter)),
-            (.northEast, CGRect(x: rect.maxX - half, y: rect.maxY - half, width: handleHitDiameter, height: handleHitDiameter)),
-            (.southEast, CGRect(x: rect.maxX - half, y: rect.minY - half, width: handleHitDiameter, height: handleHitDiameter)),
-            (.southWest, CGRect(x: rect.minX - half, y: rect.minY - half, width: handleHitDiameter, height: handleHitDiameter)),
-            (.north, CGRect(x: rect.minX + cornerSpan, y: rect.maxY - half, width: horizontalLength, height: handleHitDiameter)),
-            (.east, CGRect(x: rect.maxX - half, y: rect.minY + cornerSpan, width: handleHitDiameter, height: verticalLength)),
-            (.south, CGRect(x: rect.minX + cornerSpan, y: rect.minY - half, width: horizontalLength, height: handleHitDiameter)),
-            (.west, CGRect(x: rect.minX - half, y: rect.minY + cornerSpan, width: handleHitDiameter, height: verticalLength))
+        let handleInteriorDepth = handleDiameter / 2
+        let exteriorDepth = Self.panelOutset
+        // Preserve the visible handles as complete targets, but keep the
+        // enlarged acquisition area outside the annotation canvas. Between
+        // handles, only the blue border's immediate interior may claim input.
+        let northHandleBand = CGRect(
+            x: rect.minX - exteriorDepth,
+            y: rect.maxY - handleInteriorDepth,
+            width: rect.width + exteriorDepth * 2,
+            height: handleInteriorDepth + exteriorDepth
+        )
+        let southHandleBand = CGRect(
+            x: rect.minX - exteriorDepth,
+            y: rect.minY - exteriorDepth,
+            width: rect.width + exteriorDepth * 2,
+            height: exteriorDepth + handleInteriorDepth
+        )
+        let westHandleBand = CGRect(
+            x: rect.minX - exteriorDepth,
+            y: rect.minY - exteriorDepth,
+            width: exteriorDepth + handleInteriorDepth,
+            height: rect.height + exteriorDepth * 2
+        )
+        let eastHandleBand = CGRect(
+            x: rect.maxX - handleInteriorDepth,
+            y: rect.minY - exteriorDepth,
+            width: handleInteriorDepth + exteriorDepth,
+            height: rect.height + exteriorDepth * 2
+        )
+
+        let handleTargets: [(RegionSelectionResizeHandle, CGRect)] = [
+            (.northWest, CGRect(
+                x: westHandleBand.minX,
+                y: northHandleBand.minY,
+                width: westHandleBand.width,
+                height: northHandleBand.height
+            )),
+            (.north, CGRect(
+                x: rect.midX - handleInteriorDepth,
+                y: northHandleBand.minY,
+                width: handleDiameter,
+                height: northHandleBand.height
+            )),
+            (.northEast, CGRect(
+                x: eastHandleBand.minX,
+                y: northHandleBand.minY,
+                width: eastHandleBand.width,
+                height: northHandleBand.height
+            )),
+            (.east, CGRect(
+                x: eastHandleBand.minX,
+                y: rect.midY - handleInteriorDepth,
+                width: eastHandleBand.width,
+                height: handleDiameter
+            )),
+            (.southEast, CGRect(
+                x: eastHandleBand.minX,
+                y: southHandleBand.minY,
+                width: eastHandleBand.width,
+                height: southHandleBand.height
+            )),
+            (.south, CGRect(
+                x: rect.midX - handleInteriorDepth,
+                y: southHandleBand.minY,
+                width: handleDiameter,
+                height: southHandleBand.height
+            )),
+            (.southWest, CGRect(
+                x: westHandleBand.minX,
+                y: southHandleBand.minY,
+                width: westHandleBand.width,
+                height: southHandleBand.height
+            )),
+            (.west, CGRect(
+                x: westHandleBand.minX,
+                y: rect.midY - handleInteriorDepth,
+                width: westHandleBand.width,
+                height: handleDiameter
+            ))
         ]
+        let edgeTargets: [(RegionSelectionResizeHandle, CGRect)] = [
+            (.north, CGRect(
+                x: rect.minX,
+                y: rect.maxY - borderInteriorHitDepth,
+                width: rect.width,
+                height: borderInteriorHitDepth + exteriorDepth
+            )),
+            (.east, CGRect(
+                x: rect.maxX - borderInteriorHitDepth,
+                y: rect.minY,
+                width: borderInteriorHitDepth + exteriorDepth,
+                height: rect.height
+            )),
+            (.south, CGRect(
+                x: rect.minX,
+                y: rect.minY - exteriorDepth,
+                width: rect.width,
+                height: exteriorDepth + borderInteriorHitDepth
+            )),
+            (.west, CGRect(
+                x: rect.minX - exteriorDepth,
+                y: rect.minY,
+                width: exteriorDepth + borderInteriorHitDepth,
+                height: rect.height
+            ))
+        ]
+        return handleTargets + edgeTargets
     }
 
     private func cursor(for handle: RegionSelectionResizeHandle) -> NSCursor {
