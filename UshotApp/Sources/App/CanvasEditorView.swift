@@ -13,11 +13,18 @@ final class CanvasZoomModel: ObservableObject {
 }
 
 @MainActor
-final class CanvasEditorCommandGate {
+final class CanvasEditorCommandGate: ObservableObject {
+    @Published private(set) var isInteractionSuspended = false
     private weak var canvas: QuickAnnotationCanvasView?
+    private var inspectorFinalizer: (identifier: UUID, action: () throws -> Void)?
+
+#if DEBUG
+    var hasRegisteredCanvasForRegression: Bool { canvas != nil }
+#endif
 
     func register(_ canvas: QuickAnnotationCanvasView) {
         self.canvas = canvas
+        canvas.setInteractionSuspended(isInteractionSuspended)
     }
 
     func unregister(_ candidate: QuickAnnotationCanvasView?) {
@@ -26,6 +33,7 @@ final class CanvasEditorCommandGate {
     }
 
     func resolveActiveTextEditing(reason: String) -> Bool {
+        guard !isInteractionSuspended else { return false }
         guard let canvas else {
             AppLog.capture.fault(
                 "Rejected Canvas editor command without its registered canvas: reason=\(reason, privacy: .public)"
@@ -41,6 +49,40 @@ final class CanvasEditorCommandGate {
         }
         return true
     }
+
+    func registerInspectorFinalizer(identifier: UUID, action: @escaping () throws -> Void) {
+        inspectorFinalizer = (identifier, action)
+    }
+
+    func unregisterInspectorFinalizer(identifier: UUID) {
+        guard inspectorFinalizer?.identifier == identifier else { return }
+        inspectorFinalizer = nil
+    }
+
+    func prepareForHistoryFinalization(reason: String) throws {
+        guard !isInteractionSuspended else { return }
+        guard let canvas, !canvas.hasActivePointerInteraction else {
+            throw ScreenshotAppError.historyPersistenceFailed(
+                description: String(localized: "Finish the active annotation gesture before closing the editor.")
+            )
+        }
+        guard resolveActiveTextEditing(reason: reason),
+              canvas.window?.makeFirstResponder(nil) == true
+        else {
+            throw ScreenshotAppError.historyPersistenceFailed(
+                description: String(localized: "The active text could not be committed. The editor remains open.")
+            )
+        }
+        // SwiftUI draft publication may still be queued when the close button
+        // fires. Resolve its live value before freezing the document snapshot.
+        try inspectorFinalizer?.action()
+        setInteractionSuspended(true)
+    }
+
+    func setInteractionSuspended(_ suspended: Bool) {
+        isInteractionSuspended = suspended
+        canvas?.setInteractionSuspended(suspended)
+    }
 }
 
 struct CanvasEditorRootView: View {
@@ -51,7 +93,7 @@ struct CanvasEditorRootView: View {
     @State private var inspectorMode = 0
     @State private var canvasEditTransaction: AnnotationDocumentController.ContinuousEditToken?
 
-    let commandGate: CanvasEditorCommandGate
+    @ObservedObject var commandGate: CanvasEditorCommandGate
 
     let onCopy: () -> Void
     let onExport: () -> Void
@@ -86,9 +128,7 @@ struct CanvasEditorRootView: View {
                     editorSettings: settingsStore.settings.editor,
                     zoomModel: zoom,
                     commandGate: commandGate,
-                    onCopy: {
-                        performCanvasCommand(reason: "keyboard-copy", action: onCopy)
-                    }
+                    onCopy: onCopy
                 )
                     .background(Color(nsColor: .underPageBackgroundColor))
                 Divider()
@@ -98,6 +138,7 @@ struct CanvasEditorRootView: View {
             inspector
                 .frame(width: 280)
         }
+        .disabled(commandGate.isInteractionSuspended)
         .onDisappear {
             if let transaction = canvasEditTransaction {
                 _ = controller.commitContinuousEdit(transaction)
@@ -144,18 +185,18 @@ struct CanvasEditorRootView: View {
                 .accessibilityLabel("Fit canvas in window")
             Spacer()
             Button {
-                performCanvasCommand(reason: "copy", action: onCopy)
+                onCopy()
             } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }
             Button {
-                performCanvasCommand(reason: "export", action: onExport)
+                onExport()
             } label: {
                 Label("Export", systemImage: "square.and.arrow.up")
             }
                 .buttonStyle(.borderedProminent)
             Button("Done") {
-                performCanvasCommand(reason: "done", action: onDone)
+                onDone()
             }
         }
         .buttonStyle(.borderless)
@@ -226,6 +267,7 @@ struct CanvasEditorRootView: View {
                     SelectionPropertiesInspector(
                         item: item,
                         controller: controller,
+                        commandGate: commandGate,
                         onError: { error in
                             session.onError?(error)
                         }
@@ -335,6 +377,7 @@ struct CanvasEditorRootView: View {
         Binding(
             get: { @MainActor in get(controller.document) },
             set: { @MainActor value in
+                guard !commandGate.isInteractionSuspended else { return }
                 if let transaction = canvasEditTransaction {
                     guard controller.isContinuousEditActive(transaction) else {
                         canvasEditTransaction = nil
@@ -358,6 +401,7 @@ struct CanvasEditorRootView: View {
                 }
             },
             set: { @MainActor choice in
+                guard !commandGate.isInteractionSuspended else { return }
                 controller.perform(label: "Change background") { document in
                     switch choice {
                     case .transparent: document.background = .transparent
@@ -376,6 +420,7 @@ struct CanvasEditorRootView: View {
                 return 0
             },
             set: { @MainActor amount in
+                guard !commandGate.isInteractionSuspended else { return }
                 let mutation: (inout AnnotationDocument) -> Void = { document in
                     let color: RGBAColor
                     if case .padded(let existing, _) = document.background { color = existing }
@@ -400,6 +445,7 @@ struct CanvasEditorRootView: View {
         label: String,
         owner: String
     ) {
+        guard !commandGate.isInteractionSuspended else { return }
         if editing {
             canvasEditTransaction = controller.beginContinuousEdit(
                 label: label,
@@ -415,6 +461,7 @@ struct CanvasEditorRootView: View {
         Binding(
             get: { @MainActor in controller.document.canvasEffects.shadow != nil },
             set: { @MainActor enabled in
+                guard !commandGate.isInteractionSuspended else { return }
                 controller.perform(label: "Toggle canvas shadow") { document in
                     document.canvasEffects.shadow = enabled ? AnnotationShadow() : nil
                 }
@@ -436,18 +483,22 @@ struct CanvasEditorRootView: View {
 private struct SelectionPropertiesInspector: View {
     let item: AnnotationItem
     @ObservedObject var controller: AnnotationDocumentController
+    @ObservedObject var commandGate: CanvasEditorCommandGate
     let onError: (Error) -> Void
     @State private var draft: AnnotationInspectorDraft
     @State private var editTransaction: AnnotationDocumentController.ContinuousEditToken?
     @FocusState private var isTextFieldFocused: Bool
+    @State private var finalizerID = UUID()
 
     init(
         item: AnnotationItem,
         controller: AnnotationDocumentController,
+        commandGate: CanvasEditorCommandGate,
         onError: @escaping (Error) -> Void
     ) {
         self.item = item
         self.controller = controller
+        self.commandGate = commandGate
         self.onError = onError
         _draft = State(initialValue: AnnotationInspectorDraft(item: item))
     }
@@ -554,6 +605,7 @@ private struct SelectionPropertiesInspector: View {
             }
         }
         .onChange(of: isTextFieldFocused) { _, focused in
+            guard !commandGate.isInteractionSuspended else { return }
             if focused {
                 beginInspectorEdit(label: "Edit text", owner: "selection-text")
             } else {
@@ -564,103 +616,124 @@ private struct SelectionPropertiesInspector: View {
             }
         }
         .onChange(of: draft) { _, updatedDraft in
-            guard updatedDraft.item.id == item.id else {
-                preconditionFailure("A selection inspector draft changed annotation identity.")
-            }
-            guard let storedItem = controller.document.annotations.first(where: {
-                $0.id == updatedDraft.item.id
-            }) else {
-                AppLog.capture.notice(
-                    "Discarded an inspector update after its annotation left the document: annotationID=\(updatedDraft.item.id.uuidString, privacy: .public)"
-                )
-                return
-            }
-            let transaction: AnnotationDocumentController.ContinuousEditToken?
-            if let candidate = editTransaction {
-                guard controller.isContinuousEditActive(candidate) else {
-                    AppLog.capture.notice(
-                        "Discarded a stale Canvas inspector draft update: owner=\(candidate.owner, privacy: .public), annotationID=\(updatedDraft.item.id.uuidString, privacy: .public)"
-                    )
-                    editTransaction = nil
-                    return
-                }
-                transaction = candidate
-            } else {
-                transaction = nil
-            }
-            let resolvedItem: AnnotationItem
+            guard !commandGate.isInteractionSuspended else { return }
             do {
-                resolvedItem = try updatedDraft.resolvedItem(from: storedItem)
+                try Self.applyInspectorDraft(
+                    updatedDraft,
+                    itemID: item.id,
+                    controller: controller,
+                    transactionBinding: $editTransaction
+                )
             } catch {
                 rejectInspectorUpdate(
                     error,
-                    operation: "resolve-draft",
-                    transaction: transaction,
+                    operation: "apply-draft",
+                    transaction: editTransaction,
                     annotationID: updatedDraft.item.id
                 )
-                return
             }
-            guard storedItem != resolvedItem else { return }
-            if storedItem.kind == .text {
-                AppLog.capture.notice(
-                    "Applying atomic Canvas inspector text layout update: id=\(storedItem.id.uuidString, privacy: .public), characters=\((resolvedItem.text ?? "").utf16.count, privacy: .public), fontSize=\(resolvedItem.style.fontSize, privacy: .public), chrome=\(resolvedItem.textLayout?.chromeMode.rawValue ?? "legacy-implicit", privacy: .public), wrapWidth=\(resolvedItem.textLayout?.wrapWidth ?? AnnotationTextLayout.canonicalWrapWidth(for: resolvedItem), privacy: .public)"
+        }
+        .onAppear {
+            let draftBinding = $draft
+            let transactionBinding = $editTransaction
+            let controller = controller
+            let itemID = item.id
+            commandGate.registerInspectorFinalizer(identifier: finalizerID) {
+                guard controller.selectedItemIDs.contains(itemID) else { return }
+                try Self.applyInspectorDraft(
+                    draftBinding.wrappedValue,
+                    itemID: itemID,
+                    controller: controller,
+                    transactionBinding: transactionBinding
                 )
-                let strategy: AnnotationTextWrapWidthStrategy = abs(
-                    storedItem.style.fontSize - updatedDraft.item.style.fontSize
-                ) > 0.000_001 ? .scaleWithFont : .preserve
-                do {
-                    if let transaction {
-                        _ = try controller.previewTextItemLayout(
-                            transaction: transaction,
-                            id: updatedDraft.item.id,
-                            text: updatedDraft.item.text ?? "",
-                            fontSize: updatedDraft.item.style.fontSize,
-                            wrapWidthStrategy: strategy
-                        ) { updatedItem in
-                            updatedItem.style.lineWidth = updatedDraft.item.style.lineWidth
-                            updatedItem.opacity = updatedDraft.item.opacity
-                            updatedItem.transform.rotationRadians = updatedDraft.item.transform.rotationRadians
-                        }
-                    } else {
-                        try controller.updateTextItemLayout(
-                            id: updatedDraft.item.id,
-                            text: updatedDraft.item.text ?? "",
-                            fontSize: updatedDraft.item.style.fontSize,
-                            wrapWidthStrategy: strategy
-                        ) { updatedItem in
-                            updatedItem.style.lineWidth = updatedDraft.item.style.lineWidth
-                            updatedItem.opacity = updatedDraft.item.opacity
-                            updatedItem.transform.rotationRadians = updatedDraft.item.transform.rotationRadians
-                        }
-                    }
-                } catch {
-                    rejectInspectorUpdate(
-                        error,
-                        operation: "publish-text-layout",
-                        transaction: transaction,
-                        annotationID: updatedDraft.item.id
-                    )
-                }
-                return
-            }
-            if let transaction {
-                _ = controller.previewContinuousEdit(transaction) { document in
-                    guard let index = document.annotations.firstIndex(where: {
-                        $0.id == updatedDraft.item.id
-                    }) else {
-                        preconditionFailure("A continuous inspector preview lost its annotation identity.")
-                    }
-                    guard !document.annotations[index].isLocked else { return }
-                    document.annotations[index] = resolvedItem
-                }
-            } else {
-                controller.updateItem(id: updatedDraft.item.id) { storedItem in
-                    storedItem = resolvedItem
+                if let transaction = transactionBinding.wrappedValue {
+                    _ = controller.commitContinuousEdit(transaction)
+                    transactionBinding.wrappedValue = nil
                 }
             }
         }
         .onDisappear {
+            commandGate.unregisterInspectorFinalizer(identifier: finalizerID)
             finishInspectorEdit(reason: "inspector-disappear")
+        }
+    }
+
+    private static func applyInspectorDraft(
+        _ updatedDraft: AnnotationInspectorDraft,
+        itemID: UUID,
+        controller: AnnotationDocumentController,
+        transactionBinding: Binding<AnnotationDocumentController.ContinuousEditToken?>
+    ) throws {
+        guard updatedDraft.item.id == itemID else {
+            preconditionFailure("A selection inspector draft changed annotation identity.")
+        }
+        guard let storedItem = controller.document.annotations.first(where: {
+            $0.id == updatedDraft.item.id
+        }) else {
+            AppLog.capture.notice(
+                "Discarded an inspector update after its annotation left the document: annotationID=\(updatedDraft.item.id.uuidString, privacy: .public)"
+            )
+            return
+        }
+        let transaction: AnnotationDocumentController.ContinuousEditToken?
+        if let candidate = transactionBinding.wrappedValue {
+            guard controller.isContinuousEditActive(candidate) else {
+                AppLog.capture.notice(
+                    "Discarded a stale Canvas inspector draft update: owner=\(candidate.owner, privacy: .public), annotationID=\(updatedDraft.item.id.uuidString, privacy: .public)"
+                )
+                transactionBinding.wrappedValue = nil
+                return
+            }
+            transaction = candidate
+        } else {
+            transaction = nil
+        }
+        if storedItem.kind == .text {
+            let strategy: AnnotationTextWrapWidthStrategy = abs(
+                storedItem.style.fontSize - updatedDraft.item.style.fontSize
+            ) > 0.000_001 ? .scaleWithFont : .preserve
+            if let transaction {
+                _ = try controller.previewTextItemLayout(
+                    transaction: transaction,
+                    id: updatedDraft.item.id,
+                    text: updatedDraft.item.text ?? "",
+                    fontSize: updatedDraft.item.style.fontSize,
+                    wrapWidthStrategy: strategy
+                ) { updatedItem in
+                    updatedItem.style.lineWidth = updatedDraft.item.style.lineWidth
+                    updatedItem.opacity = updatedDraft.item.opacity
+                    updatedItem.transform.rotationRadians = updatedDraft.item.transform.rotationRadians
+                }
+            } else {
+                try controller.updateTextItemLayout(
+                    id: updatedDraft.item.id,
+                    text: updatedDraft.item.text ?? "",
+                    fontSize: updatedDraft.item.style.fontSize,
+                    wrapWidthStrategy: strategy
+                ) { updatedItem in
+                    updatedItem.style.lineWidth = updatedDraft.item.style.lineWidth
+                    updatedItem.opacity = updatedDraft.item.opacity
+                    updatedItem.transform.rotationRadians = updatedDraft.item.transform.rotationRadians
+                }
+            }
+            return
+        }
+        let resolvedItem = updatedDraft.resolvedNonTextItem(from: storedItem)
+        guard storedItem != resolvedItem else { return }
+        if let transaction {
+            _ = controller.previewContinuousEdit(transaction) { document in
+                guard let index = document.annotations.firstIndex(where: {
+                    $0.id == updatedDraft.item.id
+                }) else {
+                    preconditionFailure("A continuous inspector preview lost its annotation identity.")
+                }
+                guard !document.annotations[index].isLocked else { return }
+                document.annotations[index] = resolvedItem
+            }
+        } else {
+            controller.updateItem(id: updatedDraft.item.id) { storedItem in
+                storedItem = resolvedItem
+            }
         }
     }
 
@@ -706,6 +779,7 @@ private struct SelectionPropertiesInspector: View {
     }
 
     private func beginInspectorEdit(label: String, owner: String) {
+        guard !commandGate.isInteractionSuspended else { return }
         if let transaction = editTransaction,
            controller.isContinuousEditActive(transaction),
            transaction.owner == owner {
@@ -794,27 +868,11 @@ private struct AnnotationInspectorDraft: Equatable {
         set { item.style.fontSize = newValue }
     }
 
-    func resolvedItem(from storedItem: AnnotationItem) throws -> AnnotationItem {
+    func resolvedNonTextItem(from storedItem: AnnotationItem) -> AnnotationItem {
         precondition(
-            storedItem.id == item.id && storedItem.kind == item.kind,
-            "An inspector draft can resolve only its original annotation identity and kind."
+            storedItem.id == item.id && storedItem.kind == item.kind && item.kind != .text,
+            "A non-text inspector draft can resolve only its original annotation identity and kind."
         )
-        if storedItem.kind == .text {
-            var semanticSource = storedItem
-            semanticSource.style.lineWidth = item.style.lineWidth
-            semanticSource.opacity = item.opacity
-            semanticSource.transform.rotationRadians = item.transform.rotationRadians
-            let strategy: AnnotationTextWrapWidthStrategy = abs(
-                storedItem.style.fontSize - item.style.fontSize
-            ) > 0.000_001 ? .scaleWithFont : .preserve
-            return try AnnotationTextLayout.reflowedTextItem(
-                semanticSource,
-                text: item.text ?? "",
-                fontSize: item.style.fontSize,
-                wrapWidthStrategy: strategy
-            )
-        }
-
         var resolved = storedItem
         resolved.style.lineWidth = item.style.lineWidth
         resolved.opacity = item.opacity

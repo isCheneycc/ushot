@@ -82,6 +82,12 @@ public final class AnnotationDocumentController: ObservableObject {
     public var canUndo: Bool { !undoStack.isEmpty }
     public var canRedo: Bool { !redoStack.isEmpty }
 
+    /// A lifecycle boundary commits the existing owner without inventing a
+    /// second mutation or depending on a later inspector teardown callback.
+    public func finishPendingContinuousEdit(reason: String) {
+        commitActiveContinuousEdit(reason: reason)
+    }
+
     /// Starts one gesture- or focus-owned inspector edit. Preview updates made
     /// with the returned token publish immediately but do not enter the undo
     /// timeline until the matching token commits.
@@ -257,34 +263,14 @@ public final class AnnotationDocumentController: ObservableObject {
         guard let original = document.annotations.first(where: { $0.id == id }),
               !original.isLocked
         else { return }
-        guard original.kind == .text else {
-            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
-                "atomic text layout updates require a text annotation"
-            )
-        }
-        var updated = try AnnotationTextLayout.reflowedTextItem(
+        let updated = try resolvedTextItem(
             original,
             text: text,
             fontSize: fontSize,
-            wrapWidthStrategy: wrapWidthStrategy
+            wrapWidthStrategy: wrapWidthStrategy,
+            additionalMutation: additionalMutation
         )
-        let layoutOwnedItem = updated
-        additionalMutation(&updated)
-        guard
-            updated.id == layoutOwnedItem.id
-                && updated.kind == .text
-                && updated.text == layoutOwnedItem.text
-                && updated.style.fontSize == layoutOwnedItem.style.fontSize
-                && updated.style.fontName == layoutOwnedItem.style.fontName
-                && updated.style.fontWeight == layoutOwnedItem.style.fontWeight
-                && updated.style.textAlignment == layoutOwnedItem.style.textAlignment
-                && updated.geometry == layoutOwnedItem.geometry
-                && updated.textLayout == layoutOwnedItem.textLayout
-        else {
-            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
-                "additional inspector mutation changed layout-owned text state"
-            )
-        }
+        guard updated != original else { return }
         perform(label: "Edit text layout") { document in
             guard let index = document.annotations.firstIndex(where: { $0.id == id }),
                   !document.annotations[index].isLocked
@@ -325,11 +311,35 @@ public final class AnnotationDocumentController: ObservableObject {
         guard !original.isLocked else {
             return previewContinuousEdit(transaction) { _ in }
         }
-        guard original.kind == .text else {
-            throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
-                "continuous text layout updates require a text annotation"
-            )
+        let updated = try resolvedTextItem(
+            original,
+            text: text,
+            fontSize: fontSize,
+            wrapWidthStrategy: wrapWidthStrategy,
+            additionalMutation: additionalMutation
+        )
+        guard updated != original else { return true }
+        return previewContinuousEdit(transaction) { document in
+            guard let index = document.annotations.firstIndex(where: { $0.id == id }) else {
+                return
+            }
+            guard !document.annotations[index].isLocked else { return }
+            document.annotations[index] = updated
+            if original.textLayout == nil, updated.textLayout != nil {
+                AppLog.capture.notice(
+                    "Materialized explicit legacy text layout during continuous edit: id=\(id.uuidString, privacy: .public), wrapWidth=\(updated.textLayout?.wrapWidth ?? 0, privacy: .public)"
+                )
+            }
         }
+    }
+
+    private func resolvedTextItem(
+        _ original: AnnotationItem,
+        text: String,
+        fontSize: CGFloat,
+        wrapWidthStrategy: AnnotationTextWrapWidthStrategy,
+        additionalMutation: (inout AnnotationItem) -> Void
+    ) throws -> AnnotationItem {
         var updated = try AnnotationTextLayout.reflowedTextItem(
             original,
             text: text,
@@ -353,18 +363,12 @@ public final class AnnotationDocumentController: ObservableObject {
                 "additional inspector mutation changed layout-owned text state"
             )
         }
-        return previewContinuousEdit(transaction) { document in
-            guard let index = document.annotations.firstIndex(where: { $0.id == id }) else {
-                return
-            }
-            guard !document.annotations[index].isLocked else { return }
-            document.annotations[index] = updated
-            if original.textLayout == nil, updated.textLayout != nil {
-                AppLog.capture.notice(
-                    "Materialized explicit legacy text layout during continuous edit: id=\(id.uuidString, privacy: .public), wrapWidth=\(updated.textLayout?.wrapWidth ?? 0, privacy: .public)"
-                )
-            }
+        if updated != original {
+            AppLog.capture.notice(
+                "Resolved atomic text layout update: id=\(updated.id.uuidString, privacy: .public), characters=\((updated.text ?? "").utf16.count, privacy: .public), fontSize=\(updated.style.fontSize, privacy: .public), chrome=\(updated.textLayout?.chromeMode.rawValue ?? "legacy-implicit", privacy: .public), wrapWidth=\(updated.textLayout?.wrapWidth ?? AnnotationTextLayout.canonicalWrapWidth(for: updated), privacy: .public)"
+            )
         }
+        return updated
     }
 
     public func deleteSelection() {
@@ -375,39 +379,6 @@ public final class AnnotationDocumentController: ObservableObject {
         }
         if document == documentBeforeDeletion {
             selectedItemIDs.removeAll()
-        }
-    }
-
-    public func duplicateSelection(offset: CGSize = CGSize(width: 10, height: -10)) {
-        let selected = document.orderedAnnotations.filter { selectedItemIDs.contains($0.id) }
-        var newIDs: Set<UUID> = []
-        let documentBeforeDuplication = document
-        commit(label: "Duplicate annotation", selectionAfterChange: { _, _ in newIDs }) { document in
-            for original in selected {
-                let id = UUID()
-                newIDs.insert(id)
-                var copy = AnnotationItem(
-                    id: id,
-                    name: original.name + " Copy",
-                    kind: original.kind,
-                    zIndex: document.annotations.count,
-                    geometry: original.geometry,
-                    style: original.style,
-                    opacity: original.opacity,
-                    transform: original.transform,
-                    isVisible: original.isVisible,
-                    isLocked: false,
-                    text: original.text,
-                    textLayout: original.textLayout,
-                    counterValue: original.counterValue
-                )
-                copy.transform.translation.width += offset.width
-                copy.transform.translation.height += offset.height
-                document.annotations.append(copy)
-            }
-        }
-        if document == documentBeforeDuplication {
-            selectedItemIDs = newIDs
         }
     }
 
@@ -430,14 +401,6 @@ public final class AnnotationDocumentController: ObservableObject {
 
     public func sendSelectionToBack() {
         reorderSelection(toFront: false)
-    }
-
-    public func moveSelectionForward() {
-        stepSelection(direction: 1)
-    }
-
-    public func moveSelectionBackward() {
-        stepSelection(direction: -1)
     }
 
     public func undo() {
@@ -658,21 +621,6 @@ public final class AnnotationDocumentController: ObservableObject {
             let selected = document.orderedAnnotations.filter { ids.contains($0.id) }
             let unselected = document.orderedAnnotations.filter { !ids.contains($0.id) }
             document.annotations = toFront ? unselected + selected : selected + unselected
-        }
-    }
-
-    private func stepSelection(direction: Int) {
-        let ids = selectedItemIDs
-        perform(label: "Reorder annotation") { document in
-            var ordered = document.orderedAnnotations
-            let indices = ordered.indices.filter { ids.contains(ordered[$0].id) }
-            let traversal = direction > 0 ? indices.reversed() : indices
-            for index in traversal {
-                let target = index + direction
-                guard ordered.indices.contains(target), !ids.contains(ordered[target].id) else { continue }
-                ordered.swapAt(index, target)
-            }
-            document.annotations = ordered
         }
     }
 

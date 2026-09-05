@@ -5,6 +5,7 @@ import UshotCore
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let updateSensitiveActivityTracker = UpdateSensitiveActivityTracker()
+    private let sessionRegistry = AnnotationSessionRegistry()
     private(set) var environment: AppEnvironment?
     private var statusBarController: StatusBarController?
     private var settingsWindowController: SettingsWindowController?
@@ -15,9 +16,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var colorPickerCoordinator: ColorPickerCoordinator?
     private var screenRulerCoordinator: ScreenRulerCoordinator?
     private var cancellables: Set<AnyCancellable> = []
+    private var terminationTask: Task<Void, Never>?
+    private var terminationReady = false
+    private var relaunchAfterTermination = false
+    private var historyClearOperationCount = 0
 #if DEBUG
     private var uiTestRegionSelector: RegionSelectionCoordinator?
     private var uiTestRegionSelectionTask: Task<Void, Never>?
+    private var uiTestQuitSession: AnnotationEditingSession?
 #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -63,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let pinnedShotManager = PinnedShotManager(
                 settingsStore: environment.settingsStore,
                 historyStore: environment.historyStore,
+                sessionRegistry: sessionRegistry,
                 updateSensitiveActivityTracker: updateSensitiveActivityTracker,
                 admitAppWork: { [weak self] in
                     guard let self else {
@@ -75,7 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             let canvasEditorManager = CanvasEditorManager(
                 settingsStore: environment.settingsStore,
-                updateSensitiveActivityTracker: updateSensitiveActivityTracker
+                updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+                sessionRegistry: sessionRegistry
             )
             self.canvasEditorManager = canvasEditorManager
             pinnedShotManager.onError = { [weak self] error in
@@ -131,6 +139,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.screenRulerCoordinator = screenRulerCoordinator
 
+            environment.onRequestLanguageChange = { [weak self] language, change in
+                guard let self else {
+                    throw UpdateCheckError.rejected(
+                        reason: String(localized: "Ushot is shutting down and cannot start new work.")
+                    )
+                }
+                try self.requestLanguageChange(to: language, applying: change)
+            }
+            environment.onClearHistory = { [weak self] in
+                guard let self, let environment = self.environment else {
+                    throw UpdateCheckError.rejected(
+                        reason: String(localized: "Ushot is shutting down and cannot start new work.")
+                    )
+                }
+                try self.admitNewAppWork(action: "clear-history")
+                self.historyClearOperationCount += 1
+                let lease = self.updateSensitiveActivityTracker.begin(operation: "settings-clear-history")
+                defer {
+                    self.historyClearOperationCount -= 1
+                    self.updateSensitiveActivityTracker.finish(lease)
+                }
+                try await environment.historyStore.clear()
+            }
+
             applyPresentation(settings: environment.settingsStore.settings)
             environment.settingsStore.$settings
                 .sink { [weak self] settings in
@@ -153,6 +185,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             presentFatalLaunchError(error)
         }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+#if DEBUG
+        if let session = uiTestQuitSession {
+            uiTestQuitSession = nil
+            // Inject the final edit in the same event as normal Command-Q so
+            // neither its render nor debounce can complete before admission.
+            session.controller.add(AnnotationItem(
+                kind: .rectangle, zIndex: 0,
+                geometry: .rect(CGRect(x: 20, y: 20, width: 80, height: 60))
+            ))
+        }
+#endif
+        guard environment != nil, !terminationReady else { return .terminateNow }
+        guard terminationTask == nil, environment?.isTerminating != true else { return .terminateLater }
+        do {
+            guard captureWorkflow?.isSessionActive != true,
+                  colorPickerCoordinator?.isSessionActive != true,
+                  screenRulerCoordinator?.isSessionActive != true,
+                  historyWindowController?.hasBlockingUpdateActivity != true,
+                  historyClearOperationCount == 0
+            else {
+                throw UpdateCheckError.rejected(
+                    reason: String(localized: "Finish or cancel the active capture, tool, or history operation before quitting Ushot.")
+                )
+            }
+            environment?.isTerminating = true
+            try canvasEditorManager?.prepareForApplicationTermination()
+            try pinnedShotManager?.prepareForApplicationTermination()
+        } catch {
+            canvasEditorManager?.resumeAfterCancelledTermination()
+            pinnedShotManager?.resumeAfterCancelledTermination()
+            environment?.isTerminating = false
+            relaunchAfterTermination = false
+            presentTerminationError(error)
+            return .terminateCancel
+        }
+
+        AppLog.lifecycle.notice("Draining latest annotation renders and history saves before termination")
+        terminationTask = Task { @MainActor [self] in
+            do {
+                try await canvasEditorManager?.flushForApplicationTermination()
+                try await pinnedShotManager?.flushForApplicationTermination()
+                await updateSensitiveActivityTracker.waitUntilIdle()
+                if relaunchAfterTermination { try schedulePostExitRelaunch() }
+                terminationReady = true
+                AppLog.lifecycle.notice("Final history saves completed; approving application termination")
+                sender.reply(toApplicationShouldTerminate: true)
+            } catch {
+                canvasEditorManager?.resumeAfterCancelledTermination()
+                pinnedShotManager?.resumeAfterCancelledTermination()
+                environment?.isTerminating = false
+                relaunchAfterTermination = false
+                terminationTask = nil
+                AppLog.history.error("Cancelled application termination because final persistence failed")
+                sender.reply(toApplicationShouldTerminate: false)
+                presentTerminationError(error)
+            }
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -209,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showSettings(selecting section: SettingsSection) {
-        guard let environment else { return }
+        guard let environment, !environment.isTerminating else { return }
         if settingsWindowController == nil {
             settingsWindowController = SettingsWindowController(environment: environment)
         }
@@ -229,6 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 store: environment.historyStore,
                 settingsStore: environment.settingsStore,
                 updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+                sessionRegistry: sessionRegistry,
                 admitAppWork: { [weak self] in
                     guard let self else {
                         throw UpdateCheckError.rejected(
@@ -238,6 +332,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try self.admitNewAppWork(action: "history")
                 },
                 onOpenSession: { [weak self] session in
+                    guard self?.pinnedShotManager?.presentCanvasEditorIfOwned(for: session) != true else {
+                        return
+                    }
                     self?.canvasEditorManager?.open(session: session)
                 }
             )
@@ -264,6 +361,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func admitUpdateCheck() throws {
+        guard environment?.isTerminating != true else {
+            throw UpdateCheckError.rejected(
+                reason: String(localized: "Ushot is shutting down and cannot check for updates.")
+            )
+        }
+        try requireIdleAppWork(action: "check-for-updates", rejectionReason: String(
+            localized: "Finish or close the active capture, editing, or output task before checking for updates."
+        ))
+    }
+
+    private func requireIdleAppWork(action: String, rejectionReason: String) throws {
         let captureActive = captureWorkflow?.isSessionActive == true
         let colorPickerActive = colorPickerCoordinator?.isSessionActive == true
         let screenRulerActive = screenRulerCoordinator?.isSessionActive == true
@@ -282,17 +390,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backgroundActivityCount == 0
         else {
             AppLog.updates.notice(
-                "Rejected update check while app work is active: capture=\(captureActive, privacy: .public), colorPicker=\(colorPickerActive, privacy: .public), screenRuler=\(screenRulerActive, privacy: .public), editor=\(editorActive, privacy: .public), history=\(historyActive, privacy: .public), pinnedActivity=\(pinnedActivity, privacy: .public), backgroundActivities=\(backgroundActivityCount, privacy: .public)"
+                "Rejected lifecycle action while app work is active: action=\(action, privacy: .public), capture=\(captureActive, privacy: .public), colorPicker=\(colorPickerActive, privacy: .public), screenRuler=\(screenRulerActive, privacy: .public), editor=\(editorActive, privacy: .public), history=\(historyActive, privacy: .public), pinnedActivity=\(pinnedActivity, privacy: .public), backgroundActivities=\(backgroundActivityCount, privacy: .public)"
             )
-            throw UpdateCheckError.rejected(
-                reason: String(
-                    localized: "Finish or close the active capture, editing, or output task before checking for updates."
-                )
-            )
+            throw UpdateCheckError.rejected(reason: rejectionReason)
         }
     }
 
     private func admitNewAppWork(action: String) throws {
+        guard environment?.isTerminating != true else {
+            throw UpdateCheckError.rejected(
+                reason: String(localized: "Ushot is shutting down and cannot start new work.")
+            )
+        }
         guard environment?.updateChecker.isSessionActive != true else {
             AppLog.updates.notice(
                 "Rejected new app work during an update transaction: action=\(action, privacy: .public)"
@@ -303,6 +412,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             )
         }
+    }
+
+    private func requestLanguageChange(
+        to language: AppLanguagePreference,
+        applying change: () throws -> Void
+    ) throws {
+        try admitNewAppWork(action: "change-language")
+        try requireIdleAppWork(action: "change-language", rejectionReason: String(
+            localized: "Finish or close the active capture, editing, or output task before changing the language."
+        ))
+        try change()
+        AppLanguagePreference.apply(language)
+        relaunchAfterTermination = true
+        AppLog.lifecycle.notice("Admitted language change and requested coordinated relaunch")
+        NSApplication.shared.terminate(nil)
+    }
+
+    /// Only arm the replacement process after all final saves have succeeded.
+    /// Opening a still-running app would merely activate this instance.
+    private func schedulePostExitRelaunch() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        var relaunchEnvironment = ProcessInfo.processInfo.environment
+        relaunchEnvironment["USHOT_RELAUNCH_APP"] = Bundle.main.bundlePath
+        relaunchEnvironment["USHOT_RELAUNCH_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+        process.environment = relaunchEnvironment
+        process.arguments = ["-c", #"""
+            /usr/bin/nohup /bin/bash -c '
+              while /bin/kill -0 "$USHOT_RELAUNCH_PID" 2>/dev/null; do
+                /bin/sleep 0.1
+              done
+              /bin/sleep 0.2
+              /usr/bin/open -n "$USHOT_RELAUNCH_APP"
+            ' >/dev/null 2>&1 &
+            """#]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw UpdateCheckError.unavailable(reason: String(localized:
+                "Ushot could not restart after changing the language. Quit and open Ushot again to apply it."
+            ))
+        }
+        AppLog.lifecycle.notice("Scheduled post-exit relaunch after final history save")
     }
 
     private func performStartupBehavior(_ behavior: StartupBehavior) {
@@ -321,6 +476,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         environment: AppEnvironment
     ) throws -> Bool {
         let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--uitest-history-quit") {
+            guard let historyPath = ProcessInfo.processInfo.environment["USHOT_UI_TEST_HISTORY_DIRECTORY"],
+                  !historyPath.isEmpty
+            else {
+                preconditionFailure("The quit regression requires an isolated history directory.")
+            }
+            let store = SystemScreenshotHistoryStore(rootDirectory: URL(fileURLWithPath: historyPath))
+            try environment.settingsStore.update(\AppSettings.history.isEnabled, to: true)
+            let captured = try makeUITestCapturedImage(
+                logicalSize: CGSize(width: 320, height: 200),
+                desktopFrame: CGRect(x: 0, y: 0, width: 320, height: 200),
+                displayID: CGMainDisplayID(), scale: 1
+            )
+            let session = AnnotationEditingSession(
+                capturedImage: captured,
+                editorSettings: environment.settingsStore.settings.editor,
+                updateSensitiveActivityTracker: updateSensitiveActivityTracker
+            )
+            session.attachHistoryRecorder(HistorySessionRecorder(
+                session: session, store: store, settingsStore: environment.settingsStore,
+                updateSensitiveActivityTracker: updateSensitiveActivityTracker
+            ))
+            uiTestQuitSession = session
+            canvasEditorManager?.open(session: session)
+            return true
+        }
+        if arguments.contains("--uitest-history-lifecycle") {
+            Task { @MainActor [weak self] in
+                do {
+                    try await HistoryLifecycleRegression.run(includingCanvasWindow: true)
+                    self?.showSettings(selecting: .history)
+                    self?.settingsWindowController?.window?.setAccessibilityIdentifier("history.lifecycle.passed")
+                } catch {
+                    self?.presentCaptureError(error)
+                }
+            }
+            return true
+        }
         if arguments.contains("--uitest-settings")
             || arguments.contains("--uitest-settings-editor")
             || arguments.contains("--uitest-settings-shortcuts") {
@@ -347,6 +540,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 editorSettings: environment.settingsStore.settings.editor,
                 updateSensitiveActivityTracker: updateSensitiveActivityTracker
             ))
+            if arguments.contains("--uitest-language-change-admission") {
+                showSettings(selecting: .advanced)
+            }
             return true
         }
         if arguments.contains("--uitest-editor-selection-invalidation") {
@@ -411,7 +607,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     preconditionFailure("Line-width routing UI regression lost its pinned-shot manager.")
                 }
                 manager.runLineWidthRoutingRegression()
-                DispatchQueue.main.async {
+                // terminateLater runs a nested AppKit loop. Leave the GCD
+                // callback first so the MainActor save barrier can execute.
+                RunLoop.main.perform {
                     NSApplication.shared.terminate(nil)
                 }
             }
@@ -430,7 +628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     preconditionFailure("Inline text stability UI regression lost its pinned-shot manager.")
                 }
                 manager.runInlineTextStabilityRegression()
-                DispatchQueue.main.async {
+                RunLoop.main.perform {
                     NSApplication.shared.terminate(nil)
                 }
             }
@@ -674,6 +872,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.presentCaptureError(error)
             }
         }
+        if ProcessInfo.processInfo.arguments.contains("--uitest-region-snap-cancellation") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                selector.injectSmartSnapPressCancellationForUITesting(at: CGPoint(
+                    x: syntheticWindowFrame.midX,
+                    y: syntheticWindowFrame.midY
+                ))
+            }
+        }
     }
 
     private func makeUITestCapturedImage(
@@ -749,6 +955,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 #endif
+
+    private func presentTerminationError(_ error: Error) {
+        let alert = NSAlert(error: error)
+        alert.messageText = String(localized: "Unable to Quit Ushot")
+        alert.alertStyle = .warning
+        alert.layout()
+        alert.window.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 5)
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        alert.window.hidesOnDeactivate = false
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
 
     private func presentCaptureError(_ error: Error) {
         AppLog.capture.error("Capture workflow failed: \(error.localizedDescription, privacy: .public)")

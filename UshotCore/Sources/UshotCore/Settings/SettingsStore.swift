@@ -60,10 +60,6 @@ public final class SettingsStore: ObservableObject {
         try persist(.defaults)
     }
 
-    public func clearLoadError() {
-        loadError = nil
-    }
-
     private func persist(_ candidate: AppSettings) throws {
         do {
             var validated = candidate

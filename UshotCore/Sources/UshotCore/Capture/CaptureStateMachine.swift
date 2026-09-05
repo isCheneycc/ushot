@@ -7,9 +7,6 @@ public enum CaptureSessionState: Equatable, Sendable {
     case selecting(CaptureMode)
     case capturing(CaptureMode)
     case presentingPinnedShot
-    case quickEditing
-    case canvasEditing
-    case exporting
 }
 
 public enum CaptureAdmission: Equatable, Sendable {
@@ -54,25 +51,6 @@ public actor CaptureStateMachine {
     public func imageCaptured() throws {
         guard case .capturing = state else { throw invalidTransition() }
         state = .presentingPinnedShot
-    }
-
-    public func beginQuickEditing() throws {
-        guard state == .presentingPinnedShot else { throw invalidTransition() }
-        state = .quickEditing
-    }
-
-    public func beginCanvasEditing() throws {
-        guard state == .presentingPinnedShot || state == .quickEditing else { throw invalidTransition() }
-        state = .canvasEditing
-    }
-
-    public func beginExporting() throws {
-        switch state {
-        case .presentingPinnedShot, .quickEditing, .canvasEditing:
-            state = .exporting
-        default:
-            throw invalidTransition()
-        }
     }
 
     public func finish() {

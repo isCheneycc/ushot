@@ -8,17 +8,20 @@ final class CanvasEditorManager {
     private let exporter: any ImageExporting
     private let settingsStore: SettingsStore
     private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
-    private var controllers: [ObjectIdentifier: CanvasEditorWindowController] = [:]
+    private let sessionRegistry: AnnotationSessionRegistry
+    private var controllers: [UUID: CanvasEditorWindowController] = [:]
     var hasOpenEditors: Bool { !controllers.isEmpty }
 
     init(
         exporter: any ImageExporting = SystemImageExporter(),
         settingsStore: SettingsStore,
-        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
+        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
+        sessionRegistry: AnnotationSessionRegistry
     ) {
         self.exporter = exporter
         self.settingsStore = settingsStore
         self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
+        self.sessionRegistry = sessionRegistry
     }
 
     func open(
@@ -26,7 +29,8 @@ final class CanvasEditorManager {
         ownershipID: UUID? = nil,
         onClose: (() -> Void)? = nil
     ) {
-        let key = ObjectIdentifier(session)
+        let session = sessionRegistry.register(session)
+        let key = session.controller.document.id
         if let existing = controllers[key] {
             existing.registerCloseCallback(onClose, ownershipID: ownershipID)
             existing.showWindow(nil)
@@ -48,6 +52,48 @@ final class CanvasEditorManager {
         controller.window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
+
+    func prepareForApplicationTermination() throws {
+        do {
+            for controller in controllers.values {
+                try controller.prepareForApplicationTermination()
+            }
+        } catch {
+            resumeAfterCancelledTermination()
+            throw error
+        }
+    }
+
+    func flushForApplicationTermination() async throws {
+        for controller in Array(controllers.values) {
+            try await controller.flushForApplicationTermination()
+        }
+    }
+
+    func resumeAfterCancelledTermination() {
+        for controller in controllers.values {
+            controller.resumeAfterCancelledTermination()
+        }
+    }
+
+#if DEBUG
+    func waitForCanvasForRegression(documentID: UUID) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while let controller = controllers[documentID], !controller.hasRegisteredCanvasForRegression {
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                throw ScreenshotAppError.historyPersistenceFailed(description: "The regression editor did not register its canvas.")
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard controllers[documentID] != nil else {
+            throw ScreenshotAppError.historyPersistenceFailed(description: "The regression editor closed before canvas registration.")
+        }
+    }
+
+    func requestCloseForRegression(documentID: UUID) {
+        controllers[documentID]?.window?.performClose(nil)
+    }
+#endif
 }
 
 @MainActor
@@ -62,6 +108,19 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
     private var closeCallbacks: [() -> Void] = []
     private var registeredCloseOwnershipIDs: Set<UUID> = []
     private var didCompleteCloseLifecycle = false
+    private enum HistoryFinalization: Equatable {
+        case none
+        case closing
+        case terminating
+    }
+    private var historyFinalization = HistoryFinalization.none
+    private var historyFinalizationTask: Task<Void, Error>?
+    private var historyFinalizationGeneration = UUID()
+    private var activeSavePanel: NSSavePanel?
+
+#if DEBUG
+    var hasRegisteredCanvasForRegression: Bool { commandGate.hasRegisteredCanvasForRegression }
+#endif
 
     init(
         session: AnnotationEditingSession,
@@ -125,6 +184,8 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
             return
         }
         didCompleteCloseLifecycle = true
+        historyFinalizationGeneration = UUID()
+        historyFinalizationTask = nil
         let callbacks = closeCallbacks
         closeCallbacks.removeAll()
         AppLog.lifecycle.notice(
@@ -136,18 +197,82 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard commandGate.resolveActiveTextEditing(reason: "window-close") else {
-            AppLog.lifecycle.notice(
-                "Kept Canvas editor open because active text could not commit"
-            )
-            return false
-        }
-        return true
+        requestClose(reason: "window-close")
+        return false
     }
 
     private func closeFromCommandBar() {
-        guard commandGate.resolveActiveTextEditing(reason: "done") else { return }
-        close()
+        requestClose(reason: "done")
+    }
+
+    private func prepareHistoryFinalization(reason: String) throws {
+        guard activeSavePanel == nil, window?.attachedSheet == nil else {
+            throw ScreenshotAppError.historyPersistenceFailed(
+                description: String(localized: "Close the open editor dialog before closing the editor or quitting Ushot.")
+            )
+        }
+        try commandGate.prepareForHistoryFinalization(reason: reason)
+        session.controller.finishPendingContinuousEdit(reason: reason)
+    }
+
+    private func finalHistoryPersistenceTask() -> Task<Void, Error> {
+        if let historyFinalizationTask { return historyFinalizationTask }
+        let session = session
+        let task = Task { @MainActor in try await session.flushHistory() }
+        historyFinalizationGeneration = UUID()
+        historyFinalizationTask = task
+        return task
+    }
+
+    private func requestClose(reason: String) {
+        guard historyFinalization == .none, !didCompleteCloseLifecycle else { return }
+        do {
+            try prepareHistoryFinalization(reason: reason)
+        } catch {
+            commandGate.setInteractionSuspended(false)
+            present(error)
+            return
+        }
+        historyFinalization = .closing
+        let task = finalHistoryPersistenceTask()
+        let generation = historyFinalizationGeneration
+        Task { @MainActor [self] in
+            let result = await task.result
+            // Application termination may have adopted this same barrier.
+            guard historyFinalization == .closing,
+                  generation == historyFinalizationGeneration
+            else { return }
+            historyFinalizationTask = nil
+            switch result {
+            case .success:
+                close()
+            case .failure(let error):
+                historyFinalization = .none
+                commandGate.setInteractionSuspended(false)
+                present(error)
+            }
+        }
+    }
+
+    func prepareForApplicationTermination() throws {
+        guard historyFinalization != .terminating else { return }
+        if historyFinalization == .none {
+            try prepareHistoryFinalization(reason: "application-termination")
+        }
+        historyFinalization = .terminating
+    }
+
+    func flushForApplicationTermination() async throws {
+        precondition(historyFinalization == .terminating, "Prepare Canvas input before its termination barrier.")
+        try await finalHistoryPersistenceTask().value
+    }
+
+    func resumeAfterCancelledTermination() {
+        guard historyFinalization == .terminating else { return }
+        historyFinalization = .none
+        historyFinalizationGeneration = UUID()
+        historyFinalizationTask = nil
+        commandGate.setInteractionSuspended(false)
     }
 
     private func copyImage() {
@@ -161,15 +286,7 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
             do {
                 let resolved = try await self.session.resolvedPreviewImage()
                 let image = resolved.image
-                let item = NSPasteboardItem()
-                item.setData(try self.exporter.pngData(for: image), forType: .png)
-                if let tiff = NSBitmapImageRep(cgImage: image).tiffRepresentation {
-                    item.setData(tiff, forType: .tiff)
-                }
-                NSPasteboard.general.clearContents()
-                guard NSPasteboard.general.writeObjects([item]) else {
-                    throw ScreenshotAppError.exportFailed(description: "The pasteboard rejected the rendered image.")
-                }
+                try writeImageToPasteboard(image, pngData: self.exporter.pngData(for: image))
             } catch {
                 self.present(error)
             }
@@ -178,7 +295,7 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
 
     private func exportImage() {
         guard commandGate.resolveActiveTextEditing(reason: "export") else { return }
-        guard let window else { return }
+        guard let window, activeSavePanel == nil, window.attachedSheet == nil else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [outputSettings.format.contentType]
         panel.canCreateDirectories = true
@@ -187,8 +304,11 @@ private final class CanvasEditorWindowController: NSWindowController, NSWindowDe
             date: Date(),
             fileExtension: outputSettings.format.fileExtension
         )
+        activeSavePanel = panel
         panel.beginSheetModal(for: window) { [weak self] response in
-            guard let self, response == .OK, let url = panel.url else { return }
+            guard let self else { return }
+            self.activeSavePanel = nil
+            guard response == .OK, let url = panel.url else { return }
             let updateSensitiveActivityTracker = self.updateSensitiveActivityTracker
             let lease = updateSensitiveActivityTracker.begin(
                 operation: "canvas-editor-export"

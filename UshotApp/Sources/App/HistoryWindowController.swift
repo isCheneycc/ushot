@@ -12,6 +12,7 @@ final class HistoryWindowController: NSWindowController {
         settingsStore: SettingsStore,
         exporter: any ImageExporting = SystemImageExporter(),
         updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
+        sessionRegistry: AnnotationSessionRegistry,
         admitAppWork: @escaping @MainActor () throws -> Void = {},
         onOpenSession: @escaping (AnnotationEditingSession) -> Void
     ) {
@@ -20,6 +21,7 @@ final class HistoryWindowController: NSWindowController {
             settingsStore: settingsStore,
             exporter: exporter,
             updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+            sessionRegistry: sessionRegistry,
             admitAppWork: admitAppWork,
             onOpenSession: onOpenSession
         )
@@ -61,6 +63,7 @@ private final class HistoryBrowserModel: ObservableObject {
     private let store: any ScreenshotHistoryStoring
     private let exporter: any ImageExporting
     private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
+    private let sessionRegistry: AnnotationSessionRegistry
     private let admitAppWork: @MainActor () throws -> Void
     private let onOpenSession: (AnnotationEditingSession) -> Void
     private var loadGeneration = 0
@@ -72,6 +75,7 @@ private final class HistoryBrowserModel: ObservableObject {
         settingsStore: SettingsStore,
         exporter: any ImageExporting,
         updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
+        sessionRegistry: AnnotationSessionRegistry,
         admitAppWork: @escaping @MainActor () throws -> Void,
         onOpenSession: @escaping (AnnotationEditingSession) -> Void
     ) {
@@ -79,6 +83,7 @@ private final class HistoryBrowserModel: ObservableObject {
         self.settingsStore = settingsStore
         self.exporter = exporter
         self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
+        self.sessionRegistry = sessionRegistry
         self.admitAppWork = admitAppWork
         self.onOpenSession = onOpenSession
     }
@@ -106,32 +111,24 @@ private final class HistoryBrowserModel: ObservableObject {
 
     func open(_ summary: HistoryRecordSummary) {
         guard beginUpdateSensitiveOperation("open-editor") else { return }
+        let openTask = sessionRegistry.openHistory(
+            id: summary.id,
+            store: store,
+            settingsStore: settingsStore,
+            updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+            onError: { [weak self] error in self?.present(error) }
+        )
         Task { [weak self] in
             guard let self else { return }
             defer { finishUpdateSensitiveOperation("open-editor") }
             do {
-                let record = try await store.load(id: summary.id)
-                let session = AnnotationEditingSession(
-                    capturedImage: record.baseImage,
-                    previewImage: record.previewImage,
-                    document: record.document,
-                    editorSettings: settingsStore.settings.editor,
-                    updateSensitiveActivityTracker: updateSensitiveActivityTracker
-                )
-                // Do not mount a history editor around a bitmap rejected by
-                // session admission. Compatible caches return immediately;
-                // incompatible caches must finish a current-renderer pass or
-                // fail explicitly before the editor is shown.
-                _ = try await session.resolvedPreviewImage()
-                let recorder = HistorySessionRecorder(
-                    session: session,
-                    store: store,
-                    settingsStore: settingsStore,
-                    updateSensitiveActivityTracker: updateSensitiveActivityTracker,
-                    onError: { [weak self] error in self?.present(error) }
-                )
-                session.attachHistoryRecorder(recorder)
+                let session = try await openTask.value
+                guard session.isHistoryRecordingAuthorized else {
+                    throw HistoryWriteAuthorizationError.revoked
+                }
                 onOpenSession(session)
+            } catch HistoryWriteAuthorizationError.revoked {
+                AppLog.history.notice("Cancelled history editor admission after deletion")
             } catch {
                 present(error)
             }
@@ -146,17 +143,7 @@ private final class HistoryBrowserModel: ObservableObject {
             do {
                 let record = try await store.load(id: summary.id)
                 let image = try await resolvedPreviewImage(for: record).image
-                let item = NSPasteboardItem()
-                item.setData(try exporter.pngData(for: image), forType: .png)
-                if let tiff = NSBitmapImageRep(cgImage: image).tiffRepresentation {
-                    item.setData(tiff, forType: .tiff)
-                }
-                NSPasteboard.general.clearContents()
-                guard NSPasteboard.general.writeObjects([item]) else {
-                    throw ScreenshotAppError.exportFailed(
-                        description: "The pasteboard rejected the history image."
-                    )
-                }
+                try writeImageToPasteboard(image, pngData: exporter.pngData(for: image))
             } catch {
                 present(error)
             }

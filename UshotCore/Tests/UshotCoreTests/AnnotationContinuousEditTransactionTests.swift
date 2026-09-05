@@ -29,6 +29,45 @@ final class AnnotationContinuousEditTransactionTests: XCTestCase {
     }
 
     @MainActor
+    func testUnchangedTextUpdatesKeepTheCurrentInspectorTransactionOpen() throws {
+        let original = try makeTextItem()
+        let controller = AnnotationDocumentController(document: makeDocument(item: original))
+        let transaction = controller.beginContinuousEdit(
+            label: "Edit text inspector",
+            owner: "test-text-no-op",
+            itemID: original.id
+        )
+        XCTAssertTrue(controller.previewContinuousEdit(transaction) { document in
+            document.annotations[0].opacity = 0.5
+        })
+        var publications = 0
+        let observation = controller.documentPublisher.dropFirst().sink { _ in
+            publications += 1
+        }
+
+        try controller.updateTextItemLayout(
+            id: original.id,
+            text: original.text ?? "",
+            fontSize: original.style.fontSize,
+            wrapWidthStrategy: .preserve
+        )
+        XCTAssertTrue(try controller.previewTextItemLayout(
+            transaction: transaction,
+            id: original.id,
+            text: original.text ?? "",
+            fontSize: original.style.fontSize,
+            wrapWidthStrategy: .preserve
+        ))
+
+        XCTAssertTrue(controller.isContinuousEditActive(transaction))
+        XCTAssertTrue(controller.undoStack.isEmpty)
+        XCTAssertEqual(publications, 0)
+        XCTAssertTrue(controller.cancelContinuousEdit(transaction))
+        XCTAssertEqual(controller.document.annotations, [original])
+        withExtendedLifetime(observation) {}
+    }
+
+    @MainActor
     func testTwentyTextPreviewsCreateOneUndoThatRestoresCompleteItem() throws {
         let original = try makeTextItem()
         let controller = AnnotationDocumentController(document: makeDocument(item: original))

@@ -46,6 +46,27 @@ private enum SettingsTestSupport {
         return (defaults, "settings", suite)
     }
 
+    static func settingsDataIncludingRetiredKeys(_ settings: AppSettings) throws -> Data {
+        let encoded = try JSONEncoder().encode(settings)
+        guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any],
+              var capture = object["capture"] as? [String: Any],
+              var editor = object["editor"] as? [String: Any],
+              var advanced = object["advanced"] as? [String: Any]
+        else {
+            throw ScreenshotAppError.settingsCorrupted(
+                description: "The test could not construct settings with retired keys."
+            )
+        }
+        capture["savesOriginalAndEdited"] = true
+        capture["showsCornerThumbnail"] = true
+        editor["defaultBackgroundHex"] = "#102030"
+        advanced["logLevel"] = "debug"
+        object["capture"] = capture
+        object["editor"] = editor
+        object["advanced"] = advanced
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
     static func legacyVersionOneData() throws -> Data {
         let legacy = AppSettings(schemaVersion: 1)
         let encoded = try JSONEncoder().encode(legacy)
@@ -531,13 +552,6 @@ private enum HistoryTestSupport {
 
 #if canImport(XCTest)
 final class UshotCoreFoundationTests: XCTestCase {
-    func testOpenSourceProviderEntitlesEveryDeclaredFeature() {
-        let provider = OpenSourceEntitlementProvider()
-        for feature in AppFeature.allCases {
-            XCTAssertTrue(provider.isEntitled(to: feature), "Expected entitlement for \(feature)")
-        }
-    }
-
     @MainActor
     func testDefaultSettingsMatchProductDefaults() {
         let settings = AppSettings.defaults
@@ -611,7 +625,17 @@ final class UshotCoreFoundationTests: XCTestCase {
     func testSettingsStoreRoundTripsOneVersionedDocument() throws {
         let context = SettingsTestSupport.makeDefaults()
         defer { context.defaults.removePersistentDomain(forName: context.suite) }
+        var initialSettings = AppSettings.defaults
+        initialSettings.capture.capturesCursor = true
+        initialSettings.editor.defaultLineWidth = 7.5
+        initialSettings.advanced.language = .english
+        context.defaults.set(
+            try SettingsTestSupport.settingsDataIncludingRetiredKeys(initialSettings),
+            forKey: context.key
+        )
         let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
+        XCTAssertNil(store.loadError)
+        XCTAssertEqual(store.settings, initialSettings)
 
         try store.update(\AppSettings.general.showsDockIcon, to: true)
         try store.update(\AppSettings.editor.defaultRectangleCornerRadius, to: 12.5)
@@ -630,6 +654,7 @@ final class UshotCoreFoundationTests: XCTestCase {
         XCTAssertEqual(reloaded.settings.editor.defaultEllipseColorHex, "#AF52DE")
         XCTAssertEqual(reloaded.settings.editor.defaultTextFontName, "Helvetica")
         XCTAssertEqual(reloaded.settings.schemaVersion, AppSettings.currentSchemaVersion)
+        XCTAssertEqual(reloaded.settings, store.settings)
         XCTAssertNil(reloaded.loadError)
     }
 
@@ -931,8 +956,7 @@ final class UshotCoreFoundationTests: XCTestCase {
             defaultRectangleCornerRadiusUnit: .points,
             defaultFontSize: 26,
             defaultFontSizeUnit: .points,
-            defaultTextFontName: "Helvetica",
-            defaultBackgroundHex: "#102030"
+            defaultTextFontName: "Helvetica"
         )
 
         editor.restoreFactoryToolbarColors()
@@ -949,7 +973,6 @@ final class UshotCoreFoundationTests: XCTestCase {
         XCTAssertEqual(editor.defaultFontSize, 26)
         XCTAssertEqual(editor.defaultFontSizeUnit, .points)
         XCTAssertEqual(editor.defaultTextFontName, "Helvetica")
-        XCTAssertEqual(editor.defaultBackgroundHex, "#102030")
         XCTAssertEqual(try editor.validatedColorPalette(), editor)
     }
 
@@ -2998,14 +3021,6 @@ final class UshotCoreFoundationTests: XCTestCase {
     }
 }
 #else
-@Test
-func openSourceProviderEntitlesEveryDeclaredFeature() {
-    let provider = OpenSourceEntitlementProvider()
-    for feature in AppFeature.allCases {
-        #expect(provider.isEntitled(to: feature))
-    }
-}
-
 @Test @MainActor
 func defaultSettingsMatchProductDefaults() {
     let settings = AppSettings.defaults
@@ -3074,7 +3089,18 @@ func defaultSettingsMatchProductDefaults() {
 func settingsStoreRoundTripsOneVersionedDocument() throws {
     let context = SettingsTestSupport.makeDefaults()
     defer { context.defaults.removePersistentDomain(forName: context.suite) }
+    var initialSettings = AppSettings.defaults
+    initialSettings.capture.capturesCursor = true
+    initialSettings.editor.defaultLineWidth = 7.5
+    initialSettings.advanced.language = .english
+    context.defaults.set(
+        try SettingsTestSupport.settingsDataIncludingRetiredKeys(initialSettings),
+        forKey: context.key
+    )
     let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
+    #expect(store.loadError == nil)
+    #expect(store.settings == initialSettings)
+
     try store.update(\AppSettings.general.showsDockIcon, to: true)
     try store.update(\AppSettings.editor.defaultRectangleCornerRadius, to: 12.5)
     try store.update { settings in
@@ -3092,6 +3118,7 @@ func settingsStoreRoundTripsOneVersionedDocument() throws {
     #expect(reloaded.settings.editor.defaultEllipseColorHex == "#AF52DE")
     #expect(reloaded.settings.editor.defaultTextFontName == "Helvetica")
     #expect(reloaded.settings.schemaVersion == AppSettings.currentSchemaVersion)
+    #expect(reloaded.settings == store.settings)
     #expect(reloaded.loadError == nil)
 }
 
@@ -3397,8 +3424,7 @@ func restoringFactoryToolbarColorsPreservesNonPaletteSettingsAndRedirectsDefault
         defaultRectangleCornerRadiusUnit: .points,
         defaultFontSize: 26,
         defaultFontSizeUnit: .points,
-        defaultTextFontName: "Helvetica",
-        defaultBackgroundHex: "#102030"
+        defaultTextFontName: "Helvetica"
     )
 
     editor.restoreFactoryToolbarColors()
@@ -3415,7 +3441,6 @@ func restoringFactoryToolbarColorsPreservesNonPaletteSettingsAndRedirectsDefault
     #expect(editor.defaultFontSize == 26)
     #expect(editor.defaultFontSizeUnit == .points)
     #expect(editor.defaultTextFontName == "Helvetica")
-    #expect(editor.defaultBackgroundHex == "#102030")
     #expect(try editor.validatedColorPalette() == editor)
 }
 

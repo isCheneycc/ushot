@@ -62,7 +62,7 @@ final class SettingsAlertModel: ObservableObject {
 }
 
 struct SettingsRootView: View {
-    let environment: AppEnvironment
+    @ObservedObject var environment: AppEnvironment
     @ObservedObject var selectionModel: SettingsSelectionModel
     @ObservedObject private var store: SettingsStore
     @StateObject private var alerts = SettingsAlertModel()
@@ -97,6 +97,7 @@ struct SettingsRootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(minWidth: Self.sidebarWidth + 600, minHeight: 520)
+        .disabled(environment.isTerminating)
         .environment(\.locale, store.settings.advanced.language.locale)
         .alert(
             "Ushot",
@@ -2142,7 +2143,7 @@ private struct HistorySettingsView: View {
     private func clearHistory() {
         Task {
             do {
-                try await environment.historyStore.clear()
+                try await environment.clearHistory()
             } catch {
                 alerts.present(error)
             }
@@ -2181,16 +2182,6 @@ private struct AdvancedSettingsView: View {
             }
 
             Section("Diagnostics") {
-                Picker("Log level", selection: persistedBinding(
-                    store: store,
-                    keyPath: \AppSettings.advanced.logLevel,
-                    alerts: alerts
-                )) {
-                    ForEach(AppLogLevel.allCases, id: \.self) { level in
-                        Text(NSLocalizedString(level.rawValue.capitalized, comment: "Log level")).tag(level)
-                    }
-                }
-
                 if let loadError = store.loadError {
                     Label(loadError.localizedDescription, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
@@ -2209,72 +2200,12 @@ private struct AdvancedSettingsView: View {
         let previous = store.settings.advanced.language
         guard language != previous else { return }
         do {
-            try store.update(\AppSettings.advanced.language, to: language)
-            AppLanguagePreference.apply(language)
-            AppLog.lifecycle.notice(
-                "Changed in-app language preference: from=\(previous.rawValue, privacy: .public), to=\(language.rawValue, privacy: .public); relaunching"
-            )
-            relaunchApplication()
+            try environment.requestLanguageChange(to: language) {
+                try store.update(\AppSettings.advanced.language, to: language)
+            }
         } catch {
             alerts.present(error)
         }
-    }
-
-    /// Restarts Ushot after a language change.
-    ///
-    /// `NSWorkspace.openApplication` on a running app only activates the existing
-    /// instance; terminating afterward exits without a replacement (looks like a
-    /// crash). Schedule a detached helper that waits until this PID exits, then
-    /// opens a new instance with `open -n`.
-    private func relaunchApplication() {
-        let appPath = Bundle.main.bundlePath
-        let pid = ProcessInfo.processInfo.processIdentifier
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        var environment = ProcessInfo.processInfo.environment
-        environment["USHOT_RELAUNCH_APP"] = appPath
-        environment["USHOT_RELAUNCH_PID"] = String(pid)
-        process.environment = environment
-        // nohup + background so the waiter is not killed when this process exits.
-        // Env vars expand inside the inner bash (single-quoted body is not
-        // expanded by the outer shell).
-        process.arguments = [
-            "-c",
-            #"""
-            /usr/bin/nohup /bin/bash -c '
-              while /bin/kill -0 "$USHOT_RELAUNCH_PID" 2>/dev/null; do
-                /bin/sleep 0.1
-              done
-              /bin/sleep 0.2
-              /usr/bin/open -n "$USHOT_RELAUNCH_APP"
-            ' >/dev/null 2>&1 &
-            """#
-        ]
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                throw ScreenshotAppError.captureFailed(
-                    description: "Relaunch helper exited with status \(process.terminationStatus)."
-                )
-            }
-            AppLog.lifecycle.notice(
-                "Scheduled post-exit relaunch after language change: pid=\(pid, privacy: .public), path=\(appPath, privacy: .public)"
-            )
-        } catch {
-            AppLog.lifecycle.error(
-                "Failed to schedule Ushot relaunch after language change: \(error.localizedDescription, privacy: .public)"
-            )
-            alerts.present(message: String(localized:
-                "Ushot could not restart after changing the language. Quit and open Ushot again to apply it.",
-                comment: "Language change relaunch failure"
-            ))
-            return
-        }
-        NSApp.terminate(nil)
     }
 
     private func openDataDirectory() {
@@ -2298,30 +2229,34 @@ private struct AdvancedSettingsView: View {
 
     private func resetSettings() {
         let previous = store.settings
+        let language = AppSettings.defaults.advanced.language
         do {
-            try environment.hotKeyManager.register(AppSettings.defaults.shortcuts.assignments)
-            if previous.general.launchesAtLogin {
-                try environment.launchAtLoginManager.setEnabled(false)
-            }
-            do {
-                try store.reset()
-            } catch {
-                try environment.hotKeyManager.register(previous.shortcuts.assignments)
-                if previous.general.launchesAtLogin {
-                    try environment.launchAtLoginManager.setEnabled(true)
-                }
-                throw error
-            }
-            let language = store.settings.advanced.language
             if language != previous.advanced.language {
-                AppLanguagePreference.apply(language)
-                AppLog.lifecycle.notice(
-                    "Reset settings changed language: from=\(previous.advanced.language.rawValue, privacy: .public), to=\(language.rawValue, privacy: .public); relaunching"
-                )
-                relaunchApplication()
+                // Admit before changing any setting or system registration.
+                try environment.requestLanguageChange(to: language) {
+                    try applyDefaultSettings(previous: previous)
+                }
+            } else {
+                try applyDefaultSettings(previous: previous)
             }
         } catch {
             alerts.present(error)
+        }
+    }
+
+    private func applyDefaultSettings(previous: AppSettings) throws {
+        try environment.hotKeyManager.register(AppSettings.defaults.shortcuts.assignments)
+        if previous.general.launchesAtLogin {
+            try environment.launchAtLoginManager.setEnabled(false)
+        }
+        do {
+            try store.reset()
+        } catch {
+            try environment.hotKeyManager.register(previous.shortcuts.assignments)
+            if previous.general.launchesAtLogin {
+                try environment.launchAtLoginManager.setEnabled(true)
+            }
+            throw error
         }
     }
 }

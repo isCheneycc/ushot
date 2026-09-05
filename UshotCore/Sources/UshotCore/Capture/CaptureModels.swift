@@ -212,5 +212,3 @@ public protocol ScreenCapturing: AnyObject {
         from preparation: RegionCapturePreparation
     ) throws -> CapturedImage
 }
-
-public protocol FrameStreaming: Sendable {}

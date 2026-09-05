@@ -13,9 +13,19 @@ final class UpdateSensitiveActivityTracker {
 
     private let ownerID = UUID()
     private var operations: [UUID: String] = [:]
+    private var idleWaiters: [CheckedContinuation<Void, Never>] = []
 
     var hasActiveWork: Bool { !operations.isEmpty }
     var activeOperationCount: Int { operations.count }
+
+    /// New user work must be blocked by the lifecycle owner before it waits.
+    /// Existing renders and debounced saves may still hand off their leases.
+    func waitUntilIdle() async {
+        guard !operations.isEmpty else { return }
+        await withCheckedContinuation { continuation in
+            idleWaiters.append(continuation)
+        }
+    }
 
     func begin(operation: String) -> Lease {
         precondition(!operation.isEmpty, "An update-sensitive operation must have a diagnostic name.")
@@ -43,5 +53,10 @@ final class UpdateSensitiveActivityTracker {
         AppLog.updates.debug(
             "Finished update-sensitive activity: operation=\(operation, privacy: .public), active=\(self.operations.count, privacy: .public)"
         )
+        if operations.isEmpty {
+            let waiters = idleWaiters
+            idleWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
     }
 }

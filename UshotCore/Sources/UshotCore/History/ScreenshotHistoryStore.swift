@@ -104,14 +104,85 @@ public struct HistoryRecordSummary: Identifiable, Equatable, Sendable {
     public var id: UUID { metadata.id }
 }
 
+/// A write belongs to the history lifetime in which its editing operation began.
+/// It cannot be renewed by a delayed renderer after that history was deleted.
+public struct HistoryWriteAuthorization: Hashable, Sendable {
+    public let recordID: UUID
+    fileprivate let authorityID: UUID
+    fileprivate let historyGeneration: UUID
+    fileprivate let recordGeneration: UUID
+}
+
+public enum HistoryWriteAuthorizationError: Error, Equatable, LocalizedError {
+    case revoked
+
+    public var errorDescription: String? {
+        "This screenshot's history was deleted while the operation was in progress."
+    }
+}
+
+/// Admission is synchronous so a UI action takes its authorization before its
+/// first suspension. Only the store revokes it, after a successful deletion.
+public final class HistoryWriteAuthority: @unchecked Sendable {
+    private let lock = NSLock()
+    private let identifier = UUID()
+    private let initialRecordGeneration = UUID()
+    private var historyGeneration = UUID()
+    private var recordGenerations: [UUID: UUID] = [:]
+
+    public init() {}
+
+    public func authorization(for recordID: UUID) -> HistoryWriteAuthorization {
+        lock.withLock {
+            HistoryWriteAuthorization(
+                recordID: recordID,
+                authorityID: identifier,
+                historyGeneration: historyGeneration,
+                recordGeneration: recordGenerations[recordID] ?? initialRecordGeneration
+            )
+        }
+    }
+
+    public func isCurrent(_ authorization: HistoryWriteAuthorization) -> Bool {
+        lock.withLock {
+            authorization.authorityID == identifier
+                && authorization.historyGeneration == historyGeneration
+                && authorization.recordGeneration == (
+                    recordGenerations[authorization.recordID] ?? initialRecordGeneration
+                )
+        }
+    }
+
+    fileprivate func revoke(recordID: UUID) {
+        lock.withLock { recordGenerations[recordID] = UUID() }
+    }
+
+    fileprivate func revokeAll() {
+        lock.withLock {
+            historyGeneration = UUID()
+            recordGenerations.removeAll()
+        }
+    }
+}
+
 public protocol ScreenshotHistoryStoring: Sendable {
     var rootDirectory: URL { get }
-    func save(_ record: ScreenshotHistoryRecord) async throws
+    var writeAuthority: HistoryWriteAuthority { get }
+    func save(_ record: ScreenshotHistoryRecord, authorization: HistoryWriteAuthorization) async throws
     func list() async throws -> [HistoryRecordSummary]
     func load(id: UUID) async throws -> ScreenshotHistoryRecord
     func delete(id: UUID) async throws
     func clear() async throws
     func enforceRetention(days: Int, maximumItemCount: Int, now: Date) async throws
+}
+
+public extension ScreenshotHistoryStoring {
+    /// For immediate, explicitly admitted writes. Long-lived editing sessions
+    /// must retain one authorization and use the qualified overload instead.
+    func save(_ record: ScreenshotHistoryRecord) async throws {
+        let authorization = writeAuthority.authorization(for: record.metadata.id)
+        try await save(record, authorization: authorization)
+    }
 }
 
 public struct HistoryDirectoryMigrationResult: Equatable, Sendable {
@@ -126,6 +197,7 @@ public struct HistoryDirectoryMigrationResult: Equatable, Sendable {
 
 public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
     public nonisolated let rootDirectory: URL
+    public nonisolated let writeAuthority = HistoryWriteAuthority()
 
     private struct DocumentIdentity: Decodable {
         let id: UUID
@@ -409,7 +481,16 @@ public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
         return true
     }
 
-    public func save(_ record: ScreenshotHistoryRecord) async throws {
+    public func save(
+        _ record: ScreenshotHistoryRecord,
+        authorization: HistoryWriteAuthorization
+    ) async throws {
+        guard authorization.recordID == record.metadata.id,
+              writeAuthority.isCurrent(authorization)
+        else {
+            AppLog.history.notice("Rejected a save from a deleted history lifetime: id=\(record.metadata.id, privacy: .public)")
+            throw HistoryWriteAuthorizationError.revoked
+        }
         do {
             try validate(record)
             try fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
@@ -525,11 +606,16 @@ public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
 
     public func delete(id: UUID) async throws {
         let directory = recordDirectory(id: id)
-        guard fileManager.fileExists(atPath: directory.path) else { return }
         do {
-            try fileManager.removeItem(at: directory)
+            if fileManager.fileExists(atPath: directory.path) {
+                try fileManager.removeItem(at: directory)
+            }
+            writeAuthority.revoke(recordID: id)
             AppLog.history.notice("Deleted history record \(id, privacy: .public)")
         } catch {
+            if !fileManager.fileExists(atPath: directory.path) {
+                writeAuthority.revoke(recordID: id)
+            }
             throw ScreenshotAppError.historyPersistenceFailed(description: error.localizedDescription)
         }
     }
@@ -537,9 +623,30 @@ public actor SystemScreenshotHistoryStore: ScreenshotHistoryStoring {
     public func clear() async throws {
         do {
             if fileManager.fileExists(atPath: rootDirectory.path) {
-                try fileManager.removeItem(at: rootDirectory)
+                // Delete entries separately: if a later entry fails, records
+                // already removed must stay revoked while survivors retain
+                // their editing authorization and can be retried.
+                let entries = try fileManager.contentsOfDirectory(
+                    at: rootDirectory,
+                    includingPropertiesForKeys: nil,
+                    options: []
+                ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+                for entry in entries {
+                    let recordID = UUID(uuidString: entry.lastPathComponent)
+                    do {
+                        try fileManager.removeItem(at: entry)
+                    } catch {
+                        if let recordID, !fileManager.fileExists(atPath: entry.path) {
+                            writeAuthority.revoke(recordID: recordID)
+                        }
+                        throw error
+                    }
+                    if let recordID { writeAuthority.revoke(recordID: recordID) }
+                }
+            } else {
+                try fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
             }
-            try fileManager.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
+            writeAuthority.revokeAll()
             AppLog.history.notice("Cleared screenshot history")
         } catch {
             throw ScreenshotAppError.historyPersistenceFailed(description: error.localizedDescription)

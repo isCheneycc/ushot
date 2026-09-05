@@ -17,8 +17,8 @@ private enum AppEnvironmentConfigurationError: Error, LocalizedError {
 
 @MainActor
 final class AppEnvironment: ObservableObject {
+    @Published var isTerminating = false
     let runtimeIdentity: ProductIdentity.RuntimeIdentity
-    let entitlementProvider: any FeatureEntitlementChecking
     let updateChecker: any UpdateChecking
     let settingsStore: SettingsStore
     let permissionChecker: any CapturePermissionChecking
@@ -27,10 +27,32 @@ final class AppEnvironment: ObservableObject {
     let capturer: any ScreenCapturing
     let pixelSamplerFactory: any PixelSamplerCreating
     let historyStore: any ScreenshotHistoryStoring
+    var onRequestLanguageChange: (@MainActor (AppLanguagePreference, () throws -> Void) throws -> Void)?
+    var onClearHistory: (@MainActor () async throws -> Void)?
+
+    func requestLanguageChange(
+        to language: AppLanguagePreference,
+        applying change: () throws -> Void
+    ) throws {
+        guard let onRequestLanguageChange else {
+            throw UpdateCheckError.unavailable(
+                reason: String(localized: "Ushot cannot change language before its lifecycle coordinator is ready.")
+            )
+        }
+        try onRequestLanguageChange(language, change)
+    }
+
+    func clearHistory() async throws {
+        guard let onClearHistory else {
+            throw UpdateCheckError.unavailable(
+                reason: String(localized: "Ushot cannot clear history before its lifecycle coordinator is ready.")
+            )
+        }
+        try await onClearHistory()
+    }
 
     init(
         runtimeIdentity: ProductIdentity.RuntimeIdentity,
-        entitlementProvider: any FeatureEntitlementChecking,
         updateChecker: any UpdateChecking,
         settingsStore: SettingsStore,
         permissionChecker: any CapturePermissionChecking,
@@ -41,7 +63,6 @@ final class AppEnvironment: ObservableObject {
         historyStore: any ScreenshotHistoryStoring
     ) {
         self.runtimeIdentity = runtimeIdentity
-        self.entitlementProvider = entitlementProvider
         self.updateChecker = updateChecker
         self.settingsStore = settingsStore
         self.permissionChecker = permissionChecker
@@ -122,7 +143,6 @@ final class AppEnvironment: ObservableObject {
 
         return try AppEnvironment(
             runtimeIdentity: runtimeIdentity,
-            entitlementProvider: OpenSourceEntitlementProvider(),
             updateChecker: SparkleUpdateChecker.makeFailClosed(),
             settingsStore: settingsStore,
             permissionChecker: SystemCapturePermissionChecker(),

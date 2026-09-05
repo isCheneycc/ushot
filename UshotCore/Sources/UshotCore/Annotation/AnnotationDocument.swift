@@ -61,15 +61,18 @@ public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
     /// 2 uses the current paper-plane geometry for filled, double and tapered
     /// arrow heads. Revision 3 introduced multiline text and explicit chrome.
     /// Revision 4 uses the exact TextKit line plan plus persisted asymmetric
-    /// glyph overhangs. This remains independent from `schemaVersion`: it
+    /// glyph overhangs. Revision 5 keeps transformed blur/mosaic masks anchored
+    /// to the current base-image pixels after a canvas rebase.
+    /// This remains independent from `schemaVersion`: it
     /// describes the renderer that produced a cached preview bitmap, while
     /// schema version 2 separately protects the editable text-layout payload
     /// from being opened and destructively rewritten by a version-1 reader.
     public static let legacyCachedPreviewRenderRevision = 1
-    public static let currentCachedPreviewRenderRevision = 4
+    public static let currentCachedPreviewRenderRevision = 5
 
     private static let paperPlaneArrowCachedPreviewRenderRevision = 2
     private static let textKitPlanCachedPreviewRenderRevision = 4
+    private static let sourceAnchoredEffectCachedPreviewRenderRevision = 5
 
     public let id: UUID
     public var schemaVersion: Int
@@ -137,6 +140,14 @@ public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
     public var cachedPreviewRevisionAffectedAnnotationCount: Int {
         annotations.reduce(into: 0) { count, item in
             guard item.isVisible else { return }
+            if cachedPreviewRenderRevision < Self.sourceAnchoredEffectCachedPreviewRenderRevision,
+               (item.kind == .blur || item.kind == .mosaic),
+               item.transform != AnnotationTransform(),
+               case .rect = item.geometry
+            {
+                count += 1
+                return
+            }
             if cachedPreviewRenderRevision < Self.textKitPlanCachedPreviewRenderRevision,
                item.kind == .text
             {

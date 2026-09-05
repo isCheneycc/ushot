@@ -127,19 +127,17 @@ public struct GeneralSettings: Codable, Equatable, Sendable {
 }
 
 public struct CaptureSettings: Codable, Equatable, Sendable {
-    public var capturesCursor = false
-    public var includesWindowShadow = true
-    public var presentsPinnedShot = true
-    public var showsQuickToolbar = true
-    public var automaticallyCopies = false
-    public var automaticallySaves = false
+    public var capturesCursor: Bool
+    public var includesWindowShadow: Bool
+    public var presentsPinnedShot: Bool
+    public var showsQuickToolbar: Bool
+    public var automaticallyCopies: Bool
+    public var automaticallySaves: Bool
     /// When true, double-clicking empty space inside a confirmed region copies
     /// the composite and closes the overlay. Mouse-up still never completes capture.
-    public var copiesRegionOnDoubleClick = true
-    public var automaticallyOpensCanvasEditor = false
-    public var savesOriginalAndEdited = false
-    public var showsCornerThumbnail = false
-    public var recognizesInterfaceElements = true
+    public var copiesRegionOnDoubleClick: Bool
+    public var automaticallyOpensCanvasEditor: Bool
+    public var recognizesInterfaceElements: Bool
     /// Displayed region corner radius in `regionCornerRadiusUnit`.
     /// Zero disables rounded region chrome and export clipping.
     public var regionCornerRadius: Double
@@ -154,8 +152,6 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         automaticallySaves: Bool = false,
         copiesRegionOnDoubleClick: Bool = true,
         automaticallyOpensCanvasEditor: Bool = false,
-        savesOriginalAndEdited: Bool = false,
-        showsCornerThumbnail: Bool = false,
         recognizesInterfaceElements: Bool = true,
         regionCornerRadius: Double = RegionCaptureCornerRadius.defaultDisplayedValue,
         regionCornerRadiusUnit: AnnotationMeasurementUnit = RegionCaptureCornerRadius.defaultUnit
@@ -168,8 +164,6 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         self.automaticallySaves = automaticallySaves
         self.copiesRegionOnDoubleClick = copiesRegionOnDoubleClick
         self.automaticallyOpensCanvasEditor = automaticallyOpensCanvasEditor
-        self.savesOriginalAndEdited = savesOriginalAndEdited
-        self.showsCornerThumbnail = showsCornerThumbnail
         self.recognizesInterfaceElements = recognizesInterfaceElements
         self.regionCornerRadius = regionCornerRadius
         self.regionCornerRadiusUnit = regionCornerRadiusUnit
@@ -206,8 +200,6 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         case automaticallySaves
         case copiesRegionOnDoubleClick
         case automaticallyOpensCanvasEditor
-        case savesOriginalAndEdited
-        case showsCornerThumbnail
         case recognizesInterfaceElements
         case regionCornerRadius
         case regionCornerRadiusUnit
@@ -216,26 +208,30 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = CaptureSettings()
-        capturesCursor = try container.decodeIfPresent(Bool.self, forKey: .capturesCursor) ?? false
-        includesWindowShadow = try container.decodeIfPresent(Bool.self, forKey: .includesWindowShadow) ?? true
-        presentsPinnedShot = try container.decodeIfPresent(Bool.self, forKey: .presentsPinnedShot) ?? true
-        showsQuickToolbar = try container.decodeIfPresent(Bool.self, forKey: .showsQuickToolbar) ?? true
-        automaticallyCopies = try container.decodeIfPresent(Bool.self, forKey: .automaticallyCopies) ?? false
-        automaticallySaves = try container.decodeIfPresent(Bool.self, forKey: .automaticallySaves) ?? false
+        capturesCursor = try container.decodeIfPresent(Bool.self, forKey: .capturesCursor)
+            ?? defaults.capturesCursor
+        includesWindowShadow = try container.decodeIfPresent(Bool.self, forKey: .includesWindowShadow)
+            ?? defaults.includesWindowShadow
+        presentsPinnedShot = try container.decodeIfPresent(Bool.self, forKey: .presentsPinnedShot)
+            ?? defaults.presentsPinnedShot
+        showsQuickToolbar = try container.decodeIfPresent(Bool.self, forKey: .showsQuickToolbar)
+            ?? defaults.showsQuickToolbar
+        automaticallyCopies = try container.decodeIfPresent(Bool.self, forKey: .automaticallyCopies)
+            ?? defaults.automaticallyCopies
+        automaticallySaves = try container.decodeIfPresent(Bool.self, forKey: .automaticallySaves)
+            ?? defaults.automaticallySaves
         copiesRegionOnDoubleClick = try container.decodeIfPresent(
             Bool.self,
             forKey: .copiesRegionOnDoubleClick
-        ) ?? true
+        ) ?? defaults.copiesRegionOnDoubleClick
         automaticallyOpensCanvasEditor = try container.decodeIfPresent(
             Bool.self,
             forKey: .automaticallyOpensCanvasEditor
-        ) ?? false
-        savesOriginalAndEdited = try container.decodeIfPresent(Bool.self, forKey: .savesOriginalAndEdited) ?? false
-        showsCornerThumbnail = try container.decodeIfPresent(Bool.self, forKey: .showsCornerThumbnail) ?? false
+        ) ?? defaults.automaticallyOpensCanvasEditor
         recognizesInterfaceElements = try container.decodeIfPresent(
             Bool.self,
             forKey: .recognizesInterfaceElements
-        ) ?? true
+        ) ?? defaults.recognizesInterfaceElements
         regionCornerRadius = try container.decodeIfPresent(
             Double.self,
             forKey: .regionCornerRadius
@@ -256,8 +252,6 @@ public struct CaptureSettings: Codable, Equatable, Sendable {
         try container.encode(automaticallySaves, forKey: .automaticallySaves)
         try container.encode(copiesRegionOnDoubleClick, forKey: .copiesRegionOnDoubleClick)
         try container.encode(automaticallyOpensCanvasEditor, forKey: .automaticallyOpensCanvasEditor)
-        try container.encode(savesOriginalAndEdited, forKey: .savesOriginalAndEdited)
-        try container.encode(showsCornerThumbnail, forKey: .showsCornerThumbnail)
         try container.encode(recognizesInterfaceElements, forKey: .recognizesInterfaceElements)
         try container.encode(regionCornerRadius, forKey: .regionCornerRadius)
         try container.encode(regionCornerRadiusUnit, forKey: .regionCornerRadiusUnit)
@@ -373,7 +367,6 @@ public struct EditorSettings: Codable, Equatable, Sendable {
     public var defaultFontSize: Double
     public var defaultFontSizeUnit: AnnotationMeasurementUnit
     public var defaultTextFontName: String?
-    public var defaultBackgroundHex: String
 
     public init(
         defaultColorHex: String = "#FF3B30",
@@ -387,8 +380,7 @@ public struct EditorSettings: Codable, Equatable, Sendable {
         defaultRectangleCornerRadiusUnit: AnnotationMeasurementUnit = .pixels,
         defaultFontSize: Double = 18,
         defaultFontSizeUnit: AnnotationMeasurementUnit = .pixels,
-        defaultTextFontName: String? = nil,
-        defaultBackgroundHex: String = "#FFFFFF"
+        defaultTextFontName: String? = nil
     ) {
         self.defaultColorHex = defaultColorHex
         self.defaultTextColorHex = defaultTextColorHex ?? defaultColorHex
@@ -402,7 +394,6 @@ public struct EditorSettings: Codable, Equatable, Sendable {
         self.defaultFontSize = defaultFontSize
         self.defaultFontSizeUnit = defaultFontSizeUnit
         self.defaultTextFontName = defaultTextFontName
-        self.defaultBackgroundHex = defaultBackgroundHex
     }
 
     public var availableColorHexes: [String] {
@@ -629,7 +620,6 @@ public struct EditorSettings: Codable, Equatable, Sendable {
         case defaultFontSize
         case defaultFontSizeUnit
         case defaultTextFontName
-        case defaultBackgroundHex
     }
 
     public init(from decoder: Decoder) throws {
@@ -692,8 +682,6 @@ public struct EditorSettings: Codable, Equatable, Sendable {
         ) ?? defaults.defaultFontSizeUnit
         defaultTextFontName = try container.decodeIfPresent(String.self, forKey: .defaultTextFontName)
             ?? defaults.defaultTextFontName
-        defaultBackgroundHex = try container.decodeIfPresent(String.self, forKey: .defaultBackgroundHex)
-            ?? defaults.defaultBackgroundHex
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -713,7 +701,6 @@ public struct EditorSettings: Codable, Equatable, Sendable {
         try container.encode(defaultFontSize, forKey: .defaultFontSize)
         try container.encode(defaultFontSizeUnit, forKey: .defaultFontSizeUnit)
         try container.encodeIfPresent(defaultTextFontName, forKey: .defaultTextFontName)
-        try container.encode(defaultBackgroundHex, forKey: .defaultBackgroundHex)
     }
 }
 
@@ -758,34 +745,23 @@ public struct HistorySettings: Codable, Equatable, Sendable {
     public init() {}
 }
 
-public enum AppLogLevel: String, Codable, CaseIterable, Sendable {
-    case error
-    case info
-    case debug
-}
-
 public struct AdvancedSettings: Codable, Equatable, Sendable {
-    public var logLevel: AppLogLevel
     /// In-app UI language. Defaults to Simplified Chinese.
     public var language: AppLanguagePreference
 
     public init(
-        logLevel: AppLogLevel = .info,
         language: AppLanguagePreference = .default
     ) {
-        self.logLevel = logLevel
         self.language = language
     }
 
     private enum CodingKeys: String, CodingKey {
-        case logLevel
         case language
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = AdvancedSettings()
-        logLevel = try container.decodeIfPresent(AppLogLevel.self, forKey: .logLevel) ?? defaults.logLevel
         language = try container.decodeIfPresent(
             AppLanguagePreference.self,
             forKey: .language
@@ -794,7 +770,6 @@ public struct AdvancedSettings: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(logLevel, forKey: .logLevel)
         try container.encode(language, forKey: .language)
     }
 }
