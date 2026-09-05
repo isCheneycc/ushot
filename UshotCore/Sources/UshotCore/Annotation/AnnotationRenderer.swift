@@ -723,7 +723,6 @@ public struct AnnotationRenderer: AnnotationRendering {
         context.saveGState()
         defer { context.restoreGState() }
         context.setAlpha(max(0, min(1, item.opacity)))
-        applyTransform(item.transform, around: item.geometry.boundingBox, to: context)
         if let shadow = item.style.shadow {
             context.setShadow(
                 offset: shadow.offset,
@@ -743,6 +742,7 @@ public struct AnnotationRenderer: AnnotationRendering {
             drawEffect(
                 effects.blurred(baseImage, radius: item.style.blurRadius),
                 clippedTo: rect.standardized,
+                transform: item.transform,
                 canvasSize: canvasSize,
                 context: context
             )
@@ -750,6 +750,7 @@ public struct AnnotationRenderer: AnnotationRendering {
             drawEffect(
                 effects.mosaiced(baseImage, blockSize: item.style.mosaicBlockSize),
                 clippedTo: rect.standardized,
+                transform: item.transform,
                 canvasSize: canvasSize,
                 context: context
             )
@@ -761,33 +762,41 @@ public struct AnnotationRenderer: AnnotationRendering {
     private func drawEffect(
         _ image: CGImage?,
         clippedTo rect: CGRect,
+        transform: AnnotationTransform,
         canvasSize: CGSize,
         context: CGContext
     ) {
         guard let image else { return }
         context.saveGState()
-        context.clip(to: rect)
+        defer { context.restoreGState() }
+        var clipTransform = effectTransform(transform, around: rect)
+        let clipPath = CGPath(rect: rect, transform: &clipTransform)
+        context.addPath(clipPath)
+        context.clip()
+        // A region rebase translates the annotation mask into the new canvas.
+        // Its base image has already been recropped into that same canvas, so
+        // transforming the image again samples unrelated pixels or leaves the
+        // mask entirely outside the filtered image and exposes the base pixels.
         drawImagePreservingPixelOrientation(
             image,
             in: CGRect(origin: .zero, size: canvasSize),
             context: context
         )
-        context.restoreGState()
     }
 
-    private func applyTransform(
+    private func effectTransform(
         _ transform: AnnotationTransform,
-        around bounds: CGRect,
-        to context: CGContext
-    ) {
+        around bounds: CGRect
+    ) -> CGAffineTransform {
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        context.translateBy(
-            x: center.x + transform.translation.width,
-            y: center.y + transform.translation.height
-        )
-        context.rotate(by: transform.rotationRadians)
-        context.scaleBy(x: transform.scaleX, y: transform.scaleY)
-        context.translateBy(x: -center.x, y: -center.y)
+        return CGAffineTransform.identity
+            .translatedBy(
+                x: center.x + transform.translation.width,
+                y: center.y + transform.translation.height
+            )
+            .rotated(by: transform.rotationRadians)
+            .scaledBy(x: transform.scaleX, y: transform.scaleY)
+            .translatedBy(x: -center.x, y: -center.y)
     }
 
     private func applyCanvasEffects(

@@ -540,7 +540,9 @@ final class RegionSelectionCoordinator {
                 selection = initialSelection
                 dragMode = nil
                 initialSelection = nil
-                isConfirmingSelection = selection.map(isValidSelection) ?? false
+                // Cancelling a press restores geometry, not the capture phase.
+                // A snapped candidate is already nonempty at mouse-down, but
+                // its confirmation surface is created only after mouse-up.
             } else {
                 cancel()
             }
@@ -572,6 +574,45 @@ final class RegionSelectionCoordinator {
     fileprivate func keyUp(with event: NSEvent) {
         if event.keyCode == 49 { isSpacePressed = false }
     }
+
+#if DEBUG
+    func injectSmartSnapPressCancellationForUITesting(at point: CGPoint) {
+        precondition(
+            continuation != nil && !isSelectionLocked && selection == nil,
+            "The smart-snap cancellation regression requires an active, unselected overlay."
+        )
+        mouseMoved(to: point)
+        precondition(
+            snapCandidate?.contains(point) == true,
+            "The smart-snap cancellation regression requires a candidate at its pointer."
+        )
+        mouseDown(at: point)
+        for keyCode in [UInt16(53), 36] {
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: panels.first?.windowNumber ?? 0,
+                context: nil,
+                characters: keyCode == 53 ? "\u{1B}" : "\r",
+                charactersIgnoringModifiers: keyCode == 53 ? "\u{1B}" : "\r",
+                isARepeat: false,
+                keyCode: keyCode
+            ) else {
+                preconditionFailure("The smart-snap cancellation regression could not create its key event.")
+            }
+            keyDown(with: event)
+            if keyCode == 53 { mouseUp() }
+            precondition(
+                !isSelectionLocked && !isConfirmingSelection
+                    && dragMode == nil && continuation != nil,
+                "Cancelling an unconfirmed snap press must not create or complete a confirmation session."
+            )
+        }
+        AppLog.capture.notice("Smart-snap press cancellation regression passed; overlay remains selectable")
+    }
+#endif
 
     fileprivate func drawState(for panelFrame: CGRect) -> RegionOverlayDrawState {
         let displayedSelection = selection ?? snapCandidate

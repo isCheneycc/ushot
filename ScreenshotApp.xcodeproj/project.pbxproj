@@ -42,6 +42,12 @@
 		010000000000000000000021 /* ThirdPartyNotices.txt in Resources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000025 /* ThirdPartyNotices.txt */; };
 		010000000000000000000022 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000026 /* LICENSE */; };
 		010000000000000000000023 /* UpdateSensitiveActivityTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000027 /* UpdateSensitiveActivityTracker.swift */; };
+		010000000000000000000024 /* SourceAnchoredEffectRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000028 /* SourceAnchoredEffectRenderingTests.swift */; };
+		010000000000000000000025 /* ScreenshotHistoryAuthorizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020000000000000000000029 /* ScreenshotHistoryAuthorizationTests.swift */; };
+		010000000000000000000026 /* HistoryLifecycleRegression.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000002A /* HistoryLifecycleRegression.swift */; };
+		010000000000000000000027 /* ImagePasteboardWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000002B /* ImagePasteboardWriter.swift */; };
+		010000000000000000000028 /* QuickAnnotationCanvasRegression.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000002C /* QuickAnnotationCanvasRegression.swift */; };
+		010000000000000000000029 /* PinnedShotToolbarRegression.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000000000000000000002D /* PinnedShotToolbarRegression.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -55,6 +61,12 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		02000000000000000000002B /* ImagePasteboardWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImagePasteboardWriter.swift; sourceTree = "<group>"; };
+		02000000000000000000002C /* QuickAnnotationCanvasRegression.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickAnnotationCanvasRegression.swift; sourceTree = "<group>"; };
+		02000000000000000000002D /* PinnedShotToolbarRegression.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedShotToolbarRegression.swift; sourceTree = "<group>"; };
+		02000000000000000000002A /* HistoryLifecycleRegression.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryLifecycleRegression.swift; sourceTree = "<group>"; };
+		020000000000000000000029 /* ScreenshotHistoryAuthorizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotHistoryAuthorizationTests.swift; sourceTree = "<group>"; };
+		020000000000000000000028 /* SourceAnchoredEffectRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceAnchoredEffectRenderingTests.swift; sourceTree = "<group>"; };
 		020000000000000000000001 /* UshotApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UshotApp.swift; sourceTree = "<group>"; };
 		020000000000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		020000000000000000000003 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
@@ -151,6 +163,10 @@
 			children = (
 				020000000000000000000001 /* UshotApp.swift */,
 				020000000000000000000002 /* AppDelegate.swift */,
+				02000000000000000000002A /* HistoryLifecycleRegression.swift */,
+				02000000000000000000002B /* ImagePasteboardWriter.swift */,
+				02000000000000000000002C /* QuickAnnotationCanvasRegression.swift */,
+				02000000000000000000002D /* PinnedShotToolbarRegression.swift */,
 				020000000000000000000003 /* AppEnvironment.swift */,
 				02000000000000000000000D /* StatusBarController.swift */,
 				020000000000000000000020 /* UpdateController.swift */,
@@ -190,6 +206,8 @@
 			children = (
 				020000000000000000000021 /* AnnotationArrowHitTestingTests.swift */,
 				020000000000000000000022 /* AnnotationPreviewRevisionTests.swift */,
+				020000000000000000000028 /* SourceAnchoredEffectRenderingTests.swift */,
+				020000000000000000000029 /* ScreenshotHistoryAuthorizationTests.swift */,
 				020000000000000000000006 /* PhaseZeroFoundationTests.swift */,
 				020000000000000000000023 /* ProductIdentityTests.swift */,
 				020000000000000000000024 /* UpdateCheckingTests.swift */,
@@ -369,6 +387,10 @@
 			files = (
 				010000000000000000000001 /* UshotApp.swift in Sources */,
 				010000000000000000000002 /* AppDelegate.swift in Sources */,
+				010000000000000000000026 /* HistoryLifecycleRegression.swift in Sources */,
+				010000000000000000000027 /* ImagePasteboardWriter.swift in Sources */,
+				010000000000000000000028 /* QuickAnnotationCanvasRegression.swift in Sources */,
+				010000000000000000000029 /* PinnedShotToolbarRegression.swift in Sources */,
 				010000000000000000000003 /* AppEnvironment.swift in Sources */,
 				010000000000000000000009 /* StatusBarController.swift in Sources */,
 				01000000000000000000001B /* UpdateController.swift in Sources */,
@@ -398,6 +420,8 @@
 			files = (
 				01000000000000000000001D /* AnnotationArrowHitTestingTests.swift in Sources */,
 				01000000000000000000001E /* AnnotationPreviewRevisionTests.swift in Sources */,
+				010000000000000000000024 /* SourceAnchoredEffectRenderingTests.swift in Sources */,
+				010000000000000000000025 /* ScreenshotHistoryAuthorizationTests.swift in Sources */,
 				010000000000000000000007 /* PhaseZeroFoundationTests.swift in Sources */,
 				01000000000000000000001F /* ProductIdentityTests.swift in Sources */,
 				010000000000000000000020 /* UpdateCheckingTests.swift in Sources */,

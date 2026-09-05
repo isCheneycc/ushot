@@ -4,12 +4,14 @@ import UshotCore
 
 @MainActor
 final class HistorySessionRecorder {
-    var onError: ((Error) -> Void)?
+    private let onError: ((Error) -> Void)?
 
     private weak var session: AnnotationEditingSession?
     private let settingsStore: SettingsStore
     private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
     private let persistencePipeline: HistoryPersistencePipeline
+    private let store: any ScreenshotHistoryStoring
+    private let authorization: HistoryWriteAuthorization
     private var metadata: HistoryRecordMetadata
     private var debounceTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
@@ -19,10 +21,19 @@ final class HistorySessionRecorder {
         store: any ScreenshotHistoryStoring,
         settingsStore: SettingsStore,
         updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
+        authorization: HistoryWriteAuthorization? = nil,
         onError: ((Error) -> Void)? = nil
     ) {
         self.session = session
         self.settingsStore = settingsStore
+        self.store = store
+        self.authorization = authorization ?? store.writeAuthority.authorization(
+            for: session.controller.document.id
+        )
+        precondition(
+            self.authorization.recordID == session.controller.document.id,
+            "A history recorder must own the authorization for its document."
+        )
         self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
         self.persistencePipeline = HistoryPersistencePipeline(
             store: store,
@@ -47,12 +58,33 @@ final class HistorySessionRecorder {
         }
     }
 
+    var isAuthorized: Bool { store.writeAuthority.isCurrent(authorization) }
+    var canPersist: Bool { settingsStore.settings.history.isEnabled && isAuthorized }
+
+    /// Closing keeps the session alive through the final authoritative render,
+    /// then calls this barrier before releasing its last presentation owner.
+    func flush(snapshot: AnnotationEditingSession.HistoryPreviewSnapshot?) async throws {
+        debounceTask?.cancel()
+        debounceTask = nil
+        guard let snapshot, let record = makeRecord(snapshot: snapshot) else {
+            await persistencePipeline.waitForCompletion()
+            return
+        }
+        try await persistencePipeline.enqueue(
+            record: record,
+            authorization: authorization,
+            retention: settingsStore.settings.history,
+            onError: nil
+        ).value
+    }
+
     private func persistImmediately(
         snapshot: AnnotationEditingSession.HistoryPreviewSnapshot
     ) {
         guard let record = makeRecord(snapshot: snapshot) else { return }
         persistencePipeline.enqueue(
             record: record,
+            authorization: authorization,
             retention: settingsStore.settings.history,
             onError: onError
         )
@@ -72,6 +104,8 @@ final class HistorySessionRecorder {
         let settingsStore = settingsStore
         let updateSensitiveActivityTracker = updateSensitiveActivityTracker
         let persistencePipeline = persistencePipeline
+        let store = store
+        let authorization = authorization
         let onError = onError
         let task = Task { @MainActor in
             defer { updateSensitiveActivityTracker.finish(lease) }
@@ -91,9 +125,11 @@ final class HistorySessionRecorder {
                 return
             }
 
-            guard settingsStore.settings.history.isEnabled else {
+            guard settingsStore.settings.history.isEnabled,
+                  store.writeAuthority.isCurrent(authorization)
+            else {
                 AppLog.history.debug(
-                    "Skipped debounced history persistence because history was disabled"
+                    "Skipped debounced history persistence because recording was disabled or its lifetime was deleted"
                 )
                 return
             }
@@ -102,6 +138,7 @@ final class HistorySessionRecorder {
             // is released only by the defer above, after that handoff completes.
             persistencePipeline.enqueue(
                 record: record,
+                authorization: authorization,
                 retention: settingsStore.settings.history,
                 onError: onError
             )
@@ -113,7 +150,7 @@ final class HistorySessionRecorder {
     private func makeRecord(
         snapshot: AnnotationEditingSession.HistoryPreviewSnapshot
     ) -> ScreenshotHistoryRecord? {
-        guard settingsStore.settings.history.isEnabled, let session else { return nil }
+        guard canPersist, let session else { return nil }
         precondition(
             snapshot.document.isCachedPreviewCompatibleWithCurrentRenderer,
             "History persistence must never label an incompatible cached preview as authoritative."
@@ -133,7 +170,7 @@ final class HistorySessionRecorder {
 private final class HistoryPersistencePipeline {
     private let store: any ScreenshotHistoryStoring
     private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
-    private var saveTask: Task<Void, Never>?
+    private var saveTask: Task<Void, Error>?
 
     init(
         store: any ScreenshotHistoryStoring,
@@ -143,26 +180,34 @@ private final class HistoryPersistencePipeline {
         self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
     }
 
+    @discardableResult
     func enqueue(
         record: ScreenshotHistoryRecord,
+        authorization: HistoryWriteAuthorization,
         retention: HistorySettings,
         onError: ((Error) -> Void)?
-    ) {
+    ) -> Task<Void, Error> {
         let lease = updateSensitiveActivityTracker.begin(
             operation: "history-save-and-retention"
         )
         let previousTask = saveTask
         let store = store
         let updateSensitiveActivityTracker = updateSensitiveActivityTracker
-        saveTask = Task { @MainActor in
+        let task = Task { @MainActor in
             defer { updateSensitiveActivityTracker.finish(lease) }
-            if let previousTask { await previousTask.value }
+            // A newer complete snapshot is also the retry for a failed save.
+            // Preserve ordering without making an earlier failure poison it.
+            if let previousTask { _ = await previousTask.result }
             do {
-                try await store.save(record)
+                try await store.save(record, authorization: authorization)
                 try await store.enforceRetention(
                     days: retention.retentionDays,
                     maximumItemCount: retention.maximumItemCount,
                     now: Date()
+                )
+            } catch HistoryWriteAuthorizationError.revoked {
+                AppLog.history.notice(
+                    "Discarded queued history persistence after deletion: id=\(record.metadata.id, privacy: .public)"
                 )
             } catch {
                 let nsError = error as NSError
@@ -170,7 +215,14 @@ private final class HistoryPersistencePipeline {
                     "History persistence failed: domain=\(nsError.domain, privacy: .public), code=\(nsError.code, privacy: .public)"
                 )
                 onError?(error)
+                throw error
             }
         }
+        saveTask = task
+        return task
+    }
+
+    func waitForCompletion() async {
+        if let saveTask { _ = await saveTask.result }
     }
 }

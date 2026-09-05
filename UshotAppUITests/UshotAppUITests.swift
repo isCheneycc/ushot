@@ -25,6 +25,64 @@ final class UshotAppUITests: XCTestCase {
     }
 
     @MainActor
+    func testLanguageChangeRejectsAnOpenEditorBeforeUpdatingSettings() {
+        let app = launch(arguments: [
+            "--uitest-reset-settings", "--uitest-editor", "--uitest-language-change-admission"
+        ])
+        defer { app.terminate() }
+        let editor = app.windows["editor.window"]
+        let settings = app.windows["settings.window"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(settings.waitForExistence(timeout: 3))
+        let picker = app.popUpButtons["settings.advanced.language"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 3))
+        let previousLanguage = picker.value as? String
+        picker.click()
+        app.menuItems["English"].click()
+        let refusal = app.staticTexts.matching(NSPredicate(
+            format: "value CONTAINS %@ OR value CONTAINS %@",
+            "before changing the language", "再更改语言"
+        )).firstMatch
+        XCTAssertTrue(refusal.waitForExistence(timeout: 3))
+        XCTAssertEqual(picker.value as? String, previousLanguage)
+        XCTAssertTrue(editor.exists)
+        XCTAssertNotEqual(app.state, .notRunning)
+    }
+
+    @MainActor
+    func testHistoryLifecyclePreservesFinalEditsAndRevokesDeletedRecords() {
+        let app = launch(arguments: ["--uitest-reset-settings", "--uitest-history-lifecycle"])
+        defer { app.terminate() }
+        XCTAssertTrue(app.windows["history.lifecycle.passed"].waitForExistence(timeout: 15))
+    }
+
+    @MainActor
+    func testNormalQuitWaitsForTheFinalHistoryRenderAndSave() throws {
+        let historyDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("UshotQuitRegression-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: historyDirectory, withIntermediateDirectories: false)
+        addTeardownBlock { try FileManager.default.removeItem(at: historyDirectory) }
+        let app = XCUIApplication(url: targetApplicationURL())
+        app.launchArguments = ["--uitest-reset-settings", "--uitest-history-quit"]
+        app.launchEnvironment["USHOT_UI_TEST_SETTINGS_SUITE"] = isolatedSettingsSuiteName
+        app.launchEnvironment["USHOT_UI_TEST_HISTORY_DIRECTORY"] = historyDirectory.path
+        app.launch()
+        defer { if app.state != .notRunning { app.terminate() } }
+        XCTAssertTrue(app.windows["editor.window"].waitForExistence(timeout: 5))
+        app.typeKey("q", modifierFlags: .command)
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 10))
+        let records = try FileManager.default.contentsOfDirectory(
+            at: historyDirectory, includingPropertiesForKeys: nil
+        ).filter { UUID(uuidString: $0.lastPathComponent) != nil }
+        XCTAssertEqual(records.count, 1)
+        let directory = try XCTUnwrap(records.first)
+        let data = try Data(contentsOf: directory.appendingPathComponent("document.json"))
+        let document = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let annotations = try XCTUnwrap(document["annotations"] as? [[String: Any]])
+        XCTAssertEqual(annotations.count, 1, "Command-Q must save the edit whose render was still pending.")
+    }
+
+    @MainActor
     func testShortcutRecordersSurviveRepeatedFocusRedraws() {
         let app = launch(arguments: [
             "-AppleLanguages", "(en)",
@@ -298,6 +356,24 @@ final class UshotAppUITests: XCTestCase {
             customColorRemove.exists,
             "Restoring factory colors while keeping custom colors must retain the custom entry."
         )
+    }
+
+    @MainActor
+    func testCancellingSmartSnapPressLeavesAnUnconfirmedSelectableOverlay() {
+        let app = launch(arguments: [
+            "--uitest-reset-settings", "--uitest-region-selection",
+            "--uitest-region-snap-cancellation"
+        ])
+        defer { app.terminate() }
+        let overlay = app.groups["capture.region.overlay"]
+        XCTAssertTrue(overlay.waitForExistence(timeout: 5))
+        waitForValue(of: overlay, containing: "snap=none")
+        waitForValue(of: overlay, containing: "confirmationSurface=hidden")
+        waitForValue(of: overlay, containing: "overlayInput=enabled")
+        XCTAssertFalse(app.groups["pinned.canvas"].exists)
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(overlay.waitForNonExistence(timeout: 3))
+        XCTAssertNotEqual(app.state, .notRunning)
     }
 
     @MainActor

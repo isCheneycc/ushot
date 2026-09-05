@@ -11,6 +11,7 @@ final class PinnedShotManager {
     private let exporter: any ImageExporting
     private let settingsStore: SettingsStore
     private let historyStore: any ScreenshotHistoryStoring
+    private let sessionRegistry: AnnotationSessionRegistry
     private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
     private let admitAppWork: @MainActor () throws -> Void
     private var pinnedControllers: [UUID: PinnedShotPanelController] = [:]
@@ -30,12 +31,14 @@ final class PinnedShotManager {
         exporter: any ImageExporting = SystemImageExporter(),
         settingsStore: SettingsStore,
         historyStore: any ScreenshotHistoryStoring,
+        sessionRegistry: AnnotationSessionRegistry,
         updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
         admitAppWork: @escaping @MainActor () throws -> Void = {}
     ) {
         self.exporter = exporter
         self.settingsStore = settingsStore
         self.historyStore = historyStore
+        self.sessionRegistry = sessionRegistry
         self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
         self.admitAppWork = admitAppWork
         let source = DispatchSource.makeMemoryPressureSource(
@@ -352,6 +355,46 @@ final class PinnedShotManager {
         }
     }
 
+    func prepareForApplicationTermination() throws {
+        guard regionDraftController == nil else {
+            throw UpdateCheckError.rejected(
+                reason: String(localized: "Finish or cancel the active capture before quitting Ushot.")
+            )
+        }
+        do {
+            for controller in pinnedControllers.values {
+                try controller.prepareForApplicationTermination()
+            }
+        } catch {
+            resumeAfterCancelledTermination()
+            throw error
+        }
+    }
+
+    func flushForApplicationTermination() async throws {
+        let controllers = Array(pinnedControllers.values)
+        for controller in controllers {
+            try await controller.flushHistory()
+        }
+    }
+
+    func resumeAfterCancelledTermination() {
+        for controller in pinnedControllers.values {
+            controller.resumeAfterCancelledTermination()
+        }
+    }
+
+    /// History must hand an already pinned document to the same exclusive
+    /// editor owner instead of opening a second mutable surface around it.
+    @discardableResult
+    func presentCanvasEditorIfOwned(for session: AnnotationEditingSession) -> Bool {
+        guard pinnedControllers.values.contains(where: { $0.owns(session: session) }) else {
+            return false
+        }
+        presentCanvasEditor(for: session, reason: "history-open-existing-pin")
+        return true
+    }
+
     func canvasEditorDidClose(session: AnnotationEditingSession, leaseID: UUID) {
         let key = ObjectIdentifier(session)
         guard canvasEditorLeases[key] == leaseID else {
@@ -493,6 +536,10 @@ final class PinnedShotManager {
         for session: AnnotationEditingSession,
         opensCanvasEditor: Bool = true
     ) {
+        precondition(
+            sessionRegistry.register(session) === session,
+            "A newly captured document must have a unique editing session."
+        )
         let captureSettings = settingsStore.settings.capture
         if settingsStore.settings.history.isEnabled {
             let recorder = HistorySessionRecorder(
@@ -517,17 +564,8 @@ final class PinnedShotManager {
 
     private func automaticallyCopy(_ image: CapturedImage) {
         do {
-            let item = NSPasteboardItem()
-            item.setData(try exporter.pngData(for: image.image), forType: .png)
-            if let tiff = NSBitmapImageRep(cgImage: image.image).tiffRepresentation {
-                item.setData(tiff, forType: .tiff)
-            }
-            NSPasteboard.general.clearContents()
-            guard NSPasteboard.general.writeObjects([item]) else {
-                throw ScreenshotAppError.exportFailed(
-                    description: "The pasteboard rejected the automatically copied screenshot."
-                )
-            }
+            let pngData = try exporter.pngData(for: image.image)
+            try writeImageToPasteboard(image.image, pngData: pngData)
         } catch {
             onError?(error)
         }
@@ -737,6 +775,12 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private var copiedOrSaved = false
     private var retainsAfterCopy = false
     private var closeReason: PinnedShotCloseReason?
+    private var historyCloseTask: Task<Void, Never>?
+    private struct PersistenceInputSuspension {
+        let imageIgnoredMouseEvents: Bool
+        let toolbarIgnoredMouseEvents: Bool
+    }
+    private var persistenceInputSuspension: PersistenceInputSuspension?
     private var regionDraftTransitionInProgress = false
     private var regionDraftImageIgnoredMouseEvents = false
     private var regionDraftGeometryUpdateInProgress = false
@@ -781,6 +825,70 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             || windowMoveInteraction != nil
             || pinchZoomInteraction != nil
             || liveResizeInProgress
+            || persistenceInputSuspension != nil
+    }
+
+    func owns(session candidate: AnnotationEditingSession) -> Bool {
+        session === candidate
+    }
+
+    func prepareForApplicationTermination() throws {
+        guard historyCloseTask == nil,
+              !exportInProgress, activeSavePanel == nil, promiseDelegates.isEmpty,
+              !regionDraftTransitionInProgress, !regionDraftGeometryUpdateInProgress,
+              windowMoveInteraction == nil, pinchZoomInteraction == nil,
+              !liveResizeInProgress, !imageView.hasActivePointerInteraction,
+              NSEvent.pressedMouseButtons == 0
+        else {
+            throw UpdateCheckError.rejected(
+                reason: String(localized: "Finish the active screenshot interaction or output before quitting Ushot.")
+            )
+        }
+        try suspendInputForHistoryFlush(reason: "application-termination")
+    }
+
+    func flushHistory() async throws {
+        try await session.flushHistory()
+    }
+
+    func resumeAfterCancelledTermination() {
+        guard historyCloseTask == nil else { return }
+        resumeInputAfterHistoryFlush()
+    }
+
+    private func suspendInputForHistoryFlush(reason: String) throws {
+        guard persistenceInputSuspension == nil else { return }
+        guard !imageView.hasActivePointerInteraction, NSEvent.pressedMouseButtons == 0 else {
+            throw UpdateCheckError.rejected(
+                reason: String(localized: "Finish the active screenshot interaction or output before quitting Ushot.")
+            )
+        }
+        if !canvasEditorPresented {
+            resolveActiveLineWidthEdit(.commitOrReject, reason: reason)
+            guard resolveActiveTextEditing(reason: reason) else {
+                throw UpdateCheckError.rejected(
+                    reason: String(localized: "Finish editing the screenshot text before closing it.")
+                )
+            }
+        }
+        persistenceInputSuspension = PersistenceInputSuspension(
+            imageIgnoredMouseEvents: imagePanel.ignoresMouseEvents,
+            toolbarIgnoredMouseEvents: toolbarPanel.ignoresMouseEvents
+        )
+        imagePanel.ignoresMouseEvents = true
+        toolbarPanel.ignoresMouseEvents = true
+        imageView.setInteractionSuspended(true)
+        toolbarController.setExporting(true)
+        AppLog.history.debug("Suspended pinned input for final history save: reason=\(reason, privacy: .public)")
+    }
+
+    private func resumeInputAfterHistoryFlush() {
+        guard let suspension = persistenceInputSuspension else { return }
+        persistenceInputSuspension = nil
+        imagePanel.ignoresMouseEvents = suspension.imageIgnoredMouseEvents
+        toolbarPanel.ignoresMouseEvents = suspension.toolbarIgnoredMouseEvents
+        imageView.setInteractionSuspended(false)
+        toolbarController.setExporting(false)
     }
 
     init(
@@ -1144,6 +1252,16 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             !presentationMode.isRegionDraft,
             "An uncommitted region confirmation cannot share its document with the full canvas editor."
         )
+        guard closeReason == nil, persistenceInputSuspension == nil,
+              !exportInProgress, activeSavePanel == nil, promiseDelegates.isEmpty,
+              !regionDraftTransitionInProgress, !regionDraftGeometryUpdateInProgress,
+              windowMoveInteraction == nil, pinchZoomInteraction == nil,
+              !liveResizeInProgress, !imageView.hasActivePointerInteraction
+        else {
+            AppLog.history.notice("Rejected Canvas ownership while the pinned screenshot owns an interaction or output")
+            NSSound.beep()
+            return false
+        }
         guard !canvasEditorPresented else {
             AppLog.capture.debug(
                 "Kept existing exclusive canvas-editor ownership: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public)"
@@ -1254,229 +1372,40 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         toolbarPanel.contentViewController = nil
     }
 
-#if DEBUG
-    func runLineWidthRoutingRegression() {
-        imageView.runLineWidthRoutingRegression()
-        persistDefaultLineWidth(
-            logicalPoints: 9,
-            unit: session.lineWidthUnit
-        )
-
-        session.currentTool = .select
-        syncLineWidthToolbar()
-        precondition(
-            toolbarController.debugLineWidthFieldIsEnabled,
-            "Select must keep the line-width field enabled for a compatible selected annotation."
-        )
-        toolbarController.runLineWidthInputCommitRegression(displayedText: "11")
-        guard let selectedID = session.controller.selectedItemIDs.first else {
-            preconditionFailure("The toolbar line-width regression lost its selected annotation.")
-        }
-        precondition(
-            session.controller.document.annotations.first(where: { $0.id == selectedID })?.style.lineWidth == 11,
-            "The real toolbar input callback chain did not update the selected annotation."
-        )
-        precondition(
-            session.defaultStyle(for: .rectangle).lineWidth == 9,
-            "Editing a selection through the toolbar must not persist over the rectangle default."
-        )
-
-        session.controller.undo()
-        precondition(
-            session.controller.document.annotations.first(where: { $0.id == selectedID })?.style.lineWidth == 9
-                && toolbarController.debugCommittedLineWidth == 9,
-            "Undo must synchronize the selected annotation and toolbar field after a real input callback."
-        )
-
-        session.controller.selectedItemIDs.removeAll()
-        session.currentTool = .rectangle
-        let documentBeforeDefaultEdit = session.controller.document
-        toolbarController.runLineWidthInputCommitRegression(displayedText: "10")
-        precondition(
-            session.controller.document == documentBeforeDefaultEdit,
-            "A toolbar default-width edit without a selection must not mutate the document."
-        )
-        precondition(
-            session.creationStyle(for: .rectangle).lineWidth == 10
-                && session.defaultStyle(for: .rectangle).lineWidth == 10,
-            "The real toolbar input callback chain did not update and persist the creation default."
-        )
-
-        guard let lifecycleSelectionID = session.controller.document.orderedAnnotations.last?.id else {
-            preconditionFailure("The toolbar lifecycle regression requires an existing stroked annotation.")
-        }
-        session.controller.selectedItemIDs = [lifecycleSelectionID]
-        session.currentTool = .select
-        toolbarController.beginNativeLineWidthInputRegression(displayedText: "12")
-        disableAnnotationEditing(reason: "debug-line-width-lifecycle")
-        precondition(
-            !toolbarController.debugHasActiveLineWidthEdit,
-            "Disabling annotation editing must end the toolbar's line-width transaction."
-        )
-        imageView.setAnnotationEditingEnabled(true)
-        syncLineWidthToolbar()
-        precondition(
-            !toolbarController.debugLineWidthFieldIsEnabled,
-            "Re-enabling Select with no selection must leave the line-width field disabled."
-        )
-
-        session.currentTool = .rectangle
-        toolbarController.beginLineWidthInputRegression(displayedText: "12")
-        let alternateUnit: AnnotationLineWidthUnit = session.lineWidthUnit == .pixels
-            ? .points
-            : .pixels
-        toolbarController.runLineWidthUnitChangeRegression(to: alternateUnit)
-        precondition(
-            !toolbarController.debugHasActiveLineWidthEdit
-                && session.lineWidthUnit == alternateUnit
-                && session.creationStyle(for: .rectangle).lineWidth == 12,
-            "Changing units must commit and detach the active line-width transaction before conversion."
-        )
-
-        toolbarController.beginNativeLineWidthInputRegression(displayedText: "13.")
-        selectAnnotationTool(.arrow, reason: "debug-line-width-tool-switch")
-        precondition(
-            session.currentTool == .arrow
-                && !toolbarController.debugHasActiveLineWidthEdit
-                && !toolbarController.debugLineWidthFieldHasEditor
-                && toolbarController.debugLineWidthFieldString == "13"
-                && !imageView.hasActiveLineWidthEditing,
-            "Changing tools must resolve both sides of an active native line-width edit and normalize its display before changing ownership."
-        )
-        precondition(
-            session.defaultStyle(for: .rectangle).lineWidth == 13
-                && session.creationStyle(for: .arrow).lineWidth == 13,
-            "A valid tool-default line width must commit before the next tool loads its default."
-        )
-
-        toolbarController.beginNativeLineWidthInputRegression(displayedText: "14")
-        imageView.runLineWidthCanvasBoundaryRegression()
-        precondition(
-            session.creationStyle(for: .arrow).lineWidth == 14
-                && !toolbarController.debugHasActiveLineWidthEdit
-                && !toolbarController.debugLineWidthFieldHasEditor
-                && !imageView.hasActiveLineWidthEditing,
-            "Canvas pointer-down must commit and detach the active tool-default line-width edit first."
-        )
-
-        guard let sharedSelectionID = session.controller.document.orderedAnnotations.last?.id else {
-            preconditionFailure("The shared-session ownership regression requires an existing annotation.")
-        }
-        session.controller.selectedItemIDs = [sharedSelectionID]
-        selectAnnotationTool(.select, reason: "debug-shared-session-selection")
-        toolbarController.beginNativeLineWidthInputRegression(displayedText: "15")
-        let selectionBeforeCanvasEditor = session.controller.selectedItemIDs
-        let restoredToolbarVisibility = presentationMode.showsToolbar
-        beginCanvasEditorPresentation(reason: "debug-shared-session-boundary")
-        precondition(
-            canvasEditorPresented
-                && !presentationMode.showsToolbar
-                && session.controller.selectedItemIDs == selectionBeforeCanvasEditor
-                && session.controller.document.annotations.first(where: { $0.id == sharedSelectionID })?.style.lineWidth == 15
-                && !toolbarController.debugHasActiveLineWidthEdit
-                && !toolbarController.debugLineWidthFieldHasEditor
-                && !imageView.hasActiveLineWidthEditing
-                && !imageView.debugIsAnnotationEditingEnabled
-                && imageView.debugPresentedSelectionHandleCount == 0,
-            "Opening the full editor must commit the selected value, preserve shared selection and make the pinned surface a transaction-free reader."
-        )
-        session.currentTool = .ellipse
-        session.controller.perform(label: "Debug shared-editor delete") { document in
-            document.annotations.removeAll { $0.id == sharedSelectionID }
-        }
-        precondition(
-            !session.controller.selectedItemIDs.contains(sharedSelectionID),
-            "Deleting the committed line-width target in the full editor must atomically invalidate its selection."
-        )
-        endCanvasEditorPresentation(for: session)
-        precondition(
-            !canvasEditorPresented
-                && presentationMode.showsToolbar == restoredToolbarVisibility
-                && imageView.debugIsAnnotationEditingEnabled == restoredToolbarVisibility,
-            "Closing the full editor must release exclusive ownership and restore the prior pinned-toolbar state."
-        )
-
-        let restoredEditor = settingsStore.settings.editor
-        let exclusiveColorCandidates = ["#12ABEF", "#654321", "#ABCDEF", "#FEDCBA"]
-        guard let exclusiveColor = exclusiveColorCandidates.first(where: {
-            !restoredEditor.availableColorHexes.contains($0)
-        }) else {
-            preconditionFailure("The palette ownership regression requires one color outside the configured palette.")
-        }
-        var exclusiveEditor = restoredEditor
-        exclusiveEditor.toolbarColorHexes = [exclusiveColor]
-        exclusiveEditor.defaultColorHex = exclusiveColor
-        exclusiveEditor.defaultTextColorHex = exclusiveColor
-        exclusiveEditor.defaultRectangleColorHex = exclusiveColor
-        exclusiveEditor.defaultEllipseColorHex = exclusiveColor
-        session.controller.selectedItemIDs.removeAll()
-        session.currentTool = .text
-        applyEditorColorSettings(exclusiveEditor)
-        session.adoptCurrentStyle(session.currentStyle, origin: .newTextDraft)
-        beginCanvasEditorPresentation(reason: "debug-canvas-editor-palette-ownership")
-
-        session.updateEditorSettings(restoredEditor)
-        session.adoptCurrentStyle(
-            session.defaultStyle(for: .text),
-            origin: .newTextDraft
-        )
-        precondition(
-            toolbarController.debugColorPaletteHexes == [exclusiveColor],
-            "The hidden pinned toolbar must not consume canvas-editor palette mutations."
-        )
-        endCanvasEditorPresentation(for: session)
-        let restoredCurrentColor = AnnotationColorPalette.hexString(
-            for: session.currentStyle.strokeColor
-        )
-        precondition(
-            toolbarController.debugColorPaletteHexes == restoredEditor.availableColorHexes
-                && toolbarController.debugCurrentColorHex == restoredCurrentColor
-                && restoredEditor.availableColorHexes.contains(restoredCurrentColor),
-            "Returning from the canvas editor must atomically reconcile the hidden toolbar with the latest palette and active style."
-        )
-        selectAnnotationTool(.arrow, reason: "debug-shared-session-return")
-
-        toolbarController.beginNativeLineWidthInputRegression(displayedText: "15")
-        precondition(
-            session.creationStyle(for: .arrow).lineWidth == 15,
-            "The toolbar-detachment regression requires a live uncommitted Arrow width."
-        )
-        prepareToolbarForDetachment(reason: "debug-line-width-toolbar-detachment")
-        precondition(
-            session.creationStyle(for: .arrow).lineWidth == 14
-                && !toolbarController.debugHasActiveLineWidthEdit
-                && !toolbarController.debugLineWidthFieldHasEditor
-                && !imageView.hasActiveLineWidthEditing,
-            "Toolbar detachment must cancel and release its native line-width edit before removing the content view."
-        )
-        AppLog.capture.notice(
-            "Annotation toolbar line-width callback regression passed: selectFieldEnabled=true, selectedCommit=11, selectedUndo=9, defaultCommit=10, lifecycleCancel=true, activeUnitBoundary=true, toolSwitchCommit=13, rawCommitNormalized=true, canvasCommit=14, sharedSessionExclusive=true, sharedSelectionPreserved=true, sharedTargetDeletionSafe=true, paletteOwnershipExclusive=true, paletteReturnAtomic=true, detachCancel=14"
-        )
-    }
-
-    func runReadOnlyWindowPressCursorRegression() {
-        imageView.runReadOnlyWindowPressCursorRegression()
-        imagePanel.runAppControlledCrossScreenMovementRegression()
-    }
-
-    func runInlineTextStabilityRegression() {
-        imageView.runInlineTextStabilityRegression()
-    }
-
-    func prepareInlineTextResizeUITest() {
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        imagePanel.orderFrontRegardless()
-        toolbarPanel.orderFrontRegardless()
-        imagePanel.makeKey()
-        imageView.prepareInlineTextResizeUITest()
-        imagePanel.orderFrontRegardless()
-        toolbarPanel.orderFrontRegardless()
-    }
-#endif
-
     func close(reason: PinnedShotCloseReason) {
-        guard closeReason == nil else { return }
+        guard closeReason == nil, historyCloseTask == nil else { return }
+        guard persistenceInputSuspension == nil || reason == .applicationTermination else { return }
         cancelActiveExport(reason: "close-\(reason.rawValue)")
+        // Confirmation cancellation explicitly discards an uncommitted capture.
+        // A Canvas editor still owning this session is responsible for its save.
+        guard session.hasHistoryRecorder, !presentationMode.isRegionDraft,
+              !canvasEditorPresented, reason != .applicationTermination
+        else {
+            completeClose(reason: reason)
+            return
+        }
+        do {
+            try suspendInputForHistoryFlush(reason: "close-\(reason.rawValue)")
+        } catch {
+            onError?(error)
+            return
+        }
+        historyCloseTask = Task { @MainActor [self] in
+            do {
+                try await session.flushHistory()
+                historyCloseTask = nil
+                completeClose(reason: reason)
+            } catch {
+                historyCloseTask = nil
+                resumeInputAfterHistoryFlush()
+                AppLog.history.error("Kept pinned screenshot open after final history save failed")
+                onError?(error)
+            }
+        }
+    }
+
+    private func completeClose(reason: PinnedShotCloseReason) {
+        guard closeReason == nil else { return }
         abandonEntranceAnimation(reason: "close-\(reason.rawValue)")
         closeReason = reason
         disableAnnotationEditing(reason: "close-\(reason.rawValue)")
@@ -1484,6 +1413,12 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             "Closing pinned screenshot: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason.rawValue, privacy: .public)"
         )
         imagePanel.close()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard closeReason == nil else { return true }
+        close(reason: .toolbar)
+        return false
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -1530,6 +1465,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         precondition(keyboardMonitor == nil, "A pinned screenshot may install only one keyboard monitor.")
         guard let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] event in
             guard let self, self.ownsKeyboardEvent(event) else { return event }
+            if self.persistenceInputSuspension != nil {
+                return event.keyCode == 12 && event.modifierFlags.contains(.command) ? event : nil
+            }
             if self.regionDraftTransitionInProgress { return nil }
 
             let dismissalModifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
@@ -1853,7 +1791,8 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 AppLog.export.debug("Ignored annotation-session error after screenshot close began")
                 return
             }
-            if self.exportInProgress || self.regionDraftTransitionInProgress {
+            if self.exportInProgress || self.regionDraftTransitionInProgress
+                || self.persistenceInputSuspension != nil {
                 AppLog.export.debug(
                     "Deferred annotation-session error to the active screenshot action: export=\(self.exportInProgress, privacy: .public), pin=\(self.regionDraftTransitionInProgress, privacy: .public)"
                 )
@@ -2681,18 +2620,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             do {
                 self.payload.update(capturedImage: currentImage)
                 let pngData = try self.payload.pngData()
-                let bitmap = NSBitmapImageRep(cgImage: currentImage.image)
-                let item = NSPasteboardItem()
-                item.setData(pngData, forType: .png)
-                if let tiffData = bitmap.tiffRepresentation {
-                    item.setData(tiffData, forType: .tiff)
-                }
                 try Task.checkCancellation()
                 guard self.validateActiveExport(transaction, stage: "copy-pasteboard-write") else { return }
-                NSPasteboard.general.clearContents()
-                guard NSPasteboard.general.writeObjects([item]) else {
-                    throw ScreenshotAppError.exportFailed(description: "The pasteboard rejected the image data.")
-                }
+                try writeImageToPasteboard(currentImage.image, pngData: pngData)
                 self.copiedOrSaved = true
                 if transaction.beganAsRegionDraft {
                     successDisposition = .completeRegionSelection
@@ -5643,3 +5573,75 @@ private final class FilePromiseDelegate: NSObject, NSFilePromiseProviderDelegate
         lifecycleRetention = nil
     }
 }
+
+#if DEBUG
+extension PinnedShotPanelController {
+    func runLineWidthRoutingRegression() {
+        PinnedShotToolbarRegression.run(
+            session: session,
+            imageView: imageView,
+            snapshot: {
+                PinnedShotToolbarRegression.Snapshot(
+                    lineWidthFieldIsEnabled: self.toolbarController.debugLineWidthFieldIsEnabled,
+                    committedLineWidth: self.toolbarController.debugCommittedLineWidth,
+                    hasActiveLineWidthEdit: self.toolbarController.debugHasActiveLineWidthEdit,
+                    lineWidthFieldHasEditor: self.toolbarController.debugLineWidthFieldHasEditor,
+                    lineWidthFieldString: self.toolbarController.debugLineWidthFieldString,
+                    colorPaletteHexes: self.toolbarController.debugColorPaletteHexes,
+                    currentColorHex: self.toolbarController.debugCurrentColorHex,
+                    canvasEditorPresented: self.canvasEditorPresented,
+                    showsToolbar: self.presentationMode.showsToolbar,
+                    editorSettings: self.settingsStore.settings.editor
+                )
+            },
+            perform: { action in
+                switch action {
+                case .persistDefaultLineWidth(let width):
+                    self.persistDefaultLineWidth(logicalPoints: width, unit: self.session.lineWidthUnit)
+                case .syncLineWidthToolbar:
+                    self.syncLineWidthToolbar()
+                case .commitLineWidthInput(let text):
+                    self.toolbarController.runLineWidthInputCommitRegression(displayedText: text)
+                case .beginNativeLineWidthInput(let text):
+                    self.toolbarController.beginNativeLineWidthInputRegression(displayedText: text)
+                case .beginLineWidthInput(let text):
+                    self.toolbarController.beginLineWidthInputRegression(displayedText: text)
+                case .changeLineWidthUnit(let unit):
+                    self.toolbarController.runLineWidthUnitChangeRegression(to: unit)
+                case .disableAnnotationEditing(let reason):
+                    self.disableAnnotationEditing(reason: reason)
+                case .selectAnnotationTool(let tool, let reason):
+                    self.selectAnnotationTool(tool, reason: reason)
+                case .beginCanvasEditorPresentation(let reason):
+                    _ = self.beginCanvasEditorPresentation(reason: reason)
+                case .endCanvasEditorPresentation:
+                    self.endCanvasEditorPresentation(for: self.session)
+                case .applyEditorColorSettings(let editor):
+                    self.applyEditorColorSettings(editor)
+                case .prepareToolbarForDetachment(let reason):
+                    self.prepareToolbarForDetachment(reason: reason)
+                }
+            }
+        )
+    }
+
+    func runReadOnlyWindowPressCursorRegression() {
+        imageView.runReadOnlyWindowPressCursorRegression()
+        imagePanel.runAppControlledCrossScreenMovementRegression()
+    }
+
+    func runInlineTextStabilityRegression() {
+        imageView.runInlineTextStabilityRegression()
+    }
+
+    func prepareInlineTextResizeUITest() {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        imagePanel.orderFrontRegardless()
+        toolbarPanel.orderFrontRegardless()
+        imagePanel.makeKey()
+        imageView.prepareInlineTextResizeUITest()
+        imagePanel.orderFrontRegardless()
+        toolbarPanel.orderFrontRegardless()
+    }
+}
+#endif

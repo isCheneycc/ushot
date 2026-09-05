@@ -107,6 +107,85 @@ final class AnnotationPreviewRevisionTests: XCTestCase {
         XCTAssertEqual(document.cachedPreviewRevisionAffectedAnnotationCount, 0)
     }
 
+    func testRevisionFourPreviewRefreshesForTransformedSourceAnchoredEffects() {
+        for kind in [AnnotationKind.blur, .mosaic] {
+            for transform in [
+                AnnotationTransform(translation: CGSize(width: -64, height: 16)),
+                AnnotationTransform(rotationRadians: .pi / 4),
+                AnnotationTransform(scaleX: 1.5, scaleY: 0.5)
+            ] {
+                let document = makeDocument(
+                    cachedPreviewRenderRevision: 4,
+                    annotations: [AnnotationItem(
+                        kind: kind,
+                        zIndex: 0,
+                        geometry: .rect(CGRect(x: 10, y: 12, width: 40, height: 32)),
+                        transform: transform
+                    )]
+                )
+
+                XCTAssertFalse(
+                    document.isCachedPreviewCompatibleWithCurrentRenderer,
+                    "A transformed \(kind.rawValue) preview must be rerendered from its current base image."
+                )
+                XCTAssertEqual(document.cachedPreviewRevisionAffectedAnnotationCount, 1)
+                XCTAssertTrue(
+                    document.recordingCurrentCachedPreviewRenderRevision()
+                        .isCachedPreviewCompatibleWithCurrentRenderer
+                )
+            }
+        }
+    }
+
+    func testRevisionFourPreviewRemainsCompatibleWithoutVisibleTransformedEffects() {
+        let document = makeDocument(
+            cachedPreviewRenderRevision: 4,
+            annotations: [
+                AnnotationItem(
+                    kind: .blur,
+                    zIndex: 0,
+                    geometry: .rect(CGRect(x: 8, y: 8, width: 20, height: 20))
+                ),
+                AnnotationItem(
+                    kind: .mosaic,
+                    zIndex: 1,
+                    geometry: .rect(CGRect(x: 32, y: 8, width: 20, height: 20))
+                ),
+                AnnotationItem(
+                    kind: .blur,
+                    zIndex: 2,
+                    geometry: .rect(CGRect(x: 8, y: 32, width: 20, height: 20)),
+                    transform: AnnotationTransform(translation: CGSize(width: 8, height: 0)),
+                    isVisible: false
+                ),
+                makeArrow(style: .filled, zIndex: 3),
+                makeText(zIndex: 4)
+            ]
+        )
+
+        XCTAssertTrue(document.isCachedPreviewCompatibleWithCurrentRenderer)
+        XCTAssertEqual(document.cachedPreviewRevisionAffectedAnnotationCount, 0)
+    }
+
+    func testLegacyPreviewCountsEffectAndEarlierRendererChangesOncePerItem() {
+        let document = makeDocument(
+            cachedPreviewRenderRevision: AnnotationDocument.legacyCachedPreviewRenderRevision,
+            annotations: [
+                makeArrow(style: .filled),
+                makeText(zIndex: 1),
+                AnnotationItem(
+                    kind: .mosaic,
+                    zIndex: 2,
+                    geometry: .rect(CGRect(x: 8, y: 8, width: 20, height: 20)),
+                    transform: AnnotationTransform(translation: CGSize(width: 8, height: 0))
+                )
+            ]
+        )
+
+        XCTAssertEqual(document.cachedPreviewRevisionAffectedAnnotationCount, 3)
+        XCTAssertFalse(document.isCachedPreviewCompatibleWithCurrentRenderer)
+    }
+
     func testSuccessfulRenderStampProducesCurrentRoundTrip() throws {
         let legacy = makeDocument(
             cachedPreviewRenderRevision: AnnotationDocument.legacyCachedPreviewRenderRevision,
@@ -214,7 +293,9 @@ final class AnnotationPreviewRevisionTests: XCTestCase {
     }
 
     private var textLayoutPredecessorRevision: Int {
-        AnnotationDocument.currentCachedPreviewRenderRevision - 1
+        // The text-layout migration is revision 4 even when later renderer
+        // changes advance the current revision for unrelated annotations.
+        3
     }
 
     private func makeArrow(

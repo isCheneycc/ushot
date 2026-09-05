@@ -935,6 +935,43 @@ final class AnnotationTextLayoutOwnershipTests: XCTestCase {
     }
 
     @MainActor
+    func testAdditionalInspectorMutationCannotPublishUnboundTextLayout() throws {
+        let original = legacyItem(alignment: .leading, scale: 1)
+        let controller = AnnotationDocumentController(document: makeDocument(item: original))
+        let initialState = controller.state
+
+        XCTAssertThrowsError(try controller.updateTextItemLayout(
+            id: original.id,
+            text: "Reflowed inspector text",
+            fontSize: original.style.fontSize,
+            wrapWidthStrategy: .preserve
+        ) { item in
+            item.text = "Text without its matching layout"
+        })
+        XCTAssertEqual(controller.state, initialState)
+        XCTAssertTrue(controller.undoStack.isEmpty)
+
+        let transaction = controller.beginContinuousEdit(
+            label: "Edit text inspector",
+            owner: "test-layout-ownership",
+            itemID: original.id
+        )
+        XCTAssertThrowsError(try controller.previewTextItemLayout(
+            transaction: transaction,
+            id: original.id,
+            text: "Reflowed inspector preview",
+            fontSize: original.style.fontSize,
+            wrapWidthStrategy: .preserve
+        ) { item in
+            item.text = "Text without its matching layout"
+        })
+        XCTAssertEqual(controller.state, initialState)
+        XCTAssertTrue(controller.undoStack.isEmpty)
+        XCTAssertTrue(controller.isContinuousEditActive(transaction))
+        XCTAssertTrue(controller.cancelContinuousEdit(transaction))
+    }
+
+    @MainActor
     func testControllerCapabilityFailurePublishesNoPartialTextState() throws {
         var original = legacyItem(alignment: .leading, scale: 1)
         let unavailableFontName = "Ushot-Intentionally-Unavailable-Controller-Font"

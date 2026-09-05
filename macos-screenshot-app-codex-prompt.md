@@ -209,7 +209,6 @@ ScreenshotApp/
 │  ├─ HotKeys/
 │  ├─ Permissions/
 │  ├─ Settings/
-│  ├─ FeatureGating/
 │  └─ Logging/
 ├─ Features/
 │  ├─ CaptureOverlay/
@@ -235,17 +234,15 @@ ScreenshotApp/
 
 ```swift
 protocol ScreenCapturing
-protocol FrameStreaming
 protocol CapturePermissionChecking
 protocol GlobalHotKeyManaging
 protocol AnnotationRendering
 protocol ImageExporting
 protocol ScreenshotHistoryStoring
-protocol FeatureEntitlementChecking
 protocol UpdateChecking
 ```
 
-未来收费能力只能通过 `FeatureEntitlementChecking` 或等价能力层进入功能模块，不允许把付费判断散落在截图核心和绘制核心中。第一版默认实现 `OpenSourceEntitlementProvider`，所有已实现功能均可用。
+未来收费能力在具体功能落地时，通过应用层的功能准入入口接入权益检查，并由依赖组装注入；不允许把付费判断散落在截图核心和绘制核心中。当前已实现功能均可用，不维护没有消费者的权益协议、provider 或功能枚举。
 
 ### 捕获状态机
 
@@ -258,10 +255,10 @@ idle
 → selecting（区域截图在 mouse-up 后继续停留，等待复制、保存或 Pin 之一显式提交）
 → capturing
 → presentingPinnedShot
-→ quickEditing / canvasEditing
-→ exporting
 → idle
 ```
+
+截图状态机负责捕获准入直到展示交接；之后的快速编辑、Canvas 编辑和输出由各自的会话负责。无需选择的捕获模式跳过 selecting。
 
 必须支持取消、异常恢复和重复触发保护。截图会话的准入检查和 `idle → checkingPermission` 转换必须是一个原子操作；已有会话（包括尚未复制、保存或 Pin 的区域确认态）存在时，再次触发任意截图快捷键只能非模态地拒绝并记录日志，不能重置或取消原会话，更不能在高层遮罩背后弹出会独占输入的模态错误框。只有已经获得准入所有权的会话自身发生失败时，才允许它回到可再次截图的稳定状态。
 
@@ -632,7 +629,7 @@ struct AnnotationDocument: Codable, Identifiable {
 性能要求：
 
 - 鼠标移动和放大镜显示流畅。
-- 可以根据实际性能选择小范围重复截图或 ScreenCaptureKit frame stream，但必须隐藏在 `FrameStreaming` / `PixelSampling` 抽象后，为未来录屏能力复用采集层。
+- 可以根据实际性能选择小范围重复截图或 ScreenCaptureKit frame stream；当前取色通过 `PixelSampling` 隔离采集实现。实际采用连续帧时再定义有明确输入、输出和生命周期的接口，不为录屏创建空协议。
 - 不允许为取色器请求 Accessibility 权限。
 
 ---
@@ -951,7 +948,7 @@ enum ScreenshotAppError: LocalizedError {
 
 ### 录屏
 
-预留：
+以下仅记录未来录屏的模块划分，实际实现时再定义接口：
 
 - `FrameStreaming`
 - `AudioCapturing`
@@ -970,22 +967,7 @@ enum ScreenshotAppError: LocalizedError {
 
 ### 付费能力
 
-预留：
-
-```swift
-enum AppFeature {
-    case basicCapture
-    case quickAnnotation
-    case canvasEditor
-    case colorPicker
-    case ruler
-    case scrollingCapture
-    case screenRecording
-    case gifExport
-}
-```
-
-第一版 `OpenSourceEntitlementProvider` 对所有已实现功能返回可用。未来付费实现替换 provider，不修改 CaptureCore。
+未来付费能力仍在产品规划中。具体付费功能落地时，在其应用层命令或功能协调器入口增加权益检查，并通过依赖组装注入；功能标识只包含当时实际需要判断的能力。当前不实现始终返回可用的 provider，也不维护无消费者的功能清单。后续接入不应要求修改截图、文档或渲染核心，已发布源码的 Apache-2.0 权利保持不变。
 
 ### 自动更新
 

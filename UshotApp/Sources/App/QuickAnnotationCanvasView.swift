@@ -313,6 +313,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     private var selectedTextResizeInteraction: SelectedTextResizeInteraction?
     private var textResizeFixedCornerError: CGFloat = 0
     private var isAnnotationEditingEnabled = true
+    private var isInteractionSuspended = false
     private var isReadOnlyWindowDragArmed = false
     private var isWindowDragInProgress = false
     private var pendingRegionBodyMoveMouseDown: NSEvent?
@@ -331,2904 +332,18 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     var draggingImage: NSImage { authoritativeImage }
     var isTextEditing: Bool { textEditor != nil }
     var hasActiveLineWidthEditing: Bool { lineWidthEditingState != nil }
-
-#if DEBUG
-    private func requiredTextEditorFontForRegression(
-        _ state: TextEditingState
-    ) -> NSFont {
-        do {
-            return try textEditorFont(for: state)
-        } catch {
-            preconditionFailure(
-                "Text regression fixture could not resolve its required font: \(error)"
-            )
-        }
+    var hasActivePointerInteraction: Bool {
+        startPoint != nil || selectionInteraction != nil || textResizeInteraction != nil
+            || selectedTextResizeInteraction != nil || isWindowDragInProgress
+            || pendingRegionBodyMoveMouseDown != nil
     }
 
-    private func requiredRendererReadyTextLayoutForRegression(
-        baselineAnchor: CGPoint,
-        text: String,
-        style: AnnotationStyle,
-        maximumWrapWidth: CGFloat? = nil
-    ) -> AnnotationTextLayoutResolution {
-        do {
-            return try AnnotationTextLayout.newTextLayout(
-                baselineAnchor: baselineAnchor,
-                text: text,
-                style: style,
-                maximumWrapWidth: maximumWrapWidth
-            )
-        } catch {
-            preconditionFailure(
-                "Text regression fixture could not resolve renderer-ready layout: \(error)"
-            )
-        }
+    /// A persistence barrier suspends input without changing the annotation
+    /// mutation owner, selection or the pinned mirror's presentation state.
+    func setInteractionSuspended(_ suspended: Bool) {
+        isInteractionSuspended = suspended
+        window?.invalidateCursorRects(for: self)
     }
-
-    private func requiredRendererReadyTextPayloadForRegression(
-        text: String,
-        style: AnnotationStyle,
-        proposedWrapWidth: CGFloat,
-        chromeMode: AnnotationTextLayoutPayload.ChromeMode
-    ) -> AnnotationTextLayoutPayload {
-        do {
-            return try AnnotationTextLayout.safeLayoutPayload(
-                for: text,
-                style: style,
-                proposedWrapWidth: proposedWrapWidth,
-                chromeMode: chromeMode
-            )
-        } catch {
-            preconditionFailure(
-                "Text regression fixture could not resolve renderer-ready payload: \(error)"
-            )
-        }
-    }
-
-    var debugIsAnnotationEditingEnabled: Bool { isAnnotationEditingEnabled }
-    var debugPresentedSelectionHandleCount: Int {
-        guard isAnnotationEditingEnabled else { return 0 }
-        if selectedTextFrameView != nil { return 3 }
-        let selectedItems = selectedDisplayItems()
-        guard selectedItems.count == 1, let item = selectedItems.first else { return 0 }
-        return selectionGeometry.handlePoints(for: item).count
-    }
-
-    func runLineWidthRoutingRegression() {
-        precondition(
-            session.controller.document.annotations.isEmpty,
-            "The line-width routing regression requires an empty annotation document."
-        )
-        precondition(
-            lineWidthEditingState == nil,
-            "The line-width routing regression requires no active width edit."
-        )
-        session.currentTool = .rectangle
-        let unchangedTool = session.currentTool
-
-        beginLineWidthEditing()
-        applyLineWidth(5)
-        precondition(
-            session.controller.document.annotations.isEmpty,
-            "Changing an unselected tool default must not mutate the document."
-        )
-        precondition(
-            session.creationStyle(for: .rectangle).lineWidth == 5,
-            "The first new annotation must observe the live tool-default width."
-        )
-        guard case .toolDefault(let defaultTool, let firstDefaultWidth) = commitLineWidthEditing() else {
-            preconditionFailure("An unselected line-width edit must target the tool default.")
-        }
-        precondition(
-            defaultTool == .rectangle && firstDefaultWidth == 5,
-            "The committed tool-default width did not match its captured target."
-        )
-        commit(
-            tool: .rectangle,
-            start: CGPoint(x: 24, y: 24),
-            end: CGPoint(x: 124, y: 84)
-        )
-        guard let firstID = session.controller.selectedItemIDs.first,
-              let firstItem = session.controller.document.annotations.first(where: { $0.id == firstID })
-        else {
-            preconditionFailure("The line-width regression could not create its first selected rectangle.")
-        }
-        precondition(firstItem.style.lineWidth == 5, "The first rectangle ignored the updated default width.")
-        precondition(
-            session.currentStyleOrigin == .existingAnnotation
-                && session.currentStyle.lineWidth == 5,
-            "Creating and selecting the first rectangle must synchronize the toolbar presentation."
-        )
-
-        beginLineWidthEditing()
-        applyLineWidth(7)
-        guard let storedDuringPreview = session.controller.document.annotations.first(where: { $0.id == firstID }),
-              let presentedDuringPreview = selectedDisplayItems().first(where: { $0.id == firstID })
-        else {
-            preconditionFailure("The selected line-width preview lost its target rectangle.")
-        }
-        precondition(
-            storedDuringPreview.style.lineWidth == 5 && presentedDuringPreview.style.lineWidth == 7,
-            "A selected line-width edit must preview immediately without prematurely committing the document."
-        )
-        guard case .selection(let selectedCount, let selectedWidth) = commitLineWidthEditing() else {
-            preconditionFailure("A selected line-width edit must target the selected annotation.")
-        }
-        precondition(
-            selectedCount == 1 && selectedWidth == 7,
-            "The selected line-width commit reported the wrong target or value."
-        )
-        precondition(
-            session.controller.document.annotations.first(where: { $0.id == firstID })?.style.lineWidth == 7,
-            "The selected rectangle did not commit its live line width."
-        )
-        precondition(
-            session.creationStyle(for: .rectangle).lineWidth == 5,
-            "Editing a selected rectangle must not overwrite the tool default."
-        )
-        session.controller.undo()
-        precondition(
-            session.controller.document.annotations.first(where: { $0.id == firstID })?.style.lineWidth == 5,
-            "One Undo must restore the selected rectangle's original line width."
-        )
-        precondition(
-            session.currentStyle.lineWidth == 5
-                && lineWidthControlPresentation().logicalLineWidth == 5,
-            "Undo must synchronize the selected rectangle's restored width back to the toolbar."
-        )
-        session.controller.redo()
-        precondition(
-            session.controller.document.annotations.first(where: { $0.id == firstID })?.style.lineWidth == 7,
-            "One Redo must restore the selected rectangle's edited line width."
-        )
-        precondition(
-            session.currentStyle.lineWidth == 7
-                && lineWidthControlPresentation().logicalLineWidth == 7,
-            "Redo must synchronize the selected rectangle's edited width back to the toolbar."
-        )
-
-        commit(
-            tool: .rectangle,
-            start: CGPoint(x: 148, y: 24),
-            end: CGPoint(x: 248, y: 84)
-        )
-        guard let secondID = session.controller.selectedItemIDs.first,
-              secondID != firstID,
-              let secondItem = session.controller.document.annotations.first(where: { $0.id == secondID })
-        else {
-            preconditionFailure("The line-width regression could not create its second selected rectangle.")
-        }
-        precondition(
-            secondItem.style.lineWidth == 5,
-            "Drawing again while the edited item is selected must still use the independent tool default."
-        )
-        precondition(
-            session.currentStyleOrigin == .existingAnnotation
-                && session.currentStyle.lineWidth == 5
-                && lineWidthControlPresentation().logicalLineWidth == 5,
-            "The newly selected rectangle must replace the previous selection's toolbar width."
-        )
-        beginLineWidthEditing()
-        guard case .selection(let unchangedCount, let unchangedWidth) = commitLineWidthEditing() else {
-            preconditionFailure("Focusing and committing an unchanged selected width must retain the selection target.")
-        }
-        precondition(
-            unchangedCount == 1
-                && unchangedWidth == 5
-                && session.controller.document.annotations.first(where: { $0.id == secondID })?.style.lineWidth == 5,
-            "Focusing and leaving the synchronized field must not restore the previous item's width."
-        )
-
-        session.controller.selectedItemIDs.removeAll()
-        let undoCountBeforeDefaultChange = session.controller.undoStack.count
-        beginLineWidthEditing()
-        applyLineWidth(9)
-        precondition(
-            session.controller.document.annotations.first(where: { $0.id == firstID })?.style.lineWidth == 7,
-            "Changing an unselected default must leave existing annotations unchanged."
-        )
-        guard case .toolDefault(let secondDefaultTool, let secondDefaultWidth) = commitLineWidthEditing() else {
-            preconditionFailure("A deselected line-width edit must target the tool default.")
-        }
-        precondition(
-            secondDefaultTool == .rectangle && secondDefaultWidth == 9,
-            "The deselected default edit committed the wrong tool or width."
-        )
-        precondition(
-            session.controller.undoStack.count == undoCountBeforeDefaultChange,
-            "Changing a tool default must not create a document Undo entry."
-        )
-        commit(
-            tool: .rectangle,
-            start: CGPoint(x: 82, y: 108),
-            end: CGPoint(x: 182, y: 168)
-        )
-        let createdWidths = session.controller.document.orderedAnnotations.map(\.style.lineWidth)
-        precondition(
-            createdWidths == [7, 5, 9],
-            "Existing and newly created rectangles must retain independent selected/default widths."
-        )
-        precondition(
-            session.currentTool == unchangedTool,
-            "Line-width changes must take effect without switching tools."
-        )
-        AppLog.capture.notice(
-            "Annotation line-width routing regression passed: noSelectionDefault=5, selectedPreview=7, selectedUndoRedo=true, consecutiveCreationDefault=5, synchronizedFocusCommit=5, deselectedDefault=9, createdWidths=7,5,9, toolSwitches=0"
-        )
-    }
-
-    func runLineWidthCanvasBoundaryRegression() {
-        guard let window else {
-            preconditionFailure("The line-width canvas-boundary regression requires a presented window.")
-        }
-        precondition(
-            lineWidthEditingState != nil,
-            "The line-width canvas-boundary regression requires an active edit."
-        )
-        let viewPoint = CGPoint(x: bounds.midX, y: bounds.midY)
-        let windowPoint = convert(viewPoint, to: nil)
-        let timestamp = ProcessInfo.processInfo.systemUptime
-        guard let mouseDown = NSEvent.mouseEvent(
-            with: .leftMouseDown,
-            location: windowPoint,
-            modifierFlags: [],
-            timestamp: timestamp,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 31,
-            clickCount: 1,
-            pressure: 1
-        ), let mouseUp = NSEvent.mouseEvent(
-            with: .leftMouseUp,
-            location: windowPoint,
-            modifierFlags: [],
-            timestamp: timestamp + 0.01,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 32,
-            clickCount: 1,
-            pressure: 0
-        ) else {
-            preconditionFailure("The line-width canvas-boundary regression could not synthesize pointer events.")
-        }
-        self.mouseDown(with: mouseDown)
-        precondition(
-            lineWidthEditingState == nil,
-            "Canvas mouse-down must resolve a toolbar line-width edit before starting its interaction."
-        )
-        self.mouseUp(with: mouseUp)
-        AppLog.capture.notice(
-            "Annotation line-width canvas-boundary regression passed: fieldResolvedBeforePointerInteraction=true"
-        )
-    }
-
-    func runReadOnlyWindowPressCursorRegression() {
-        guard let window else {
-            preconditionFailure("The pinned cursor regression requires a presented window.")
-        }
-        setAnnotationEditingEnabled(false)
-        let viewPoint = CGPoint(x: bounds.midX, y: bounds.midY)
-        let windowPoint = convert(viewPoint, to: nil)
-        guard let mouseDown = NSEvent.mouseEvent(
-            with: .leftMouseDown,
-            location: windowPoint,
-            modifierFlags: [],
-            timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 1,
-            clickCount: 1,
-            pressure: 1
-        ) else {
-            preconditionFailure("The pinned cursor regression could not synthesize mouse-down.")
-        }
-        self.mouseDown(with: mouseDown)
-        precondition(isReadOnlyWindowDragArmed, "Pinned mouse-down must arm window movement immediately.")
-        precondition(isWindowDragInProgress, "Pinned mouse-down must enter the active drag state before movement.")
-        precondition(
-            NSCursor.current == NSCursor.closedHand,
-            "Pinned mouse-down must set the closed-hand cursor before any drag event."
-        )
-        guard let mouseUp = NSEvent.mouseEvent(
-            with: .leftMouseUp,
-            location: windowPoint,
-            modifierFlags: [],
-            timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 2,
-            clickCount: 1,
-            pressure: 0
-        ) else {
-            preconditionFailure("The pinned cursor regression could not synthesize mouse-up.")
-        }
-        self.mouseUp(with: mouseUp)
-        precondition(!isWindowDragInProgress, "Pinned mouse-up must end the active drag state.")
-
-        self.mouseDown(with: mouseDown)
-        precondition(
-            isWindowDragInProgress,
-            "Pinned editing-disable regression must begin with an active body move."
-        )
-        setAnnotationEditingEnabled(false)
-        precondition(
-            !isWindowDragInProgress && !isReadOnlyWindowDragArmed,
-            "Disabling an already read-only canvas must still release its active body move."
-        )
-        self.mouseUp(with: mouseUp)
-
-        let originalTool = session.currentTool
-        let originalAnnotationCount = session.controller.document.annotations.count
-        setAnnotationEditingEnabled(true)
-        session.currentTool = .select
-        self.mouseDown(with: mouseDown)
-        precondition(
-            isWindowDragInProgress,
-            "Pinned tool-switch regression must begin with an active Select body move."
-        )
-        session.currentTool = .text
-        self.mouseUp(with: mouseUp)
-        precondition(
-            !isWindowDragInProgress
-                && !isTextEditing
-                && session.controller.document.annotations.count == originalAnnotationCount,
-            "Releasing a body move after a tool switch must not begin or commit an annotation."
-        )
-        session.currentTool = originalTool
-        setAnnotationEditingEnabled(false)
-        AppLog.capture.notice(
-            "Pinned cursor press regression passed: pressCursor=closed-hand, movement=zero, releaseState=idle, editingDisableCancellation=true, toolSwitchReleaseSideEffect=false"
-        )
-    }
-
-    func runInlineTextStabilityRegression() {
-        layoutSubtreeIfNeeded()
-        precondition(bounds.width > 0 && bounds.height > 0, "Text stability regression requires a laid-out canvas.")
-        let anchor = documentPoint(fromViewPoint: CGPoint(
-            x: bounds.width * 0.18,
-            y: bounds.height * 0.52
-        ))
-        var regressionStyle = session.defaultStyle(for: .text)
-        regressionStyle.fontName = "Menlo-Regular"
-        regressionStyle.fontSize = 18
-        guard NSFont(name: regressionStyle.fontName!, size: regressionStyle.fontSize) != nil else {
-            preconditionFailure("Text stability regression requires the system Menlo font.")
-        }
-        session.adoptCurrentStyle(regressionStyle, origin: .newTextDraft)
-        installTextEditor(
-            text: "",
-            state: TextEditingState(
-                itemID: nil,
-                anchor: anchor,
-                style: regressionStyle,
-                transform: AnnotationTransform()
-            )
-        )
-        guard let editor = textEditor,
-              let frameView = textEditorFrameView,
-              let container = textEditorContainer,
-              let initialLineOrigin = textEditorLineOriginInView(editor)
-        else {
-            preconditionFailure("Text stability regression could not start the inline editor.")
-        }
-        frameView.displayIfNeeded()
-        guard let frameBackground = frameView.layer?.backgroundColor else {
-            preconditionFailure("Inline text regression requires an explicit framing-layer background color.")
-        }
-        precondition(
-            frameBackground.alpha == 0 && !frameView.isOpaque,
-            "Inline text framing must preserve the selected pixels with a clear background."
-        )
-        let initialFrame = frameView.frame
-        let initialGeometry = textEditorGeometryDescription(editor)
-
-        func assertStableState(_ context: String) {
-            // Real AppKit input schedules a parent layout pass between rapid
-            // marked-text updates. Exercise that path instead of validating
-            // only the final NSTextView delegate callback.
-            updateTextEditorFrame()
-            updateTextEditorLayout(scrollsToInsertionPoint: true)
-            layoutSubtreeIfNeeded()
-            window?.displayIfNeeded()
-            guard let currentLineOrigin = textEditorLineOriginInView(editor) else {
-                preconditionFailure("Text stability regression lost the TextKit line origin during \(context).")
-            }
-            precondition(
-                maxFrameDelta(initialFrame, frameView.frame) < 0.01,
-                "Inline text \(context) moved or resized the anchored outer frame."
-            )
-            precondition(
-                max(
-                    abs(currentLineOrigin.x - initialLineOrigin.x),
-                    abs(currentLineOrigin.y - initialLineOrigin.y)
-                ) < 0.01,
-                "Inline text \(context) changed the rendered line origin from \(initialLineOrigin) to \(currentLineOrigin). Initial geometry: \(initialGeometry). Current geometry: \(textEditorGeometryDescription(editor))."
-            )
-            precondition(
-                textEditorGeometryConfigurationCount == 1,
-                "Inline text \(context) reconfigured presentation geometry."
-            )
-            precondition(
-                textEditorPostConfigurationViewportMutationCount == 0,
-                "Inline text \(context) moved the viewport after initial calibration."
-            )
-            precondition(
-                textEditorPostConfigurationLineOriginDriftCount == 0,
-                "Inline text \(context) changed TextKit's line origin after initial calibration."
-            )
-            precondition(
-                max(
-                    abs(textEditorBaselineError?.x ?? .infinity),
-                    abs(textEditorBaselineError?.y ?? .infinity)
-                ) < 0.01,
-                "Inline text \(context) left a visible baseline error."
-            )
-        }
-
-        for (value, context) in [
-            ("中", "CJK fallback"),
-            ("M", "returning to primary font"),
-            ("M中", "mixed primary and fallback fonts"),
-            ("", "returning to the empty caret")
-        ] {
-            editor.insertText(
-                value,
-                replacementRange: NSRange(location: 0, length: editor.string.utf16.count)
-            )
-            assertStableState(context)
-        }
-
-        for fragment in ["F", "i", "r", "s", "t"] {
-            editor.insertText(
-                fragment,
-                replacementRange: NSRange(location: NSNotFound, length: 0)
-            )
-            assertStableState("typing")
-        }
-
-        for fragment in ["z", "zh", "zho", "zhon", "zhong"] {
-            // macOS input methods deliver attributed marked text, often
-            // without the editor's ordinary typing attributes. A plain Swift
-            // String does not exercise the transient mixed-attribute state
-            // that NSTextView exposes during real Pinyin composition.
-            editor.setMarkedText(
-                NSAttributedString(
-                    string: fragment,
-                    attributes: [
-                        .markedClauseSegment: 0,
-                        .underlineStyle: NSUnderlineStyle.single.rawValue
-                    ]
-                ),
-                selectedRange: NSRange(location: fragment.utf16.count, length: 0),
-                replacementRange: NSRange(location: NSNotFound, length: 0)
-            )
-            assertStableState("rapid IME composition")
-        }
-        let markedRange = editor.markedRange()
-        precondition(markedRange.location != NSNotFound, "IME regression did not create marked text.")
-        editor.insertText("中", replacementRange: markedRange)
-        assertStableState("IME commit")
-        editor.insertText("文", replacementRange: NSRange(location: NSNotFound, length: 0))
-        assertStableState("typing")
-
-        let textBeforeOverflow = editor.string
-        let overflowStart = editor.string.utf16.count
-        let overflowText = String(repeating: "W", count: 40)
-        editor.insertText(
-            overflowText,
-            replacementRange: NSRange(location: NSNotFound, length: 0)
-        )
-        updateTextEditorFrame()
-        updateTextEditorLayout(scrollsToInsertionPoint: true)
-        layoutSubtreeIfNeeded()
-        window?.displayIfNeeded()
-        guard let overflowLineOrigin = textEditorLineOriginInView(editor),
-              let documentView = textEditorDocumentView,
-              let presentation = textEditorPresentationLayout,
-              let overflowFrameView = textEditorFrameView,
-              let insertionX = textEditorInsertionX(editor),
-              let overflowEditingState = textEditingState
-        else {
-            preconditionFailure("Text stability regression could not inspect wrapping of long inline text.")
-        }
-        guard let wrapWidth = textEditorCanonicalWrapWidthInDocument else {
-            preconditionFailure("Text stability regression lost its canonical wrap width.")
-        }
-        precondition(
-            abs(overflowLineOrigin.y - initialLineOrigin.y) < 0.01,
-            "Wrapping long inline text changed the calibrated first-line baseline."
-        )
-        let horizontalScrollOffset = presentation.documentBaseOrigin.x
-            - documentView.frame.minX
-        let overflowFieldFrame = overflowFrameView.fieldFrame(in: self)
-        precondition(
-            overflowLineOrigin.x >= overflowFieldFrame.minX - 0.5
-                && overflowLineOrigin.x <= overflowFieldFrame.maxX + 0.5,
-            "Wrapping must keep the first line reachable inside the viewport."
-        )
-        precondition(
-            overflowFrameView.fieldFrame(in: self).height > initialFrame.height + 1,
-            "Long inline text must grow the field downward when it wraps."
-        )
-        let visibleInsertionX = documentView.frame.minX + insertionX
-        let insertionInset = textEditorChromeInsetsInView(
-            for: overflowEditingState
-        ).width
-        precondition(
-            visibleInsertionX >= insertionInset - 0.5
-                && visibleInsertionX <= container.bounds.maxX
-                    - insertionInset + 0.5,
-            "Wrapping did not keep the insertion point visible: visibleX=\(visibleInsertionX), documentX=\(documentView.frame.minX), insertionX=\(insertionX), viewportWidth=\(container.bounds.width)."
-        )
-        precondition(
-            AnnotationTextLayout.visualLineCount(
-                in: editor.string,
-                style: overflowEditingState.style,
-                wrapWidth: wrapWidth
-            ) > 1,
-            "Long inline text must wrap onto additional visible lines."
-        )
-        let lineOriginBeforeCommit = renderedTextLineOriginInView(
-            state: overflowEditingState,
-            text: editor.string,
-            layout: textEditorLayoutPayload
-        )
-        precondition(
-            abs(
-                overflowLineOrigin.x
-                    + horizontalScrollOffset
-                    - lineOriginBeforeCommit.x
-            ) < 0.01
-                && abs(overflowLineOrigin.y - lineOriginBeforeCommit.y) < 0.01,
-            "Wrapped editor origin must match the renderer after explicit scroll conversion."
-        )
-        assertTextEditorLinesMatchRenderer(
-            editor,
-            state: overflowEditingState,
-            layout: textEditorLayoutPayload,
-            canonicalHorizontalOffset: horizontalScrollOffset,
-            context: "wrapped mixed-script text"
-        )
-        let baselineCorrections = textEditorBaselineCorrectionCount
-        precondition(
-            baselineCorrections > 0,
-            "Text stability regression did not exercise a fallback-font baseline change."
-        )
-        _ = endTextEditingIfNeeded(reason: .focusChange)
-        guard let committedItem = session.controller.document.annotations.last,
-              committedItem.kind == .text,
-              case .rect(let committedRect) = committedItem.geometry,
-              let committedText = committedItem.text
-        else {
-            preconditionFailure("Text stability regression did not commit a text annotation.")
-        }
-        let committedState = TextEditingState(
-            itemID: committedItem.id,
-            anchor: AnnotationTextLayout.alignmentAnchor(
-                in: committedRect,
-                text: committedText,
-                style: committedItem.style,
-                layout: committedItem.textLayout
-            ),
-            style: committedItem.style,
-            transform: committedItem.transform
-        )
-        let committedLineOrigin = renderedTextLineOriginInView(
-            state: committedState,
-            text: committedText,
-            layout: committedItem.textLayout
-        )
-        precondition(
-            max(
-                abs(committedLineOrigin.x - lineOriginBeforeCommit.x),
-                abs(committedLineOrigin.y - lineOriginBeforeCommit.y)
-            ) < 0.01,
-            "Focus-change commit moved text from \(lineOriginBeforeCommit) to \(committedLineOrigin)."
-        )
-        precondition(
-            max(
-                abs(lastTextCommitBaselineError?.x ?? .infinity),
-                abs(lastTextCommitBaselineError?.y ?? .infinity)
-            ) < 0.01,
-            "Focus-change commit retained a visible editor-to-renderer baseline error."
-        )
-        precondition(
-            selectionGeometry.handlePoints(for: committedItem).isEmpty,
-            "Committed text must never return to the standard eight-handle selection path."
-        )
-        runInlineTextFieldGeometryRegression(style: committedItem.style)
-        beginTextEditing(item: committedItem)
-        guard let existingEditor = textEditor,
-              textEditingState?.itemID == committedItem.id
-        else {
-            preconditionFailure("Active text resize regression could not reopen the committed CJK text.")
-        }
-        existingEditor.insertText(
-            "",
-            replacementRange: NSRange(
-                location: overflowStart,
-                length: overflowText.utf16.count
-            )
-        )
-        precondition(
-            existingEditor.string == textBeforeOverflow,
-            "Overflow commit regression must restore the original mixed-script text before resizing."
-        )
-        let activeResizeText = existingEditor.string
-        runEdgeClampedNoOpTextResizeRegression(eventNumberBase: 150)
-        runTextResizeCancellationRegression(eventNumberBase: 170)
-        let activeOverflowStart = activeResizeText.utf16.count
-        let activeOverflowText = String(repeating: "W", count: 40)
-        existingEditor.setSelectedRange(NSRange(location: activeOverflowStart, length: 0))
-        existingEditor.insertText(
-            activeOverflowText,
-            replacementRange: NSRange(location: activeOverflowStart, length: 0)
-        )
-        guard let activeOverflowDocumentView = textEditorDocumentView,
-              let activeOverflowPresentation = textEditorPresentationLayout,
-              let activeOverflowState = textEditingState
-        else {
-            preconditionFailure("Active resize overflow regression lost its document viewport.")
-        }
-        let activeOverflowScroll = activeOverflowPresentation.documentBaseOrigin.x
-            - activeOverflowDocumentView.frame.minX
-        assertTextEditorLinesMatchRenderer(
-            existingEditor,
-            state: activeOverflowState,
-            layout: textEditorLayoutPayload,
-            canonicalHorizontalOffset: activeOverflowScroll,
-            context: "active-resize wrapped overflow"
-        )
-        let fontSizeAfterSouthEast = runActiveTextResizeRegression(
-            handle: .southEast,
-            pointerDelta: CGPoint(x: 112, y: -56),
-            steps: 16,
-            eventNumberBase: 200
-        )
-        precondition(
-            fontSizeAfterSouthEast > 20,
-            "Active CJK text resize must cross the 18-to-20 point metric boundary."
-        )
-        existingEditor.insertText(
-            "",
-            replacementRange: NSRange(
-                location: activeOverflowStart,
-                length: activeOverflowText.utf16.count
-            )
-        )
-        precondition(
-            existingEditor.string == activeResizeText,
-            "Active resize overflow regression must restore its original mixed-script text."
-        )
-        existingEditor.setSelectedRange(NSRange(location: 1, length: 2))
-        let activeResizeSelection = existingEditor.selectedRange()
-        _ = runActiveTextResizeRegression(
-            handle: .northWest,
-            pointerDelta: CGPoint(x: 24, y: -12),
-            steps: 12,
-            eventNumberBase: 300
-        )
-        _ = runActiveTextResizeRegression(
-            handle: .southWest,
-            pointerDelta: CGPoint(x: 20, y: 10),
-            steps: 12,
-            eventNumberBase: 400
-        )
-        precondition(
-            existingEditor.selectedRange() == activeResizeSelection,
-            "Three-corner active resizing must preserve the text selection."
-        )
-        guard let activeEditingStateBeforeCommit = textEditingState else {
-            preconditionFailure("Active text resize regression lost the canonical state before commit.")
-        }
-        let activeLineOriginBeforeCommit = renderedTextLineOriginInView(
-            state: activeEditingStateBeforeCommit,
-            text: existingEditor.string,
-            layout: textEditorLayoutPayload
-        )
-        _ = endTextEditingIfNeeded(reason: .focusChange)
-        guard let activeResizedItem = session.controller.document.annotations.first(where: {
-            $0.id == committedItem.id
-        }), let activeResizedText = activeResizedItem.text,
-              case .rect(let activeResizedRect) = activeResizedItem.geometry
-        else {
-            preconditionFailure("Active text resize regression lost the committed annotation.")
-        }
-        let activeResizedState = TextEditingState(
-            itemID: activeResizedItem.id,
-            anchor: AnnotationTextLayout.alignmentAnchor(
-                in: activeResizedRect,
-                text: activeResizedText,
-                style: activeResizedItem.style,
-                layout: activeResizedItem.textLayout
-            ),
-            style: activeResizedItem.style,
-            transform: activeResizedItem.transform
-        )
-        let activeLineOriginAfterCommit = renderedTextLineOriginInView(
-            state: activeResizedState,
-            text: activeResizedText,
-            layout: activeResizedItem.textLayout
-        )
-        precondition(
-            hypot(
-                activeLineOriginAfterCommit.x - activeLineOriginBeforeCommit.x,
-                activeLineOriginAfterCommit.y - activeLineOriginBeforeCommit.y
-            ) < 0.01,
-            "Committing continuously resized text must not move its rendered line."
-        )
-        session.currentTool = .select
-        session.controller.selectedItemIDs.removeAll()
-        precondition(selectedTextFrameView == nil, "Deselected text must remove its dedicated chrome.")
-        session.controller.selectedItemIDs = [activeResizedItem.id]
-        guard let selectedTextFrameView else {
-            preconditionFailure("Reselecting committed text must install its dedicated chrome.")
-        }
-        precondition(
-            selectedTextFrameView.resizeHandleCount == 3
-                && selectedTextFrameView.deleteControlCount == 1,
-            "Selected text must expose exactly three font-size handles and one delete control."
-        )
-        guard let window else {
-            preconditionFailure("Selected-text resize regression requires a presented window.")
-        }
-        let resizeStartInView = selectedTextFrameView.fieldPoint(
-            corner: .southEast,
-            in: self
-        )
-        let resizeStartInWindow = convert(resizeStartInView, to: nil)
-        let resizeEndInWindow = CGPoint(
-            x: resizeStartInWindow.x + 24,
-            y: resizeStartInWindow.y - 12
-        )
-        guard let resizeDown = NSEvent.mouseEvent(
-            with: .leftMouseDown,
-            location: resizeStartInWindow,
-            modifierFlags: [],
-            timestamp: 1,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 101,
-            clickCount: 1,
-            pressure: 1
-        ), let resizeDrag = NSEvent.mouseEvent(
-            with: .leftMouseDragged,
-            location: resizeEndInWindow,
-            modifierFlags: [],
-            timestamp: 1.1,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 102,
-            clickCount: 1,
-            pressure: 1
-        ), let resizeUp = NSEvent.mouseEvent(
-            with: .leftMouseUp,
-            location: resizeEndInWindow,
-            modifierFlags: [],
-            timestamp: 1.2,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 103,
-            clickCount: 1,
-            pressure: 0
-        ) else {
-            preconditionFailure("Selected-text resize regression could not synthesize pointer events.")
-        }
-        beginSelectedTextResize(handle: .southEast, event: resizeDown)
-        updateSelectedTextResize(handle: .southEast, event: resizeDrag)
-        endSelectedTextResize(handle: .southEast, event: resizeUp)
-        guard let resizedText = session.controller.document.annotations.first(where: {
-            $0.id == activeResizedItem.id
-        }) else {
-            preconditionFailure("Selected-text resize regression lost its committed annotation.")
-        }
-        precondition(
-            resizedText.style.fontSize > activeResizedItem.style.fontSize,
-            "Dragging selected text from the bottom-right must increase its font size."
-        )
-        precondition(
-            textResizeFixedCornerError < 0.51,
-            "Selected-text resize must keep its opposite corner fixed."
-        )
-        let cancellationHandle = InlineAnnotationTextResizeHandle.northWest
-        let cancellationStart = convert(
-            selectedTextFrameView.fieldPoint(corner: .northWest, in: self),
-            to: nil
-        )
-        guard let cancellationDown = NSEvent.mouseEvent(
-            with: .leftMouseDown,
-            location: cancellationStart,
-            modifierFlags: [],
-            timestamp: 1.3,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 104,
-            clickCount: 1,
-            pressure: 1
-        ), let staleCancellationUp = NSEvent.mouseEvent(
-            with: .leftMouseUp,
-            location: cancellationStart,
-            modifierFlags: [],
-            timestamp: 1.4,
-            windowNumber: window.windowNumber,
-            context: nil,
-            eventNumber: 105,
-            clickCount: 1,
-            pressure: 0
-        ) else {
-            preconditionFailure("Selected-text cancellation regression could not synthesize pointer events.")
-        }
-        beginSelectedTextResize(handle: cancellationHandle, event: cancellationDown)
-        precondition(
-            cancelSelectedTextResize(reason: "debug-simulated-missed-mouse-up"),
-            "Selected-text resizing must expose an explicit cancellation path."
-        )
-        endSelectedTextResize(handle: cancellationHandle, event: staleCancellationUp)
-        precondition(
-            selectedTextResizeInteraction == nil
-                && session.controller.document.annotations.first(where: {
-                    $0.id == resizedText.id
-                }) == resizedText,
-            "A stale selected-text mouse-up must not commit or corrupt a cancelled preview."
-        )
-        runSelectedTextMoveCursorOwnershipRegression(
-            itemID: resizedText.id,
-            eventNumberBase: 500
-        )
-        let rectangleProbe = AnnotationItem(
-            kind: .rectangle,
-            zIndex: 0,
-            geometry: .rect(CGRect(x: 10, y: 10, width: 40, height: 30))
-        )
-        precondition(
-            selectionGeometry.handlePoints(for: rectangleProbe).count == 8,
-            "Text-specific selection chrome must not change rectangle resize handles."
-        )
-        precondition(
-            supportsStableInlineTextEditing(transform: AnnotationTransform(
-                translation: CGSize(width: 12, height: -8),
-                scaleX: 1.5,
-                scaleY: 1.5
-            )),
-            "Axis-aligned uniformly scaled legacy text must remain inline editable."
-        )
-        precondition(
-            !supportsStableInlineTextEditing(transform: AnnotationTransform(
-                rotationRadians: .pi / 8
-            )),
-            "Rotated text must not enter an editor that cannot reproduce its presentation transform."
-        )
-        precondition(
-            !supportsStableInlineTextEditing(transform: AnnotationTransform(
-                scaleX: 1.25,
-                scaleY: 0.75
-            )),
-            "Non-uniformly scaled text must not enter an editor that cannot reproduce its presentation transform."
-        )
-        precondition(
-            !supportsStableInlineTextEditing(transform: AnnotationTransform(
-                rotationRadians: 0.000_001
-            )),
-            "Even a small text rotation must be rejected when the inline editor cannot render rotation."
-        )
-        precondition(
-            !supportsStableInlineTextEditing(transform: AnnotationTransform(
-                scaleX: 1.000_01,
-                scaleY: 1
-            )),
-            "Small non-uniform text scaling must be rejected before its error grows with line length."
-        )
-        let visible = visibleDocumentRect()
-        let subpointScale: CGFloat = 0.02
-        let subpointState = TextEditingState(
-            itemID: nil,
-            anchor: .zero,
-            style: committedItem.style,
-            transform: AnnotationTransform(
-                scaleX: subpointScale,
-                scaleY: subpointScale
-            )
-        )
-        let expectedSubpointFontSize = committedItem.style.fontSize
-            * bounds.height / visible.height
-            * subpointScale
-        let subpointFont = requiredTextEditorFontForRegression(subpointState)
-        precondition(
-            expectedSubpointFontSize < 1
-                && abs(subpointFont.pointSize - committedItem.style.fontSize) < 0.000_1
-                && abs(
-                    textEditorFieldHeightInView(
-                        fromUntransformedDocumentHeight: subpointFont.pointSize,
-                        state: subpointState
-                    ) - expectedSubpointFontSize
-                ) < 0.000_1,
-            "Inline TextKit must keep canonical typography while the document host projects it below one presentation point."
-        )
-        runInitiallyOverflowingTextAlignmentRegression(style: committedItem.style)
-        runLegacyOverhangNoOpTextResizeRegression(eventNumberBase: 1_200)
-        runInlineTextPointerAndLineBreakRegression()
-        runInlineTextEditorAdmissionRegression()
-        AppLog.capture.notice(
-            "Inline text stability regression passed: characters=7, background=clear, origin=\(initialLineOrigin.x, privacy: .public),\(initialLineOrigin.y, privacy: .public), baselineCorrections=\(baselineCorrections, privacy: .public), commitError=\(self.lastTextCommitBaselineError?.y ?? .infinity, privacy: .public), activeResizeHandles=3, activeResizeFrames=58, selectedResizeHandles=3, selectedDeleteControls=1, selectedMoveCursorCycles=2, initialOverflowAlignments=3, fractionalScaleMultilineCases=12"
-        )
-    }
-
-    private func runSelectedTextMoveCursorOwnershipRegression(
-        itemID: UUID,
-        eventNumberBase: Int
-    ) {
-        guard let window,
-              let initialItem = session.controller.document.annotations.first(where: {
-                  $0.id == itemID
-              })
-        else {
-            preconditionFailure("Selected-text cursor regression requires a presented text annotation.")
-        }
-        precondition(initialItem.kind == .text, "The move cursor regression requires text geometry.")
-        precondition(
-            textEditor == nil && selectionInteraction == nil,
-            "The move cursor regression requires an idle inline editor and pointer lifecycle."
-        )
-        session.currentTool = .select
-        session.controller.selectedItemIDs = [itemID]
-        syncSelectedTextChrome()
-
-        let initialBounds = selectionGeometry.transformedBounds(for: initialItem)
-        let startInView = viewPoint(fromDocumentPoint: CGPoint(
-            x: initialBounds.midX,
-            y: initialBounds.midY
-        ))
-        let subthresholdInView = CGPoint(x: startInView.x + 2, y: startInView.y + 1)
-        let movedInView = CGPoint(x: startInView.x + 18, y: startInView.y + 12)
-        let timestamp = ProcessInfo.processInfo.systemUptime
-
-        func event(
-            _ type: NSEvent.EventType,
-            at point: CGPoint,
-            number: Int,
-            pressure: Float
-        ) -> NSEvent {
-            guard let event = NSEvent.mouseEvent(
-                with: type,
-                location: convert(point, to: nil),
-                modifierFlags: [],
-                timestamp: timestamp + Double(number - eventNumberBase) * 0.01,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: number,
-                clickCount: 1,
-                pressure: pressure
-            ) else {
-                preconditionFailure("Selected-text cursor regression could not synthesize \(type.rawValue).")
-            }
-            return event
-        }
-
-        func assertPressedCursor(_ context: String, expectsMovement: Bool) {
-            guard let interaction = selectionInteraction else {
-                preconditionFailure("Selected-text cursor regression lost its interaction during \(context).")
-            }
-            guard case .move = interaction.mode else {
-                preconditionFailure("Selected-text cursor regression entered a non-move interaction during \(context).")
-            }
-            precondition(
-                interaction.hasMoved == expectsMovement,
-                "Selected-text cursor regression reported the wrong movement threshold state during \(context)."
-            )
-            precondition(
-                NSCursor.current == NSCursor.closedHand,
-                "Selected-text move must retain its closed-hand cursor during \(context)."
-            )
-            precondition(
-                selectedTextFrameView?.areChromeCursorRectsSuppressed == true,
-                "Selected-text chrome must yield cursor ownership during \(context)."
-            )
-        }
-
-        mouseDown(with: event(
-            .leftMouseDown,
-            at: startInView,
-            number: eventNumberBase,
-            pressure: 1
-        ))
-        assertPressedCursor("zero-movement press", expectsMovement: false)
-
-        NSCursor.arrow.set()
-        resetCursorRects()
-        assertPressedCursor("cursor-rect rebuild", expectsMovement: false)
-
-        NSCursor.arrow.set()
-        layout()
-        assertPressedCursor("selected-text chrome layout", expectsMovement: false)
-
-        mouseDragged(with: event(
-            .leftMouseDragged,
-            at: subthresholdInView,
-            number: eventNumberBase + 1,
-            pressure: 1
-        ))
-        assertPressedCursor("subthreshold drag", expectsMovement: false)
-        mouseUp(with: event(
-            .leftMouseUp,
-            at: subthresholdInView,
-            number: eventNumberBase + 2,
-            pressure: 0
-        ))
-        precondition(selectionInteraction == nil, "Pointer-up must release annotation move ownership.")
-        precondition(
-            selectedTextFrameView?.areChromeCursorRectsSuppressed == false,
-            "Pointer-up must restore selected-text chrome cursor regions."
-        )
-        precondition(
-            session.controller.document.annotations.first(where: { $0.id == itemID }) == initialItem,
-            "A subthreshold text drag must not mutate the document."
-        )
-        precondition(
-            NSCursor.current == NSCursor.openHand,
-            "Releasing an unmoved selected text must restore its open-hand hover cursor."
-        )
-
-        mouseDown(with: event(
-            .leftMouseDown,
-            at: startInView,
-            number: eventNumberBase + 3,
-            pressure: 1
-        ))
-        assertPressedCursor("committing press", expectsMovement: false)
-        mouseDragged(with: event(
-            .leftMouseDragged,
-            at: movedInView,
-            number: eventNumberBase + 4,
-            pressure: 1
-        ))
-        assertPressedCursor("live move", expectsMovement: true)
-
-        NSCursor.arrow.set()
-        applyCursor(for: CGPoint(x: bounds.maxX - 1, y: bounds.midY))
-        assertPressedCursor("pinned-window edge crossing", expectsMovement: true)
-
-        NSCursor.arrow.set()
-        resetCursorRects()
-        assertPressedCursor("live cursor-rect rebuild", expectsMovement: true)
-        mouseUp(with: event(
-            .leftMouseUp,
-            at: movedInView,
-            number: eventNumberBase + 5,
-            pressure: 0
-        ))
-        precondition(selectionInteraction == nil, "Committed mouse-up must release move ownership.")
-        precondition(
-            selectedTextFrameView?.areChromeCursorRectsSuppressed == false
-                && NSCursor.current == NSCursor.openHand,
-            "Committed mouse-up must restore selected-text hover cursor ownership."
-        )
-        guard let movedItem = session.controller.document.annotations.first(where: {
-            $0.id == itemID
-        }) else {
-            preconditionFailure("Selected-text cursor regression lost its moved item.")
-        }
-        let documentDelta = documentOffset(fromViewOffset: CGSize(
-            width: movedInView.x - startInView.x,
-            height: movedInView.y - startInView.y
-        ))
-        let movedBounds = selectionGeometry.transformedBounds(for: movedItem)
-        precondition(
-            abs(movedBounds.minX - initialBounds.minX - documentDelta.width) < 0.01
-                && abs(movedBounds.minY - initialBounds.minY - documentDelta.height) < 0.01,
-            "Selected-text cursor regression committed the wrong move delta."
-        )
-        session.controller.undo()
-        precondition(
-            session.controller.document.annotations.first(where: { $0.id == itemID }) == initialItem,
-            "One undo must restore the text moved during cursor regression."
-        )
-        session.controller.selectedItemIDs = [itemID]
-        syncSelectedTextChrome()
-        AppLog.capture.notice(
-            "Selected-text move cursor regression passed: pressCursor=closed-hand, subthresholdMutation=false, liveCursor=closed-hand, edgeCursor=closed-hand, releaseCursor=open-hand"
-        )
-    }
-
-    private func runInitiallyOverflowingTextAlignmentRegression(
-        style sourceStyle: AnnotationStyle
-    ) {
-        precondition(
-            textEditor == nil && textEditingState == nil,
-            "Initial-overflow regression requires no active inline editor."
-        )
-        let originalStyle = session.currentStyle
-        let originalStyleOrigin = session.currentStyleOrigin
-        let originalSelection = session.controller.selectedItemIDs
-        let availableFieldBounds = bounds.insetBy(
-            dx: InlineAnnotationTextEditorFrameView.chromeOutset,
-            dy: InlineAnnotationTextEditorFrameView.chromeOutset
-        )
-        let overflowText = String(repeating: "W中", count: 48)
-        let appendedOverflowText = "宽W"
-
-        func encodedItem(_ item: AnnotationItem) -> Data {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            do {
-                return try encoder.encode(item)
-            } catch {
-                preconditionFailure(
-                    "Initial-overflow regression could not encode its no-op fixture: \(error)"
-                )
-            }
-        }
-
-        func assertCanonicalPresentation(
-            context: String,
-            expectedAnchor: CGPoint,
-            expectedFieldFrame: CGRect,
-            requiresOverflow: Bool?,
-            allowsViewportGrowth: Bool = false
-        ) -> CGPoint {
-            updateTextEditorFrame(scrollsToInsertionPoint: true)
-            updateTextEditorLayout(scrollsToInsertionPoint: true)
-            layoutSubtreeIfNeeded()
-            window?.displayIfNeeded()
-            guard let editor = textEditor,
-                  let frameView = textEditorFrameView,
-                  let container = textEditorContainer,
-                  let documentView = textEditorDocumentView,
-                  let presentation = textEditorPresentationLayout,
-                  let state = textEditingState,
-                  let visibleLineOrigin = textEditorLineOriginInView(editor)
-            else {
-                preconditionFailure(
-                    "Initial-overflow regression lost editor geometry during \(context)."
-                )
-            }
-            guard let wrapWidthInDocument = textEditorCanonicalWrapWidthInDocument else {
-                preconditionFailure(
-                    "Initial-overflow regression lost semantic wrap ownership during \(context)."
-                )
-            }
-            let wrapWidth = wrapWidthInDocument
-            let renderedLineOrigin = renderedTextLineOriginInView(
-                state: state,
-                text: editor.string,
-                layout: textEditorLayoutPayload
-            )
-            let horizontalScrollOffset = presentation.documentBaseOrigin.x
-                - documentView.frame.minX
-            let canonicalTextKitOrigin = CGPoint(
-                x: visibleLineOrigin.x + horizontalScrollOffset,
-                y: visibleLineOrigin.y
-            )
-            precondition(
-                hypot(
-                    canonicalTextKitOrigin.x - renderedLineOrigin.x,
-                    canonicalTextKitOrigin.y - renderedLineOrigin.y
-                ) < 0.01,
-                "TextKit and Core Text lost their canonical origin during \(context): textKit=\(canonicalTextKitOrigin), renderer=\(renderedLineOrigin), scroll=\(horizontalScrollOffset)."
-            )
-            assertTextEditorLinesMatchRenderer(
-                editor,
-                state: state,
-                layout: textEditorLayoutPayload,
-                canonicalHorizontalOffset: horizontalScrollOffset,
-                context: context
-            )
-            precondition(
-                hypot(
-                    state.anchor.x - expectedAnchor.x,
-                    state.anchor.y - expectedAnchor.y
-                ) < 0.001,
-                "Canonical text anchor changed during \(context)."
-            )
-            let currentField = frameView.fieldFrame(in: self)
-            if allowsViewportGrowth {
-                let anchoredEdgeError: CGFloat
-                switch state.style.textAlignment {
-                case .leading:
-                    anchoredEdgeError = abs(expectedFieldFrame.minX - currentField.minX)
-                case .center:
-                    anchoredEdgeError = abs(expectedFieldFrame.midX - currentField.midX)
-                case .trailing:
-                    anchoredEdgeError = abs(expectedFieldFrame.maxX - currentField.maxX)
-                }
-                precondition(
-                    currentField.width + 0.001 >= expectedFieldFrame.width
-                        && anchoredEdgeError < 0.001
-                        && abs(expectedFieldFrame.maxY - currentField.maxY) < 0.001,
-                    "Growing text must expand its viewport monotonically around the same placement anchor during \(context)."
-                )
-            } else {
-                precondition(
-                    abs(expectedFieldFrame.minX - currentField.minX) < 0.001
-                        && abs(expectedFieldFrame.width - currentField.width) < 0.001
-                        && abs(expectedFieldFrame.maxY - currentField.maxY) < 0.001,
-                    "Wrapping must keep the field's leading edge, width and first-line top fixed during \(context)."
-                )
-            }
-            precondition(
-                frameView.fieldFrame(in: self).width
-                    <= min(
-                        InlineTextEditorMetrics.maximumViewportWidth,
-                        availableFieldBounds.width
-                    ) + 0.01,
-                "The interaction viewport exceeded its usability bound during \(context)."
-            )
-            precondition(
-                abs((editor.textContainer?.containerSize.width ?? 0) - wrapWidth) < 0.01,
-                "TextKit did not retain the persisted semantic wrap width during \(context)."
-            )
-            let measuredWidth = AnnotationTextLayout.maximumLineWidth(
-                for: editor.string,
-                style: state.style
-            )
-            if requiresOverflow == true {
-                precondition(
-                    measuredWidth > wrapWidth + 0.01,
-                    "Regression text must remain wider than the wrap width during \(context)."
-                )
-                precondition(
-                    AnnotationTextLayout.visualLineCount(
-                        in: editor.string,
-                        style: state.style,
-                        wrapWidth: wrapWidth
-                    ) > 1,
-                    "Overlong text must wrap onto additional lines during \(context)."
-                )
-            } else if requiresOverflow == false {
-                precondition(
-                    measuredWidth <= wrapWidth + 0.5,
-                    "Regression text must fit the wrap width during \(context)."
-                )
-            }
-            if let insertionX = textEditorInsertionX(editor) {
-                let visibleInsertionX = documentView.frame.minX + insertionX
-                let insertionInset = textEditorChromeInsetsInView(
-                    for: state
-                ).width
-                precondition(
-                    visibleInsertionX
-                        >= insertionInset - 0.5
-                        && visibleInsertionX
-                            <= container.bounds.maxX
-                                - insertionInset + 0.5,
-                    "Wrapping lost the insertion point during \(context): visibleX=\(visibleInsertionX), viewport=\(container.bounds)."
-                )
-            }
-            return renderedLineOrigin
-        }
-
-        for (alignmentIndex, alignment) in [
-            AnnotationTextAlignment.leading,
-            .center,
-            .trailing
-        ].enumerated() {
-            var style = sourceStyle
-            style.fontName = "Menlo-Regular"
-            style.fontSize = 18
-            style.textAlignment = alignment
-            let anchorXInView: CGFloat
-            switch alignment {
-            case .leading:
-                // Exercise canonical calibration independently from a field
-                // placement clamp in the same initial-overflow session.
-                anchorXInView = availableFieldBounds.minX + 2
-            case .center:
-                anchorXInView = availableFieldBounds.midX
-            case .trailing:
-                anchorXInView = availableFieldBounds.maxX
-                    - InlineTextEditorMetrics.horizontalPadding
-                    - 2
-            }
-            let anchor = documentPoint(fromViewPoint: CGPoint(
-                x: anchorXInView,
-                y: availableFieldBounds.midY
-            ))
-            let layout = requiredRendererReadyTextLayoutForRegression(
-                baselineAnchor: anchor,
-                text: overflowText,
-                style: style
-            )
-            let item = AnnotationItem(
-                kind: .text,
-                zIndex: session.controller.document.annotations.count,
-                geometry: .rect(layout.rect),
-                style: style,
-                text: overflowText,
-                textLayout: layout.payload
-            )
-            session.controller.add(item)
-            let itemBytesBeforeEditing = encodedItem(item)
-            let undoCountBeforeEditing = session.controller.undoStack.count
-            beginTextEditing(item: item)
-            guard let editor = textEditor,
-                  let frameView = textEditorFrameView,
-                  let fieldPlacementAnchorInDocument = textEditorFieldPlacementAnchorInDocument,
-                  let state = textEditingState
-            else {
-                preconditionFailure(
-                    "Could not open initially overflowing \(alignment) text."
-                )
-            }
-            let initialFieldFrame = frameView.fieldFrame(in: self)
-            if alignment == .leading {
-                let contentAnchor = textEditorAlignmentAnchor(
-                    for: state,
-                    text: editor.string,
-                    layout: textEditorLayoutPayload
-                )
-                let fieldPlacementAnchor = viewPoint(
-                    fromDocumentPoint: fieldPlacementAnchorInDocument
-                )
-                precondition(
-                    hypot(
-                        contentAnchor.x - fieldPlacementAnchor.x,
-                        contentAnchor.y - fieldPlacementAnchor.y
-                    ) > 1,
-                    "Initial-overflow regression requires one edge-clamped field."
-                )
-            }
-            editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
-            _ = assertCanonicalPresentation(
-                context: "initial \(alignment) overflow",
-                expectedAnchor: anchor,
-                expectedFieldFrame: initialFieldFrame,
-                requiresOverflow: false
-            )
-            editor.setSelectedRange(NSRange(location: 0, length: 0))
-            _ = assertCanonicalPresentation(
-                context: "initial \(alignment) overflow at first caret",
-                expectedAnchor: anchor,
-                expectedFieldFrame: initialFieldFrame,
-                requiresOverflow: false
-            )
-            editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
-            _ = assertCanonicalPresentation(
-                context: "initial \(alignment) overflow at final caret",
-                expectedAnchor: anchor,
-                expectedFieldFrame: initialFieldFrame,
-                requiresOverflow: false
-            )
-
-            editor.insertText(
-                appendedOverflowText,
-                replacementRange: NSRange(location: NSNotFound, length: 0)
-            )
-            editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
-            _ = assertCanonicalPresentation(
-                context: "growing \(alignment) overflow",
-                expectedAnchor: anchor,
-                expectedFieldFrame: initialFieldFrame,
-                requiresOverflow: true
-            )
-            editor.insertText(
-                "",
-                replacementRange: NSRange(
-                    location: editor.string.utf16.count - appendedOverflowText.utf16.count,
-                    length: appendedOverflowText.utf16.count
-                )
-            )
-            editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
-            let lineOriginBeforeCommit = assertCanonicalPresentation(
-                context: "shrinking but still-overflowed \(alignment) text",
-                expectedAnchor: anchor,
-                expectedFieldFrame: initialFieldFrame,
-                requiresOverflow: false
-            )
-            _ = endTextEditingIfNeeded(reason: .focusChange)
-            guard let committedItem = session.controller.document.annotations.first(where: {
-                $0.id == item.id
-            }), let committedText = committedItem.text,
-                  case .rect(let committedRect) = committedItem.geometry
-            else {
-                preconditionFailure(
-                    "Initial-overflow regression lost committed \(alignment) text."
-                )
-            }
-            let committedAnchor = AnnotationTextLayout.alignmentAnchor(
-                in: committedRect,
-                text: committedText,
-                style: committedItem.style,
-                layout: committedItem.textLayout
-            )
-            let committedState = TextEditingState(
-                itemID: committedItem.id,
-                anchor: committedAnchor,
-                style: committedItem.style,
-                transform: committedItem.transform
-            )
-            let lineOriginAfterCommit = renderedTextLineOriginInView(
-                state: committedState,
-                text: committedText,
-                layout: committedItem.textLayout
-            )
-            precondition(
-                committedItem == item
-                    && encodedItem(committedItem) == itemBytesBeforeEditing
-                    && session.controller.undoStack.count == undoCountBeforeEditing
-                    && committedText == overflowText
-                    && hypot(
-                        committedAnchor.x - anchor.x,
-                        committedAnchor.y - anchor.y
-                    ) < 0.001
-                    && hypot(
-                        lineOriginAfterCommit.x - lineOriginBeforeCommit.x,
-                        lineOriginAfterCommit.y - lineOriginBeforeCommit.y
-                    ) < 0.01
-                    && max(
-                        abs(lastTextCommitBaselineError?.x ?? .infinity),
-                        abs(lastTextCommitBaselineError?.y ?? .infinity)
-                    ) < 0.01,
-                "No-op focus-change commit changed initially overflowing \(alignment) text or its undo history."
-            )
-
-            if alignment == .trailing {
-                beginTextEditing(item: committedItem)
-                guard let transitionEditor = textEditor,
-                      let transitionFrame = textEditorFrameView
-                else {
-                    preconditionFailure(
-                        "Could not reopen trailing overflow for fit-transition regression."
-                    )
-                }
-                let transitionFieldFrame = transitionFrame.fieldFrame(in: self)
-                transitionEditor.insertText(
-                    "短",
-                    replacementRange: NSRange(
-                        location: 0,
-                        length: transitionEditor.string.utf16.count
-                    )
-                )
-                transitionEditor.setSelectedRange(
-                    NSRange(location: transitionEditor.string.utf16.count, length: 0)
-                )
-                _ = assertCanonicalPresentation(
-                    context: "trailing overflow-to-fit transition",
-                    expectedAnchor: anchor,
-                    expectedFieldFrame: transitionFieldFrame,
-                    requiresOverflow: false
-                )
-                transitionEditor.insertText(
-                    overflowText,
-                    replacementRange: NSRange(
-                        location: 0,
-                        length: transitionEditor.string.utf16.count
-                    )
-                )
-                transitionEditor.setSelectedRange(
-                    NSRange(location: transitionEditor.string.utf16.count, length: 0)
-                )
-                _ = assertCanonicalPresentation(
-                    context: "trailing fit-to-overflow transition",
-                    expectedAnchor: anchor,
-                    expectedFieldFrame: transitionFieldFrame,
-                    requiresOverflow: false
-                )
-                _ = endTextEditingIfNeeded(reason: .focusChange)
-                precondition(
-                    max(
-                        abs(lastTextCommitBaselineError?.x ?? .infinity),
-                        abs(lastTextCommitBaselineError?.y ?? .infinity)
-                    ) < 0.01,
-                    "Trailing fit-to-overflow commit moved the rendered line."
-                )
-            }
-
-            guard let wideItem = session.controller.document.annotations.first(where: {
-                $0.id == item.id
-            }) else {
-                preconditionFailure("Wide semantic resize regression lost its probe item.")
-            }
-            beginTextEditing(item: wideItem)
-            guard let wideStateBeforeResize = textEditingState,
-                  let wideViewportBeforeResize = textEditorContainer,
-                  let wideCanonicalBeforeResize = textEditorCanonicalWrapWidthInDocument
-            else {
-                preconditionFailure("Wide semantic resize regression lost its editor state.")
-            }
-            let wideViewportWidthBeforeResize = wideViewportBeforeResize.bounds.width
-            let wideFontBeforeResize = wideStateBeforeResize.style.fontSize
-            let wideFontAfterResize = runActiveTextResizeRegression(
-                handle: .southEast,
-                pointerDelta: CGPoint(x: 16, y: -8),
-                steps: 4,
-                eventNumberBase: 800 + alignmentIndex * 20
-            )
-            guard let wideCanonicalAfterResize = textEditorCanonicalWrapWidthInDocument,
-                  let wideViewportAfterResize = textEditorContainer,
-                  let widePayloadAfterResize = textEditorLayoutPayload
-            else {
-                preconditionFailure("Wide semantic resize regression lost resized ownership.")
-            }
-            let expectedWideCanonical = wideCanonicalBeforeResize
-                * wideFontAfterResize / wideFontBeforeResize
-            let completeWidePresentationWidth = AnnotationTextLayout.presentationFieldWidth(
-                layout: widePayloadAfterResize,
-                canvasScale: textEditorCanvasScaleX,
-                uniformTransformScale: abs(wideStateBeforeResize.transform.scaleX)
-            )
-            precondition(
-                abs(wideCanonicalAfterResize - expectedWideCanonical) < 0.01
-                    && wideViewportWidthBeforeResize
-                        <= InlineTextEditorMetrics.maximumViewportWidth + 0.01
-                    && wideViewportAfterResize.bounds.width
-                        <= InlineTextEditorMetrics.maximumViewportWidth + 0.01
-                    && completeWidePresentationWidth
-                        > wideViewportAfterResize.bounds.width + 0.01,
-                "Wide \(alignment) resize must scale semantic width while keeping the viewport capped."
-            )
-            _ = endTextEditingIfNeeded(reason: .focusChange)
-            guard let resizedWideItem = session.controller.document.annotations.first(where: {
-                $0.id == item.id
-            }) else {
-                preconditionFailure("Wide semantic resize regression lost its committed item.")
-            }
-            precondition(
-                abs(
-                    AnnotationTextLayout.canonicalWrapWidth(for: resizedWideItem)
-                        - wideCanonicalAfterResize
-                ) < 0.01,
-                "Wide semantic resize commit replaced canonical width with the capped viewport."
-            )
-
-            session.controller.selectedItemIDs = [item.id]
-            session.controller.deleteSelection()
-            precondition(
-                !session.controller.document.annotations.contains { $0.id == item.id },
-                "Initial-overflow regression failed to remove its probe annotation."
-            )
-        }
-
-        // Include a raw form-feed followed by more text. TextKit's default
-        // action changes containers, whereas the canonical planner treats it
-        // as an LF without changing document UTF-16 ranges.
-        let scaledText = "Scale中 first\u{000C}Second mixed 行\nThird line 文"
-        let scaledAppend = "WWWWWW"
-        for uniformScale in [
-            CGFloat(0.75),
-            CGFloat(1.25),
-            CGFloat(4) / 3,
-            CGFloat(1.5)
-        ] {
-            for alignment in [
-                AnnotationTextAlignment.leading,
-                .center,
-                .trailing
-            ] {
-                var style = sourceStyle
-                style.fontName = "Menlo-Regular"
-                style.fontSize = 18
-                style.textAlignment = alignment
-                let anchorXInView: CGFloat
-                switch alignment {
-                case .leading: anchorXInView = bounds.width * 0.3
-                case .center: anchorXInView = bounds.width * 0.5
-                case .trailing: anchorXInView = bounds.width * 0.7
-                }
-                let anchor = documentPoint(fromViewPoint: CGPoint(
-                    x: anchorXInView,
-                    y: bounds.height * 0.42
-                ))
-                let transform = AnnotationTransform(
-                    translation: CGSize(width: 12, height: -8),
-                    scaleX: uniformScale,
-                    scaleY: uniformScale
-                )
-                let layout = requiredRendererReadyTextLayoutForRegression(
-                    baselineAnchor: anchor,
-                    text: scaledText,
-                    style: style
-                )
-                let item = AnnotationItem(
-                    kind: .text,
-                    zIndex: session.controller.document.annotations.count,
-                    geometry: .rect(layout.rect),
-                    style: style,
-                    transform: transform,
-                    text: scaledText,
-                    textLayout: layout.payload
-                )
-                session.controller.add(item)
-                let itemBytesBeforeEditing = encodedItem(item)
-                let undoCountBeforeEditing = session.controller.undoStack.count
-                beginTextEditing(item: item)
-                guard let editor = textEditor,
-                      let frameView = textEditorFrameView,
-                      let initialState = textEditingState
-                else {
-                    preconditionFailure(
-                        "Could not open uniformly scaled \(alignment) text at \(uniformScale)x."
-                    )
-                }
-                guard let scaledWrapWidth = textEditorCanonicalWrapWidthInDocument else {
-                    preconditionFailure(
-                        "Uniform-scale multiline regression lost its canonical wrap width."
-                    )
-                }
-                let scaledPlan = AnnotationTextLayout.layoutPlan(
-                    in: editor.string,
-                    style: initialState.style,
-                    wrapWidth: scaledWrapWidth
-                )
-                let scaledTextKitLines = textEditorLineSnapshotsInView(editor)
-                let expectedBaselineAdvanceInView = textEditorFieldHeightInView(
-                    fromUntransformedDocumentHeight: scaledPlan.lineAdvance,
-                    state: initialState
-                )
-                precondition(
-                    scaledTextKitLines.count >= 3
-                        && zip(
-                            scaledTextKitLines,
-                            scaledTextKitLines.dropFirst()
-                        ).allSatisfy { pair in
-                            let (upper, lower) = pair
-                            return abs(
-                                upper.originInView.y
-                                    - lower.originInView.y
-                                    - expectedBaselineAdvanceInView
-                            ) < 0.01
-                        },
-                    "Uniform-scale fixture must expose at least three live TextKit baselines at the canonical line advance for \(alignment) at \(uniformScale)x."
-                )
-                let initialFieldFrame = frameView.fieldFrame(in: self)
-                let initialContentAnchor = textEditorAlignmentAnchor(
-                    for: initialState,
-                    text: editor.string,
-                    layout: textEditorLayoutPayload
-                )
-                let initialRectWidth = AnnotationTextLayout.annotationRect(
-                    baselineAnchor: anchor,
-                    text: editor.string,
-                    style: style
-                ).width
-                editor.setSelectedRange(
-                    NSRange(location: editor.string.utf16.count, length: 0)
-                )
-                let initialLineOrigin = assertCanonicalPresentation(
-                    context: "initial \(uniformScale)x \(alignment) text",
-                    expectedAnchor: anchor,
-                    expectedFieldFrame: initialFieldFrame,
-                    requiresOverflow: nil
-                )
-
-                editor.insertText(
-                    scaledAppend,
-                    replacementRange: NSRange(location: NSNotFound, length: 0)
-                )
-                editor.setSelectedRange(
-                    NSRange(location: editor.string.utf16.count, length: 0)
-                )
-                let lineOriginBeforeCommit = assertCanonicalPresentation(
-                    context: "wider \(uniformScale)x \(alignment) text",
-                    expectedAnchor: anchor,
-                    expectedFieldFrame: initialFieldFrame,
-                    requiresOverflow: nil,
-                    allowsViewportGrowth: true
-                )
-                guard let widenedState = textEditingState else {
-                    preconditionFailure(
-                        "Uniform-scale regression lost its widened editing state."
-                    )
-                }
-                let widenedContentAnchor = textEditorAlignmentAnchor(
-                    for: widenedState,
-                    text: editor.string,
-                    layout: textEditorLayoutPayload
-                )
-                let widenedRectWidth = AnnotationTextLayout.annotationRect(
-                    baselineAnchor: anchor,
-                    text: editor.string,
-                    style: style
-                ).width
-                let alignmentCenterFactor: CGFloat
-                switch alignment {
-                case .leading: alignmentCenterFactor = 0.5
-                case .center: alignmentCenterFactor = 0
-                case .trailing: alignmentCenterFactor = -0.5
-                }
-                let expectedContentAnchorDeltaInView = viewOffset(
-                    fromDocumentOffset: CGSize(
-                        width: (1 - uniformScale)
-                            * alignmentCenterFactor
-                            * (widenedRectWidth - initialRectWidth),
-                        height: 0
-                    )
-                ).width
-                precondition(
-                    abs(
-                        widenedContentAnchor.x
-                            - initialContentAnchor.x
-                            - expectedContentAnchorDeltaInView
-                    ) < 0.01
-                        && widenedState.anchor == anchor
-                        && widenedState.transform == transform,
-                    "Uniform-scale presentation anchor did not follow renderer geometry for \(alignment) at \(uniformScale)x."
-                )
-
-                editor.insertText(
-                    "",
-                    replacementRange: NSRange(
-                        location: editor.string.utf16.count - scaledAppend.utf16.count,
-                        length: scaledAppend.utf16.count
-                    )
-                )
-                editor.setSelectedRange(
-                    NSRange(location: editor.string.utf16.count, length: 0)
-                )
-                let restoredLineOrigin = assertCanonicalPresentation(
-                    context: "restored \(uniformScale)x \(alignment) no-op text",
-                    expectedAnchor: anchor,
-                    expectedFieldFrame: initialFieldFrame,
-                    requiresOverflow: nil,
-                    allowsViewportGrowth: true
-                )
-                _ = endTextEditingIfNeeded(reason: .focusChange)
-                guard let restoredItem = session.controller.document.annotations.first(where: {
-                    $0.id == item.id
-                }) else {
-                    preconditionFailure(
-                        "Uniform-scale no-op regression lost \(alignment) text."
-                    )
-                }
-                precondition(
-                    restoredItem == item
-                        && encodedItem(restoredItem) == itemBytesBeforeEditing
-                        && session.controller.undoStack.count == undoCountBeforeEditing
-                        && hypot(
-                            restoredLineOrigin.x - initialLineOrigin.x,
-                            restoredLineOrigin.y - initialLineOrigin.y
-                        ) < 0.01
-                        && max(
-                            abs(lastTextCommitBaselineError?.x ?? .infinity),
-                            abs(lastTextCommitBaselineError?.y ?? .infinity)
-                        ) < 0.01,
-                    "Uniform-scale grow-and-restore changed \(alignment) bytes or undo history at \(uniformScale)x."
-                )
-
-                beginTextEditing(item: restoredItem)
-                guard let reopenedEditor = textEditor else {
-                    preconditionFailure(
-                        "Uniform-scale regression could not reopen \(alignment) text after no-op."
-                    )
-                }
-                reopenedEditor.setSelectedRange(
-                    NSRange(location: reopenedEditor.string.utf16.count, length: 0)
-                )
-                reopenedEditor.insertText(
-                    scaledAppend,
-                    replacementRange: NSRange(location: NSNotFound, length: 0)
-                )
-                reopenedEditor.setSelectedRange(
-                    NSRange(location: reopenedEditor.string.utf16.count, length: 0)
-                )
-                let finalLineOriginBeforeCommit = assertCanonicalPresentation(
-                    context: "reopened wider \(uniformScale)x \(alignment) text",
-                    expectedAnchor: anchor,
-                    expectedFieldFrame: initialFieldFrame,
-                    requiresOverflow: nil,
-                    allowsViewportGrowth: true
-                )
-                precondition(
-                    hypot(
-                        finalLineOriginBeforeCommit.x - lineOriginBeforeCommit.x,
-                        finalLineOriginBeforeCommit.y - lineOriginBeforeCommit.y
-                    ) < 0.01,
-                    "Reopening uniformly scaled text changed its widened renderer origin."
-                )
-
-                _ = endTextEditingIfNeeded(reason: .focusChange)
-                guard let committedItem = session.controller.document.annotations.first(where: {
-                    $0.id == item.id
-                }), let committedText = committedItem.text,
-                      case .rect(let committedRect) = committedItem.geometry
-                else {
-                    preconditionFailure(
-                        "Uniform-scale regression lost committed \(alignment) text."
-                    )
-                }
-                let committedAnchor = AnnotationTextLayout.alignmentAnchor(
-                    in: committedRect,
-                    text: committedText,
-                    style: committedItem.style,
-                    layout: committedItem.textLayout
-                )
-                let committedState = TextEditingState(
-                    itemID: committedItem.id,
-                    anchor: committedAnchor,
-                    style: committedItem.style,
-                    transform: committedItem.transform
-                )
-                let lineOriginAfterCommit = renderedTextLineOriginInView(
-                    state: committedState,
-                    text: committedText,
-                    layout: committedItem.textLayout
-                )
-                precondition(
-                    committedText == scaledText + scaledAppend
-                        && committedAnchor == anchor
-                        && committedItem.transform == transform
-                        && hypot(
-                            lineOriginAfterCommit.x - finalLineOriginBeforeCommit.x,
-                            lineOriginAfterCommit.y - finalLineOriginBeforeCommit.y
-                        ) < 0.01
-                        && max(
-                            abs(lastTextCommitBaselineError?.x ?? .infinity),
-                            abs(lastTextCommitBaselineError?.y ?? .infinity)
-                        ) < 0.01,
-                    "Committing \(uniformScale)x \(alignment) text changed its renderer presentation."
-                )
-
-                session.controller.selectedItemIDs = [item.id]
-                session.controller.deleteSelection()
-            }
-        }
-
-        var resizeStyle = sourceStyle
-        resizeStyle.fontName = "Menlo-Regular"
-        resizeStyle.fontSize = 18
-        resizeStyle.textAlignment = .leading
-        let resizeAnchor = documentPoint(fromViewPoint: CGPoint(
-            x: bounds.width * 0.38,
-            y: bounds.height * 0.38
-        ))
-        let resizeTransform = AnnotationTransform(
-            translation: CGSize(width: 12, height: -8),
-            scaleX: 1.5,
-            scaleY: 1.5
-        )
-        let resizeLayout = requiredRendererReadyTextLayoutForRegression(
-            baselineAnchor: resizeAnchor,
-            text: "ResizeScale",
-            style: resizeStyle
-        )
-        let resizeItem = AnnotationItem(
-            kind: .text,
-            zIndex: session.controller.document.annotations.count,
-            geometry: .rect(resizeLayout.rect),
-            style: resizeStyle,
-            transform: resizeTransform,
-            text: "ResizeScale",
-            textLayout: resizeLayout.payload
-        )
-        session.controller.add(resizeItem)
-        beginTextEditing(item: resizeItem)
-        _ = runActiveTextResizeRegression(
-            handle: .southEast,
-            pointerDelta: CGPoint(x: 24, y: -12),
-            steps: 6,
-            eventNumberBase: 600
-        )
-        _ = runActiveTextResizeRegression(
-            handle: .northWest,
-            pointerDelta: CGPoint(x: 12, y: -6),
-            steps: 6,
-            eventNumberBase: 650
-        )
-        _ = runActiveTextResizeRegression(
-            handle: .southWest,
-            pointerDelta: CGPoint(x: 10, y: 5),
-            steps: 6,
-            eventNumberBase: 700
-        )
-        guard let resizedEditor = textEditor,
-              let resizedFrameView = textEditorFrameView,
-              let resizedState = textEditingState
-        else {
-            preconditionFailure(
-                "Uniform-scale active resize regression lost the editor."
-            )
-        }
-        let resizedLineOriginBeforeCommit = assertCanonicalPresentation(
-            context: "uniform-scale three-corner resize",
-            expectedAnchor: resizedState.anchor,
-            expectedFieldFrame: resizedFrameView.fieldFrame(in: self),
-            requiresOverflow: nil
-        )
-        let resizedText = resizedEditor.string
-        _ = endTextEditingIfNeeded(reason: .focusChange)
-        guard let committedResizeItem = session.controller.document.annotations.first(where: {
-            $0.id == resizeItem.id
-        }), let committedResizeText = committedResizeItem.text,
-              case .rect(let committedResizeRect) = committedResizeItem.geometry
-        else {
-            preconditionFailure(
-                "Uniform-scale active resize regression lost its committed item."
-            )
-        }
-        let committedResizeState = TextEditingState(
-            itemID: committedResizeItem.id,
-            anchor: AnnotationTextLayout.alignmentAnchor(
-                in: committedResizeRect,
-                text: committedResizeText,
-                style: committedResizeItem.style,
-                layout: committedResizeItem.textLayout
-            ),
-            style: committedResizeItem.style,
-            transform: committedResizeItem.transform
-        )
-        let resizedLineOriginAfterCommit = renderedTextLineOriginInView(
-            state: committedResizeState,
-            text: committedResizeText,
-            layout: committedResizeItem.textLayout
-        )
-        precondition(
-            committedResizeText == resizedText
-                && committedResizeItem.transform == resizeTransform
-                && hypot(
-                    resizedLineOriginAfterCommit.x - resizedLineOriginBeforeCommit.x,
-                    resizedLineOriginAfterCommit.y - resizedLineOriginBeforeCommit.y
-                ) < 0.01
-                && max(
-                    abs(lastTextCommitBaselineError?.x ?? .infinity),
-                    abs(lastTextCommitBaselineError?.y ?? .infinity)
-                ) < 0.01,
-            "Committing uniformly scaled three-corner resize changed its presentation."
-        )
-        session.controller.selectedItemIDs = [resizeItem.id]
-        session.controller.deleteSelection()
-
-        session.adoptCurrentStyle(originalStyle, origin: originalStyleOrigin)
-        session.controller.selectedItemIDs = originalSelection
-        syncSelectedTextChrome()
-    }
-
-    private func runInlineTextPointerAndLineBreakRegression() {
-        _ = endTextEditingIfNeeded(reason: .externalAction)
-        var style = session.defaultStyle(for: .text)
-        style.fontName = "Menlo-Regular"
-        style.fontSize = 18
-        let anchor = documentPoint(fromViewPoint: CGPoint(
-            x: bounds.midX,
-            y: bounds.midY
-        ))
-        installTextEditor(
-            text: "AB",
-            state: TextEditingState(
-                itemID: nil,
-                anchor: anchor,
-                style: style,
-                transform: AnnotationTransform()
-            )
-        )
-        guard let editor = textEditor,
-              let frameView = textEditorFrameView,
-              let initialLineOrigin = textEditorLineOriginInView(editor)
-        else {
-            preconditionFailure("Pointer and line-break regression could not start the inline editor.")
-        }
-        let initialField = frameView.fieldFrame(in: self)
-        let clickPoint = CGPoint(x: initialField.midX, y: initialField.midY)
-        let framePoint = frameView.convert(clickPoint, from: self)
-        let fieldHit = frameView.hitTest(framePoint)
-        precondition(
-            fieldHit === editor,
-            "Clicking the active text field must hit the NSTextView, not \(String(describing: fieldHit.map { type(of: $0) }))."
-        )
-        let canvasHit = hitTest(clickPoint)
-        precondition(
-            canvasHit === editor,
-            "Canvas hit testing must route field clicks to the NSTextView, not \(String(describing: canvasHit.map { type(of: $0) }))."
-        )
-
-        editor.insertNewlineIgnoringFieldEditor(nil)
-        updateTextEditorLayout(scrollsToInsertionPoint: true)
-        layoutSubtreeIfNeeded()
-        window?.displayIfNeeded()
-        guard let brokenLineOrigin = textEditorLineOriginInView(editor) else {
-            preconditionFailure("Pointer and line-break regression lost the first-line origin after inserting a newline.")
-        }
-        precondition(
-            editor.string.contains("\n"),
-            "Shift-Return must insert a hard line break instead of committing the annotation."
-        )
-        precondition(
-            AnnotationTextLayout.lineCount(in: editor.string) == 2,
-            "A single line break must produce exactly two visual lines."
-        )
-        precondition(
-            abs(brokenLineOrigin.x - initialLineOrigin.x) < 0.01
-                && abs(brokenLineOrigin.y - initialLineOrigin.y) < 0.01,
-            "Inserting a line break moved the first-line origin from \(initialLineOrigin) to \(brokenLineOrigin)."
-        )
-        let grownField = frameView.fieldFrame(in: self)
-        precondition(
-            grownField.height > initialField.height + 1,
-            "A line break must grow the text field. initial=\(initialField.height), grown=\(grownField.height)."
-        )
-        precondition(
-            abs(grownField.maxY - initialField.maxY) < 0.51,
-            "A line break must keep the first-line top edge fixed. initialMaxY=\(initialField.maxY), grownMaxY=\(grownField.maxY)."
-        )
-
-        _ = endTextEditingIfNeeded(reason: .focusChange)
-        guard let committedItem = session.controller.document.annotations.last,
-              committedItem.kind == .text,
-              let committedText = committedItem.text
-        else {
-            preconditionFailure("Pointer and line-break regression did not commit the multiline annotation.")
-        }
-        precondition(
-            committedText.contains("\n"),
-            "Committing inline text must preserve hard line breaks instead of flattening them to spaces."
-        )
-        session.controller.selectedItemIDs = [committedItem.id]
-        session.controller.deleteSelection()
-        AppLog.capture.notice(
-            "Inline text pointer and line-break regression passed: fieldHit=editor, firstLineOriginStable=true, fieldGrewDownward=true, committedNewline=true"
-        )
-    }
-
-    private func runInlineTextEditorAdmissionRegression() {
-        precondition(textEditor == nil, "Canvas admission regression requires no active editor.")
-        let originalBounds = bounds
-        for size in [
-            CGSize(width: 2, height: 2),
-            CGSize(width: 20, height: 20),
-            CGSize(width: 19, height: 40)
-        ] {
-            bounds = CGRect(origin: originalBounds.origin, size: size)
-            beginTextEditing(at: .zero)
-            precondition(
-                textEditor == nil,
-                "A \(size.width)x\(size.height) canvas must reject inline text controls without crashing."
-            )
-        }
-        bounds = originalBounds
-
-        var probeStyle = session.defaultStyle(for: .text)
-        probeStyle.fontName = "Menlo-Regular"
-        probeStyle.fontSize = 18
-        probeStyle.textAlignment = .center
-        let probeText = "Probe first\u{000C}Probe second\u{000B}Probe third\n"
-        let probeLayout = requiredRendererReadyTextLayoutForRegression(
-            baselineAnchor: .zero,
-            text: probeText,
-            style: probeStyle,
-            maximumWrapWidth: 240
-        )
-        let probePlan: AnnotationTextLayoutPlan
-        do {
-            probePlan = try AnnotationTextLayout.persistedPlan(
-                text: probeText,
-                style: probeStyle,
-                payload: probeLayout.payload
-            )
-            try validateInlineTextKitEditingCapability(
-                text: probeText,
-                style: probeStyle,
-                payload: probeLayout.payload,
-                plan: probePlan
-            )
-        } catch {
-            preconditionFailure(
-                "The native offscreen TextKit admission fixture did not reproduce its persisted plan: \(error)"
-            )
-        }
-        precondition(
-            probePlan.lineCount >= 4
-                && probePlan.lines.last?.utf16Range.length == 0
-                && probePlan.lines.last?.consumedUTF16Range.length == 0,
-            "The native offscreen TextKit admission fixture must cover three drawable lines and the terminal extra line."
-        )
-        let selectionBeforeRejectedProbe = session.controller.selectedItemIDs
-        let chromeBeforeRejectedProbe = selectedTextFrameView
-        var rejectedMismatchedText = false
-        do {
-            try validateInlineTextKitEditingCapability(
-                text: probeText + "X",
-                style: probeStyle,
-                payload: probeLayout.payload,
-                plan: probePlan
-            )
-        } catch is InlineTextKitEditingCapabilityError {
-            rejectedMismatchedText = true
-        } catch {
-            preconditionFailure(
-                "The native offscreen TextKit mismatch fixture returned an unexpected error: \(error)"
-            )
-        }
-        precondition(
-            rejectedMismatchedText
-                && textEditor == nil
-                && textEditingState == nil
-                && session.controller.selectedItemIDs == selectionBeforeRejectedProbe
-                && selectedTextFrameView === chromeBeforeRejectedProbe,
-            "A rejected offscreen TextKit capability probe must leave editor, selection and chrome state unchanged."
-        )
-        syncSelectedTextChrome()
-        updateAccessibilitySummary(
-            document: session.controller.document,
-            captured: session.previewImage
-        )
-    }
-
-    private func runInlineTextFieldGeometryRegression(style: AnnotationStyle) {
-        let availableFieldBounds = bounds.insetBy(
-            dx: InlineAnnotationTextEditorFrameView.chromeOutset,
-            dy: InlineAnnotationTextEditorFrameView.chromeOutset
-        )
-        precondition(
-            availableFieldBounds.width > 420 && availableFieldBounds.height > 180,
-            "Inline text geometry regression requires room away from every canvas edge."
-        )
-        for alignment in [
-            AnnotationTextAlignment.leading,
-            .center,
-            .trailing
-        ] {
-            for fontSize in [CGFloat(18), 19.15, 20, 31] {
-                var candidateStyle = style
-                candidateStyle.textAlignment = alignment
-                candidateStyle.fontSize = fontSize
-                let candidateState = TextEditingState(
-                    itemID: nil,
-                    anchor: .zero,
-                    style: candidateStyle,
-                    transform: AnnotationTransform()
-                )
-                let font = requiredTextEditorFontForRegression(candidateState)
-                let targetFrame = CGRect(
-                    x: availableFieldBounds.minX + 90,
-                    y: availableFieldBounds.minY + 70,
-                    width: 287,
-                    height: textEditorFieldHeight(
-                        font: font,
-                        state: candidateState
-                    )
-                )
-                let alignmentAnchor = textFieldAlignmentAnchor(
-                    for: targetFrame,
-                    font: font,
-                    alignment: alignment,
-                    state: candidateState
-                )
-                let resolvedFrame = resolvedTextFieldFrame(
-                    alignmentAnchor: alignmentAnchor,
-                    font: font,
-                    preferredViewportWidth: targetFrame.width,
-                    availableFieldBounds: availableFieldBounds,
-                    alignment: alignment,
-                    state: candidateState
-                )
-                precondition(
-                    maxFrameDelta(targetFrame, resolvedFrame) < 0.001,
-                    "Inline text frame and anchor geometry must round-trip at font size \(fontSize) for \(alignment)."
-                )
-            }
-        }
-
-        var clampedCases = 0
-        for alignment in [
-            AnnotationTextAlignment.leading,
-            .center,
-            .trailing
-        ] {
-            var candidateStyle = style
-            candidateStyle.textAlignment = alignment
-            candidateStyle.fontSize = 18
-            let candidateState = TextEditingState(
-                itemID: nil,
-                anchor: .zero,
-                style: candidateStyle,
-                transform: AnnotationTransform()
-            )
-            let font = requiredTextEditorFontForRegression(candidateState)
-            for canonicalAnchor in [
-                CGPoint(x: availableFieldBounds.minX + 2, y: availableFieldBounds.minY + 2),
-                CGPoint(x: availableFieldBounds.maxX - 2, y: availableFieldBounds.minY + 2),
-                CGPoint(x: availableFieldBounds.minX + 2, y: availableFieldBounds.maxY - 2),
-                CGPoint(x: availableFieldBounds.maxX - 2, y: availableFieldBounds.maxY - 2)
-            ] {
-                let initialFrame = resolvedTextFieldFrame(
-                    alignmentAnchor: canonicalAnchor,
-                    font: font,
-                    preferredViewportWidth: 287,
-                    availableFieldBounds: availableFieldBounds,
-                    alignment: alignment,
-                    state: candidateState
-                )
-                let fieldAnchor = textFieldAlignmentAnchor(
-                    for: initialFrame,
-                    font: font,
-                    alignment: alignment,
-                    state: candidateState
-                )
-                let residual = CGSize(
-                    width: canonicalAnchor.x - fieldAnchor.x,
-                    height: canonicalAnchor.y - fieldAnchor.y
-                )
-                if hypot(residual.width, residual.height) > 1 {
-                    clampedCases += 1
-                }
-                for handle in [
-                    InlineAnnotationTextResizeHandle.northWest,
-                    .southWest,
-                    .southEast
-                ] {
-                    let fixedPoint = textFramePoint(
-                        corner: handle.fixedCorner,
-                        in: initialFrame
-                    )
-                    let identicalTarget = textFieldFrame(
-                        fixedCorner: handle.fixedCorner,
-                        fixedPoint: fixedPoint,
-                        size: initialFrame.size
-                    )
-                    let targetFieldAnchor = textFieldAlignmentAnchor(
-                        for: identicalTarget,
-                        font: font,
-                        alignment: alignment,
-                        state: candidateState
-                    )
-                    let reconstructedCanonicalAnchor = CGPoint(
-                        x: targetFieldAnchor.x + residual.width,
-                        y: targetFieldAnchor.y + residual.height
-                    )
-                    precondition(
-                        hypot(
-                            reconstructedCanonicalAnchor.x - canonicalAnchor.x,
-                            reconstructedCanonicalAnchor.y - canonicalAnchor.y
-                        ) < 0.001,
-                        "Clamped text field placement must preserve its independent canonical anchor for \(alignment) and \(handle.rawValue)."
-                    )
-                }
-            }
-        }
-        precondition(
-            clampedCases == 12,
-            "Edge field regression must exercise every alignment at every canvas corner."
-        )
-    }
-
-    private func runEdgeClampedNoOpTextResizeRegression(eventNumberBase: Int) {
-        guard let window,
-              let editor = textEditor,
-              let frameView = textEditorFrameView,
-              var edgeState = textEditingState,
-              let preferredViewportWidthInDocument = textEditorPreferredViewportWidthInDocument,
-              let canonicalWrapWidthInDocument = textEditorCanonicalWrapWidthInDocument
-        else {
-            preconditionFailure("Edge-clamped text resize regression requires an active editor.")
-        }
-        let initialLayoutPayload = textEditorLayoutPayload
-        let initialExplicitResizeState = textEditorCanonicalWrapWidthWasExplicitlyResized
-        edgeState.anchor.x = documentPoint(fromViewPoint: CGPoint(
-            x: bounds.maxX - InlineAnnotationTextEditorFrameView.chromeOutset - 2,
-            y: bounds.midY
-        )).x
-        textEditingState = edgeState
-        textEditorFieldPlacementAnchorInDocument = nil
-        textEditorPresentationLayout = nil
-        updateTextEditorFrame(scrollsToInsertionPoint: true)
-        guard let fieldPlacementAnchorInDocument = textEditorFieldPlacementAnchorInDocument,
-              let initialLineOrigin = textEditorLineOriginInView(editor)
-        else {
-            preconditionFailure("Edge-clamped text resize regression could not resolve field placement.")
-        }
-        let contentAnchor = textEditorAlignmentAnchor(
-            for: edgeState,
-            text: editor.string,
-            layout: textEditorLayoutPayload
-        )
-        let fieldPlacementAnchor = viewPoint(
-            fromDocumentPoint: fieldPlacementAnchorInDocument
-        )
-        precondition(
-            abs(contentAnchor.x - fieldPlacementAnchor.x) > 20,
-            "Edge-clamped text resize regression requires a non-invertible horizontal clamp."
-        )
-
-        let initialState = edgeState
-        let initialFieldFrame = frameView.fieldFrame(in: self)
-        let handle = InlineAnnotationTextResizeHandle.southEast
-        let activeCorner = textFramePoint(handle: handle, in: initialFieldFrame)
-        let fixedCorner = textFramePoint(corner: handle.fixedCorner, in: initialFieldFrame)
-        let diagonal = CGPoint(
-            x: activeCorner.x - fixedCorner.x,
-            y: activeCorner.y - fixedCorner.y
-        )
-        let perpendicularLength = hypot(diagonal.y, diagonal.x)
-        precondition(perpendicularLength > 1, "Edge resize regression requires a non-empty field diagonal.")
-        let perpendicularDelta = CGPoint(
-            x: diagonal.y / perpendicularLength * 18,
-            y: -diagonal.x / perpendicularLength * 18
-        )
-        let startInWindow = convert(activeCorner, to: nil)
-        let noOpInWindow = CGPoint(
-            x: startInWindow.x + perpendicularDelta.x,
-            y: startInWindow.y + perpendicularDelta.y
-        )
-        let timestamp = ProcessInfo.processInfo.systemUptime
-
-        func event(
-            type: NSEvent.EventType,
-            location: CGPoint,
-            number: Int,
-            pressure: Float
-        ) -> NSEvent {
-            guard let event = NSEvent.mouseEvent(
-                with: type,
-                location: location,
-                modifierFlags: [],
-                timestamp: timestamp + Double(number) / 120,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: eventNumberBase + number,
-                clickCount: 1,
-                pressure: pressure
-            ) else {
-                preconditionFailure("Edge-clamped text resize regression could not synthesize event \(number).")
-            }
-            return event
-        }
-
-        beginTextResize(
-            handle: handle,
-            event: event(type: .leftMouseDown, location: startInWindow, number: 0, pressure: 1)
-        )
-        updateTextResize(
-            handle: handle,
-            event: event(type: .leftMouseDragged, location: noOpInWindow, number: 1, pressure: 1)
-        )
-        endTextResize(
-            handle: handle,
-            event: event(type: .leftMouseUp, location: noOpInWindow, number: 2, pressure: 0)
-        )
-        guard let finalState = textEditingState,
-              let finalLineOrigin = textEditorLineOriginInView(editor)
-        else {
-            preconditionFailure("Edge-clamped text resize regression lost the active editor.")
-        }
-        precondition(
-            hypot(
-                finalState.anchor.x - initialState.anchor.x,
-                finalState.anchor.y - initialState.anchor.y
-            ) < 0.001
-                && abs(finalState.style.fontSize - initialState.style.fontSize) < 0.001,
-            "A perpendicular edge-clamped drag must not change the canonical text state."
-        )
-        precondition(
-            maxFrameDelta(initialFieldFrame, frameView.fieldFrame(in: self)) < 0.001
-                && hypot(
-                    finalLineOrigin.x - initialLineOrigin.x,
-                    finalLineOrigin.y - initialLineOrigin.y
-                ) < 0.001,
-            "A perpendicular edge-clamped drag must not move the field or visible text."
-        )
-        precondition(
-            abs(
-                (textEditorPreferredViewportWidthInDocument ?? .infinity)
-                    - preferredViewportWidthInDocument
-            ) < 0.001
-                && abs(
-                    (textEditorCanonicalWrapWidthInDocument ?? .infinity)
-                        - canonicalWrapWidthInDocument
-                ) < 0.001
-                && textEditorLayoutPayload == initialLayoutPayload
-                && textEditorCanonicalWrapWidthWasExplicitlyResized
-                    == initialExplicitResizeState
-                && window.firstResponder === editor,
-            "A perpendicular edge-clamped drag must preserve viewport and semantic layout ownership."
-        )
-    }
-
-    private func runLegacyOverhangNoOpTextResizeRegression(eventNumberBase: Int) {
-        precondition(
-            textEditor == nil && textEditingState == nil,
-            "Legacy overhang resize regression requires an idle inline editor."
-        )
-        func encodedProbeItem(_ item: AnnotationItem) -> Data {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            do {
-                return try encoder.encode(item)
-            } catch {
-                preconditionFailure(
-                    "Legacy overhang regression could not encode its no-op fixture: \(error)"
-                )
-            }
-        }
-
-        let originalSelection = session.controller.selectedItemIDs
-        let originalStyle = session.currentStyle
-        let originalStyleOrigin = session.currentStyleOrigin
-        var style = originalStyle
-        style.fontName = "Zapfino"
-        style.fontSize = 18
-        style.fontWeight = .regular
-        style.textAlignment = .leading
-        let text = "Zapfino fj Ág"
-        let canonicalWrapWidth: CGFloat = 140
-        let legacyRect = CGRect(
-            x: documentPoint(fromViewPoint: CGPoint(
-                x: bounds.maxX - InlineAnnotationTextEditorFrameView.chromeOutset - 2,
-                y: bounds.midY
-            )).x,
-            y: visibleDocumentRect().midY - 13.5,
-            width: canonicalWrapWidth,
-            height: 27
-        )
-        let safePayload = requiredRendererReadyTextPayloadForRegression(
-            text: text,
-            style: style,
-            proposedWrapWidth: canonicalWrapWidth,
-            chromeMode: .legacyTight
-        )
-        precondition(
-            safePayload.leadingOverhang + safePayload.trailingOverhang > 0.01
-                && abs(
-                    safePayload.leadingOverhang - safePayload.trailingOverhang
-                ) > 0.01,
-            "Legacy overhang regression requires asymmetric Zapfino glyph bearings."
-        )
-        let transform = AnnotationTransform(scaleX: 1.5, scaleY: 1.5)
-        let item = AnnotationItem(
-            kind: .text,
-            zIndex: session.controller.document.annotations.count,
-            geometry: .rect(legacyRect),
-            style: style,
-            transform: transform,
-            text: text,
-            textLayout: nil
-        )
-        session.controller.add(item)
-        let encodedItemBeforeEditing = encodedProbeItem(item)
-        let undoCountBeforeEditing = session.controller.undoStack.count
-        let originalAnchor = AnnotationTextLayout.alignmentAnchor(
-            in: legacyRect,
-            text: text,
-            style: style,
-            layout: nil
-        )
-
-        beginTextEditing(item: item)
-        guard let container = textEditorContainer,
-              let documentView = textEditorDocumentView,
-              let activeState = textEditingState,
-              let activeCanonicalWrapWidth = textEditorCanonicalWrapWidthInDocument
-        else {
-            preconditionFailure("Legacy overhang regression could not open its probe item.")
-        }
-        precondition(
-            textEditorLayoutPayload == nil
-                && abs(activeCanonicalWrapWidth - canonicalWrapWidth) < 0.001
-                && documentView.frame.width > container.bounds.width + 0.01
-                && activeState.transform == transform,
-            "A legacy nil layout must keep semantic width while its overhang scrolls inside the viewport."
-        )
-        runEdgeClampedNoOpTextResizeRegression(eventNumberBase: eventNumberBase)
-        guard let finalState = textEditingState else {
-            preconditionFailure("Legacy overhang regression lost its active state after resize.")
-        }
-        precondition(
-            hypot(
-                finalState.anchor.x - originalAnchor.x,
-                finalState.anchor.y - originalAnchor.y
-            ) < 0.001
-                && finalState.style.fontSize == style.fontSize
-                && textEditorLayoutPayload == nil
-                && !textEditorCanonicalWrapWidthWasExplicitlyResized,
-            "A projected scale-one drag must preserve the complete legacy text owner."
-        )
-        _ = endTextEditingIfNeeded(reason: .focusChange)
-        guard let committedItem = session.controller.document.annotations.first(where: {
-            $0.id == item.id
-        }) else {
-            preconditionFailure("Legacy overhang regression lost its committed probe item.")
-        }
-        precondition(
-            committedItem == item
-                && encodedProbeItem(committedItem) == encodedItemBeforeEditing
-                && session.controller.undoStack.count == undoCountBeforeEditing,
-            "A projected scale-one legacy resize must remain byte- and undo-equivalent."
-        )
-
-        session.controller.selectedItemIDs = [item.id]
-        session.controller.deleteSelection()
-        session.adoptCurrentStyle(originalStyle, origin: originalStyleOrigin)
-        session.controller.selectedItemIDs = originalSelection
-        syncSelectedTextChrome()
-    }
-
-    private func runTextResizeCancellationRegression(eventNumberBase: Int) {
-        guard let window,
-              let editor = textEditor,
-              let frameView = textEditorFrameView
-        else {
-            preconditionFailure("Text resize cancellation regression requires an active editor.")
-        }
-        let timestamp = ProcessInfo.processInfo.systemUptime
-
-        func event(
-            type: NSEvent.EventType,
-            location: CGPoint,
-            number: Int,
-            pressure: Float
-        ) -> NSEvent {
-            guard let event = NSEvent.mouseEvent(
-                with: type,
-                location: location,
-                modifierFlags: [],
-                timestamp: timestamp + Double(number) / 120,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: eventNumberBase + number,
-                clickCount: 1,
-                pressure: pressure
-            ) else {
-                preconditionFailure("Text resize cancellation regression could not synthesize event \(number).")
-            }
-            return event
-        }
-
-        func startPoint(for handle: InlineAnnotationTextResizeHandle) -> CGPoint {
-            convert(
-                textFramePoint(handle: handle, in: frameView.fieldFrame(in: self)),
-                to: nil
-            )
-        }
-
-        let firstHandle = InlineAnnotationTextResizeHandle.northWest
-        let firstStart = startPoint(for: firstHandle)
-        beginTextResize(
-            handle: firstHandle,
-            event: event(type: .leftMouseDown, location: firstStart, number: 0, pressure: 1)
-        )
-        precondition(
-            cancelTextResize(reason: "debug-simulated-missed-mouse-up"),
-            "A lost mouse-up must have an explicit cancellation path."
-        )
-        endTextResize(
-            handle: firstHandle,
-            event: event(type: .leftMouseUp, location: firstStart, number: 1, pressure: 0)
-        )
-        precondition(
-            textResizeInteraction == nil && window.firstResponder === editor,
-            "A stale mouse-up after cancellation must preserve the active editor."
-        )
-
-        let secondHandle = InlineAnnotationTextResizeHandle.southWest
-        let secondStart = startPoint(for: secondHandle)
-        beginTextResize(
-            handle: secondHandle,
-            event: event(type: .leftMouseDown, location: secondStart, number: 2, pressure: 1)
-        )
-        let originalBounds = bounds
-        bounds = CGRect(
-            origin: originalBounds.origin,
-            size: CGSize(
-                width: originalBounds.width - 1,
-                height: originalBounds.height
-            )
-        )
-        let geometryUpdateWasAccepted = updateTextResize(
-            handle: secondHandle,
-            event: event(
-                type: .leftMouseDragged,
-                location: CGPoint(x: secondStart.x + 1, y: secondStart.y),
-                number: 3,
-                pressure: 1
-            )
-        )
-        bounds = originalBounds
-        updateTextEditorFrame(scrollsToInsertionPoint: true)
-        precondition(
-            !geometryUpdateWasAccepted && textResizeInteraction == nil,
-            "Canvas geometry changes must cancel active text resizing instead of trapping."
-        )
-        endTextResize(
-            handle: secondHandle,
-            event: event(type: .leftMouseUp, location: secondStart, number: 4, pressure: 0)
-        )
-
-        let finalHandle = InlineAnnotationTextResizeHandle.southEast
-        let finalStart = startPoint(for: finalHandle)
-        beginTextResize(
-            handle: finalHandle,
-            event: event(type: .leftMouseDown, location: finalStart, number: 5, pressure: 1)
-        )
-        endTextResize(
-            handle: finalHandle,
-            event: event(type: .leftMouseUp, location: finalStart, number: 6, pressure: 0)
-        )
-        precondition(
-            textResizeInteraction == nil && window.firstResponder === editor,
-            "A new text resize must start normally after every cancellation path."
-        )
-
-        guard let stableViewportWidthInDocument = textEditorPreferredViewportWidthInDocument,
-              let stableFieldPlacementAnchorInDocument = textEditorFieldPlacementAnchorInDocument,
-              let frameView = textEditorFrameView,
-              let container = textEditorContainer
-        else {
-            preconditionFailure("Viewport persistence regression lost its document geometry.")
-        }
-        let initialViewportWidthInView = container.bounds.width
-        let initialFieldFrame = frameView.fieldFrame(in: self)
-        bounds = CGRect(
-            origin: originalBounds.origin,
-            size: CGSize(
-                width: originalBounds.width * 0.8,
-                height: originalBounds.height * 0.8
-            )
-        )
-        updateTextEditorFrame(scrollsToInsertionPoint: true)
-        precondition(
-            abs(
-                (textEditorPreferredViewportWidthInDocument ?? .infinity)
-                    - stableViewportWidthInDocument
-            ) < 0.001
-                && textEditorFieldPlacementAnchorInDocument
-                    == stableFieldPlacementAnchorInDocument,
-            "Canvas resizing must preserve the user-owned field geometry in document space."
-        )
-        bounds = originalBounds
-        updateTextEditorFrame(scrollsToInsertionPoint: true)
-        precondition(
-            abs(container.bounds.width - initialViewportWidthInView) < 0.01
-                && maxFrameDelta(
-                    frameView.fieldFrame(in: self),
-                    initialFieldFrame
-                ) < 0.01
-                && textEditorFieldPlacementAnchorInDocument
-                    == stableFieldPlacementAnchorInDocument,
-            "Restoring canvas bounds must restore the explicit text field geometry."
-        )
-    }
-
-    @discardableResult
-    private func runActiveTextResizeRegression(
-        handle: InlineAnnotationTextResizeHandle,
-        pointerDelta: CGPoint,
-        steps: Int,
-        eventNumberBase: Int
-    ) -> CGFloat {
-        guard steps > 1,
-              let window,
-              let editor = textEditor,
-              let frameView = textEditorFrameView,
-              let initialState = textEditingState,
-              let initialCanonicalWrapWidth = textEditorCanonicalWrapWidthInDocument,
-              initialState.itemID != nil
-        else {
-            preconditionFailure("Active text resize regression requires existing inline text in a window.")
-        }
-        let initialText = editor.string
-        let initialSelection = editor.selectedRange()
-        let initialFieldFrame = frameView.fieldFrame(in: self)
-        let initialLayoutPlan = AnnotationTextLayout.layoutPlan(
-            in: editor.string,
-            style: initialState.style,
-            wrapWidth: initialCanonicalWrapWidth
-        )
-        let initialFieldAnchor = textFieldAlignmentAnchor(
-            for: initialFieldFrame,
-            font: requiredTextEditorFontForRegression(initialState),
-            alignment: initialState.style.textAlignment,
-            lineCount: initialLayoutPlan.lineCount,
-            layoutPlan: initialLayoutPlan,
-            layoutPayload: textEditorLayoutPayload,
-            state: initialState
-        )
-        let initialContentAnchor = textEditorAlignmentAnchor(
-            for: initialState,
-            text: editor.string,
-            layout: textEditorLayoutPayload
-        )
-        let initialContentToFieldResidual = documentOffset(
-            fromViewOffset: CGSize(
-                width: initialContentAnchor.x - initialFieldAnchor.x,
-                height: initialContentAnchor.y - initialFieldAnchor.y
-            )
-        )
-        let activeCornerInView = textFramePoint(handle: handle, in: initialFieldFrame)
-        let fixedCornerInView = textFramePoint(
-            corner: handle.fixedCorner,
-            in: initialFieldFrame
-        )
-        let startInWindow = convert(activeCornerInView, to: nil)
-        let timestamp = ProcessInfo.processInfo.systemUptime
-
-        func pointerEvent(
-            type: NSEvent.EventType,
-            location: CGPoint,
-            step: Int,
-            pressure: Float
-        ) -> NSEvent {
-            guard let event = NSEvent.mouseEvent(
-                with: type,
-                location: location,
-                modifierFlags: [],
-                timestamp: timestamp + Double(step) / 120,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: eventNumberBase + step,
-                clickCount: 1,
-                pressure: pressure
-            ) else {
-                preconditionFailure("Active text resize regression could not synthesize event \(step).")
-            }
-            return event
-        }
-
-        beginTextResize(
-            handle: handle,
-            event: pointerEvent(
-                type: .leftMouseDown,
-                location: startInWindow,
-                step: 0,
-                pressure: 1
-            )
-        )
-        updateTextResize(
-            handle: handle,
-            event: pointerEvent(
-                type: .leftMouseDragged,
-                location: startInWindow,
-                step: 1,
-                pressure: 1
-            )
-        )
-        precondition(
-            maxFrameDelta(initialFieldFrame, frameView.fieldFrame(in: self)) < 0.001,
-            "Pressing an active text resize handle without movement must not change its frame."
-        )
-
-        for step in 1...steps {
-            let progress = CGFloat(step) / CGFloat(steps)
-            let location = CGPoint(
-                x: startInWindow.x + pointerDelta.x * progress,
-                y: startInWindow.y + pointerDelta.y * progress
-            )
-            updateTextResize(
-                handle: handle,
-                event: pointerEvent(
-                    type: .leftMouseDragged,
-                    location: location,
-                    step: step + 1,
-                    pressure: 1
-                )
-            )
-            let currentFixedCorner = frameView.fieldPoint(
-                corner: handle.fixedCorner,
-                in: self
-            )
-            precondition(
-                hypot(
-                    currentFixedCorner.x - fixedCornerInView.x,
-                    currentFixedCorner.y - fixedCornerInView.y
-                ) < 0.01,
-                "Active text resize moved its fixed corner during frame \(step) for \(handle.rawValue)."
-            )
-            guard let currentState = textEditingState,
-                  let currentCanonicalWrapWidth = textEditorCanonicalWrapWidthInDocument
-            else {
-                preconditionFailure(
-                    "Active text resize lost its canonical state during frame \(step)."
-                )
-            }
-            let currentLayoutPlan = AnnotationTextLayout.layoutPlan(
-                in: editor.string,
-                style: currentState.style,
-                wrapWidth: currentCanonicalWrapWidth
-            )
-            let currentFieldAnchor = textFieldAlignmentAnchor(
-                for: frameView.fieldFrame(in: self),
-                font: requiredTextEditorFontForRegression(currentState),
-                alignment: currentState.style.textAlignment,
-                lineCount: currentLayoutPlan.lineCount,
-                layoutPlan: currentLayoutPlan,
-                layoutPayload: textEditorLayoutPayload,
-                state: currentState
-            )
-            let currentContentAnchor = textEditorAlignmentAnchor(
-                for: currentState,
-                text: editor.string,
-                layout: textEditorLayoutPayload
-            )
-            let currentContentToFieldResidual = documentOffset(
-                fromViewOffset: CGSize(
-                    width: currentContentAnchor.x - currentFieldAnchor.x,
-                    height: currentContentAnchor.y - currentFieldAnchor.y
-                )
-            )
-            precondition(
-                hypot(
-                    currentContentToFieldResidual.width
-                        - initialContentToFieldResidual.width,
-                    currentContentToFieldResidual.height
-                        - initialContentToFieldResidual.height
-                ) < 0.01,
-                "Active text resize changed its content-to-field relationship during frame \(step) for \(handle.rawValue)."
-            )
-            precondition(
-                window.firstResponder === editor
-                    && editor.string == initialText
-                    && editor.selectedRange() == initialSelection,
-                "Active text resize changed focus, text, or selection during frame \(step)."
-            )
-            precondition(
-                abs(textEditorBaselineError?.y ?? .infinity) < 0.01,
-                "Active text resize left a vertical baseline error during frame \(step)."
-            )
-            if let presentation = textEditorPresentationLayout,
-               let documentView = textEditorDocumentView,
-               abs(documentView.frame.minX - presentation.documentBaseOrigin.x) < 0.01
-            {
-                precondition(
-                    abs(textEditorBaselineError?.x ?? .infinity) < 0.01,
-                    "Unscrolled active text resize left a horizontal baseline error during frame \(step)."
-                )
-            }
-            if let insertionX = textEditorInsertionX(editor),
-               let documentView = textEditorDocumentView,
-               let container = textEditorContainer
-            {
-                let visibleInsertionX = documentView.frame.minX + insertionX
-                let insertionInset = textEditorChromeInsetsInView(
-                    for: currentState
-                ).width
-                precondition(
-                    visibleInsertionX
-                        >= insertionInset - 0.5
-                        && visibleInsertionX
-                            <= container.bounds.maxX
-                                - insertionInset + 0.5,
-                    "Active text resize moved the insertion point outside the viewport during frame \(step): visibleX=\(visibleInsertionX), viewport=\(container.bounds), document=\(documentView.frame), font=\(textEditingState?.style.fontSize ?? -1)."
-                )
-            }
-        }
-        let endInWindow = CGPoint(
-            x: startInWindow.x + pointerDelta.x,
-            y: startInWindow.y + pointerDelta.y
-        )
-        endTextResize(
-            handle: handle,
-            event: pointerEvent(
-                type: .leftMouseUp,
-                location: endInWindow,
-                step: steps + 2,
-                pressure: 0
-            )
-        )
-        guard let finalState = textEditingState else {
-            preconditionFailure("Active text resize regression lost the editing state.")
-        }
-        precondition(
-            textResizeInteraction == nil
-                && window.firstResponder === editor
-                && editor.string == initialText
-                && editor.selectedRange() == initialSelection,
-            "Ending active text resize must preserve the inline editing session."
-        )
-        precondition(
-            abs(finalState.style.fontSize - initialState.style.fontSize) > 0.05,
-            "Active text resize regression must change the font size for \(handle.rawValue)."
-        )
-        return finalState.style.fontSize
-    }
-
-    func prepareInlineTextResizeUITest() {
-        layoutSubtreeIfNeeded()
-        precondition(bounds.width > 0 && bounds.height > 0, "Inline text resize UI testing requires a laid-out canvas.")
-        session.currentTool = .text
-        beginTextEditing(at: documentPoint(fromViewPoint: CGPoint(
-            x: bounds.width * 0.18,
-            y: bounds.height * 0.52
-        )))
-        guard let editor = textEditor else {
-            preconditionFailure("Inline text resize UI testing could not start the editor.")
-        }
-        editor.insertText(
-            "Resize 中文混排",
-            replacementRange: NSRange(location: 0, length: editor.string.utf16.count)
-        )
-        updateTextEditorLayout(scrollsToInsertionPoint: true)
-        updateAccessibilitySummary(
-            document: session.controller.document,
-            captured: session.previewImage
-        )
-        AppLog.capture.notice("Prepared active inline text editor for resize UI testing")
-    }
-#endif
 
     init(
         session: AnnotationEditingSession,
@@ -3312,6 +427,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         session.$currentTool
             .sink { [weak self] currentTool in
                 guard let self else { return }
+                precondition(
+                    currentTool != .crop,
+                    "Crop is legacy document state and cannot be activated as an annotation tool."
+                )
                 precondition(
                     self.lineWidthEditingState == nil,
                     "Changing annotation tools requires the active line-width edit to be resolved first."
@@ -3399,6 +518,9 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        if isInteractionSuspended {
+            return super.hitTest(point) == nil ? nil : self
+        }
         if let frameView = textEditorFrameView,
            frameView.frame.contains(point)
         {
@@ -4157,6 +1279,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !isInteractionSuspended else { return }
         let viewPoint = convert(event.locationInWindow, from: nil)
         if let editor = textEditor, let frameView = textEditorFrameView {
             let fieldFrame = frameView.fieldFrame(in: self)
@@ -4255,6 +1378,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard !isInteractionSuspended else { return }
         if selectionInteraction != nil {
             let point = documentPoint(fromViewPoint: convert(event.locationInWindow, from: nil))
             updateSelectionInteraction(to: point)
@@ -4304,6 +1428,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard !isInteractionSuspended else { return }
         guard isAnnotationEditingEnabled else {
             finishWindowDragIfNeeded(reason: "pointer-up-read-only")
             applyCursor(for: convert(event.locationInWindow, from: nil))
@@ -4432,6 +1557,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
 
     override func resetCursorRects() {
         super.resetCursorRects()
+        if isInteractionSuspended {
+            addCursorRect(bounds, cursor: .arrow)
+            return
+        }
         if isWindowDragInProgress
             || pendingRegionBodyMoveMouseDown != nil
             || (!isAnnotationEditingEnabled && isReadOnlyWindowDragArmed)
@@ -4468,6 +1597,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     override func keyDown(with event: NSEvent) {
+        guard !isInteractionSuspended else { return }
         let command = event.modifierFlags.contains(.command)
         let shift = event.modifierFlags.contains(.shift)
         if !isAnnotationEditingEnabled {
@@ -4604,11 +1734,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         case .spotlight:
             add(kind: .spotlight, geometry: .rect(rect), style: style, minimumRect: rect)
         case .crop:
-            guard rect.width >= 2, rect.height >= 2 else { return }
-            session.controller.perform(label: "Crop") { document in
-                document.crop = CropState(rect: rect.intersection(CGRect(origin: .zero, size: document.canvasSize)))
-            }
-            session.currentTool = .select
+            preconditionFailure("New crop annotations are unsupported; legacy crop state is read-only.")
         case .select, .text, .counter:
             break
         }
@@ -8247,14 +5373,6 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         )
     }
 
-    private func textEditorGeometryDescription(_ editor: NSTextView) -> String {
-        guard let frameView = textEditorFrameView,
-              let container = textEditorContainer,
-              let documentView = textEditorDocumentView
-        else { return "missing" }
-        return "canvasBounds=\(bounds), canvasFrame=\(frame), field=\(frameView.frame), viewport=\(container.frame), viewportBounds=\(container.bounds), documentFrame=\(documentView.frame), documentBounds=\(documentView.bounds), editorDocumentFrame=\(editor.frame), textContainerOrigin=\(editor.textContainerOrigin), windowFrame=\(window?.frame ?? .zero)"
-    }
-
     private func textEditorAlignmentAnchor(
         for state: TextEditingState,
         text: String,
@@ -8333,121 +5451,6 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                     transform: state.transform,
                     around: annotationRect
                 ))
-            )
-        }
-    }
-
-    private func textEditorLineSnapshotsInView(
-        _ editor: NSTextView
-    ) -> [InlineTextEditorLineSnapshot] {
-        guard let textContainer = editor.textContainer,
-              let layoutManager = editor.layoutManager
-        else {
-            preconditionFailure("Inline text line inspection requires its TextKit stack.")
-        }
-        layoutManager.ensureLayout(for: textContainer)
-        let nsText = editor.string as NSString
-        let glyphRange = layoutManager.glyphRange(for: textContainer)
-        var snapshots: [InlineTextEditorLineSnapshot] = []
-        layoutManager.enumerateLineFragments(
-            forGlyphRange: glyphRange
-        ) { lineFragmentRect, usedRect, _, lineGlyphRange, _ in
-            let consumedRange = layoutManager.characterRange(
-                forGlyphRange: lineGlyphRange,
-                actualGlyphRange: nil
-            )
-            var drawableRange = consumedRange
-            while drawableRange.length > 0 {
-                let finalUTF16Unit = nsText.character(at: NSMaxRange(drawableRange) - 1)
-                guard self.isInlineTextHardBreakUTF16Unit(finalUTF16Unit) else {
-                    break
-                }
-                drawableRange.length -= 1
-            }
-            let baselineLocation = lineGlyphRange.length > 0
-                ? layoutManager.location(forGlyphAt: lineGlyphRange.location)
-                : usedRect.origin
-            snapshots.append(InlineTextEditorLineSnapshot(
-                utf16Range: drawableRange,
-                consumedUTF16Range: consumedRange,
-                originInView: editor.convert(
-                    CGPoint(
-                        // Match the canonical plan's visual line origin. The
-                        // first logical glyph can live at the opposite edge of
-                        // an RTL or mixed-direction fragment.
-                        x: editor.textContainerOrigin.x + usedRect.minX,
-                        y: editor.textContainerOrigin.y
-                            + lineFragmentRect.minY
-                            + baselineLocation.y
-                    ),
-                    to: self
-                )
-            ))
-        }
-        let terminatesWithHardBreak = nsText.length > 0
-            && isInlineTextHardBreakUTF16Unit(
-                nsText.character(at: nsText.length - 1)
-            )
-        if editor.string.isEmpty || terminatesWithHardBreak {
-            guard let stableBaselineOffset = textEditorSessionBaselineOffset else {
-                preconditionFailure(
-                    "Inline text extra-line inspection requires a canonical baseline offset."
-                )
-            }
-            let emptyRange = NSRange(location: nsText.length, length: 0)
-            snapshots.append(InlineTextEditorLineSnapshot(
-                utf16Range: emptyRange,
-                consumedUTF16Range: emptyRange,
-                originInView: editor.convert(
-                    CGPoint(
-                        x: editor.textContainerOrigin.x
-                            + layoutManager.extraLineFragmentUsedRect.minX,
-                        y: editor.textContainerOrigin.y
-                            + layoutManager.extraLineFragmentRect.minY
-                            + stableBaselineOffset
-                    ),
-                    to: self
-                )
-            ))
-        }
-        return snapshots
-    }
-
-    private func assertTextEditorLinesMatchRenderer(
-        _ editor: NSTextView,
-        state: TextEditingState,
-        layout: AnnotationTextLayoutPayload?,
-        canonicalHorizontalOffset: CGFloat = 0,
-        context: String
-    ) {
-        let editorLines = textEditorLineSnapshotsInView(editor)
-        let renderedLines = renderedTextLineSnapshotsInView(
-            state: state,
-            text: editor.string,
-            layout: layout
-        )
-        precondition(
-            editorLines.count == renderedLines.count,
-            "Inline text line count diverged from the canonical renderer during \(context): editor=\(editorLines.count), renderer=\(renderedLines.count)."
-        )
-        for (index, pair) in zip(editorLines, renderedLines).enumerated() {
-            let (editorLine, renderedLine) = pair
-            precondition(
-                NSEqualRanges(editorLine.utf16Range, renderedLine.utf16Range)
-                    && NSEqualRanges(
-                        editorLine.consumedUTF16Range,
-                        renderedLine.consumedUTF16Range
-                    ),
-                "Inline text line \(index) range diverged from the canonical renderer during \(context): editor=\(editorLine.utf16Range)/\(editorLine.consumedUTF16Range), renderer=\(renderedLine.utf16Range)/\(renderedLine.consumedUTF16Range)."
-            )
-            precondition(
-                hypot(
-                    editorLine.originInView.x
-                        + canonicalHorizontalOffset
-                        - renderedLine.originInView.x,
-                    editorLine.originInView.y - renderedLine.originInView.y
-                ) < 0.01,
-                "Inline text line \(index) origin diverged from the canonical renderer during \(context): editor=\(editorLine.originInView), renderer=\(renderedLine.originInView)."
             )
         }
     }
@@ -8967,8 +5970,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             drawEffectProvisional(kind: session.currentTool, in: rect, style: style)
             return
         case .crop:
-            drawCropProvisional(rect)
-            return
+            preconditionFailure("The legacy Crop tool cannot produce an annotation draft.")
         case .text, .counter, .select:
             return
         }
@@ -9034,22 +6036,6 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 in: CGRect(origin: .zero, size: session.controller.document.canvasSize)
             )
             context.restoreGState()
-        }
-    }
-
-    private func drawCropProvisional(_ rect: CGRect) {
-        withDocumentDrawingContext { context in
-            let canvasRect = CGRect(origin: .zero, size: session.controller.document.canvasSize)
-            let outside = CGMutablePath()
-            outside.addRect(canvasRect)
-            outside.addRect(rect.standardized)
-            context.addPath(outside)
-            context.setFillColor(CGColor(gray: 0, alpha: 0.48))
-            context.drawPath(using: .eoFill)
-
-            context.setStrokeColor(CGColor(gray: 1, alpha: 0.95))
-            context.setLineWidth(1.5)
-            context.stroke(rect.standardized)
         }
     }
 
@@ -10259,3 +7245,2711 @@ private final class InlineAnnotationTextView: NSTextView {
         return rect
     }
 }
+
+#if DEBUG
+// TextKit lifecycle regressions stay in this file so their white-box assertions
+// can inspect private editor state without widening the production interface.
+extension QuickAnnotationCanvasView {
+    var debugRegressionSession: AnnotationEditingSession { session }
+    var debugSelectedDisplayItems: [AnnotationItem] { selectedDisplayItems() }
+    var debugWindowDragState: (isArmed: Bool, isInProgress: Bool) {
+        (isReadOnlyWindowDragArmed, isWindowDragInProgress)
+    }
+
+    func debugCommitAnnotation(tool: AnnotationTool, start: CGPoint, end: CGPoint) {
+        commit(tool: tool, start: start, end: end)
+    }
+
+    private func requiredTextEditorFontForRegression(
+        _ state: TextEditingState
+    ) -> NSFont {
+        do {
+            return try textEditorFont(for: state)
+        } catch {
+            preconditionFailure(
+                "Text regression fixture could not resolve its required font: \(error)"
+            )
+        }
+    }
+
+    var debugIsAnnotationEditingEnabled: Bool { isAnnotationEditingEnabled }
+    var debugPresentedSelectionHandleCount: Int {
+        guard isAnnotationEditingEnabled else { return 0 }
+        if selectedTextFrameView != nil { return 3 }
+        let selectedItems = selectedDisplayItems()
+        guard selectedItems.count == 1, let item = selectedItems.first else { return 0 }
+        return selectionGeometry.handlePoints(for: item).count
+    }
+
+    func runInlineTextStabilityRegression() {
+        layoutSubtreeIfNeeded()
+        precondition(bounds.width > 0 && bounds.height > 0, "Text stability regression requires a laid-out canvas.")
+        let anchor = documentPoint(fromViewPoint: CGPoint(
+            x: bounds.width * 0.18,
+            y: bounds.height * 0.52
+        ))
+        var regressionStyle = session.defaultStyle(for: .text)
+        regressionStyle.fontName = "Menlo-Regular"
+        regressionStyle.fontSize = 18
+        guard NSFont(name: regressionStyle.fontName!, size: regressionStyle.fontSize) != nil else {
+            preconditionFailure("Text stability regression requires the system Menlo font.")
+        }
+        session.adoptCurrentStyle(regressionStyle, origin: .newTextDraft)
+        installTextEditor(
+            text: "",
+            state: TextEditingState(
+                itemID: nil,
+                anchor: anchor,
+                style: regressionStyle,
+                transform: AnnotationTransform()
+            )
+        )
+        guard let editor = textEditor,
+              let frameView = textEditorFrameView,
+              let container = textEditorContainer,
+              let initialLineOrigin = textEditorLineOriginInView(editor)
+        else {
+            preconditionFailure("Text stability regression could not start the inline editor.")
+        }
+        frameView.displayIfNeeded()
+        guard let frameBackground = frameView.layer?.backgroundColor else {
+            preconditionFailure("Inline text regression requires an explicit framing-layer background color.")
+        }
+        precondition(
+            frameBackground.alpha == 0 && !frameView.isOpaque,
+            "Inline text framing must preserve the selected pixels with a clear background."
+        )
+        let initialFrame = frameView.frame
+        let initialGeometry = textEditorGeometryDescription(editor)
+
+        func assertStableState(_ context: String) {
+            // Real AppKit input schedules a parent layout pass between rapid
+            // marked-text updates. Exercise that path instead of validating
+            // only the final NSTextView delegate callback.
+            updateTextEditorFrame()
+            updateTextEditorLayout(scrollsToInsertionPoint: true)
+            layoutSubtreeIfNeeded()
+            window?.displayIfNeeded()
+            guard let currentLineOrigin = textEditorLineOriginInView(editor) else {
+                preconditionFailure("Text stability regression lost the TextKit line origin during \(context).")
+            }
+            precondition(
+                maxFrameDelta(initialFrame, frameView.frame) < 0.01,
+                "Inline text \(context) moved or resized the anchored outer frame."
+            )
+            precondition(
+                max(
+                    abs(currentLineOrigin.x - initialLineOrigin.x),
+                    abs(currentLineOrigin.y - initialLineOrigin.y)
+                ) < 0.01,
+                "Inline text \(context) changed the rendered line origin from \(initialLineOrigin) to \(currentLineOrigin). Initial geometry: \(initialGeometry). Current geometry: \(textEditorGeometryDescription(editor))."
+            )
+            precondition(
+                textEditorGeometryConfigurationCount == 1,
+                "Inline text \(context) reconfigured presentation geometry."
+            )
+            precondition(
+                textEditorPostConfigurationViewportMutationCount == 0,
+                "Inline text \(context) moved the viewport after initial calibration."
+            )
+            precondition(
+                textEditorPostConfigurationLineOriginDriftCount == 0,
+                "Inline text \(context) changed TextKit's line origin after initial calibration."
+            )
+            precondition(
+                max(
+                    abs(textEditorBaselineError?.x ?? .infinity),
+                    abs(textEditorBaselineError?.y ?? .infinity)
+                ) < 0.01,
+                "Inline text \(context) left a visible baseline error."
+            )
+        }
+
+        for (value, context) in [
+            ("中", "CJK fallback"),
+            ("M", "returning to primary font"),
+            ("M中", "mixed primary and fallback fonts"),
+            ("", "returning to the empty caret")
+        ] {
+            editor.insertText(
+                value,
+                replacementRange: NSRange(location: 0, length: editor.string.utf16.count)
+            )
+            assertStableState(context)
+        }
+
+        for fragment in ["F", "i", "r", "s", "t"] {
+            editor.insertText(
+                fragment,
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
+            assertStableState("typing")
+        }
+
+        for fragment in ["z", "zh", "zho", "zhon", "zhong"] {
+            // macOS input methods deliver attributed marked text, often
+            // without the editor's ordinary typing attributes. A plain Swift
+            // String does not exercise the transient mixed-attribute state
+            // that NSTextView exposes during real Pinyin composition.
+            editor.setMarkedText(
+                NSAttributedString(
+                    string: fragment,
+                    attributes: [
+                        .markedClauseSegment: 0,
+                        .underlineStyle: NSUnderlineStyle.single.rawValue
+                    ]
+                ),
+                selectedRange: NSRange(location: fragment.utf16.count, length: 0),
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
+            assertStableState("rapid IME composition")
+        }
+        let markedRange = editor.markedRange()
+        precondition(markedRange.location != NSNotFound, "IME regression did not create marked text.")
+        editor.insertText("中", replacementRange: markedRange)
+        assertStableState("IME commit")
+        editor.insertText("文", replacementRange: NSRange(location: NSNotFound, length: 0))
+        assertStableState("typing")
+
+        let textBeforeOverflow = editor.string
+        let overflowStart = editor.string.utf16.count
+        let overflowText = String(repeating: "W", count: 40)
+        editor.insertText(
+            overflowText,
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        updateTextEditorFrame()
+        updateTextEditorLayout(scrollsToInsertionPoint: true)
+        layoutSubtreeIfNeeded()
+        window?.displayIfNeeded()
+        guard let overflowLineOrigin = textEditorLineOriginInView(editor),
+              let documentView = textEditorDocumentView,
+              let presentation = textEditorPresentationLayout,
+              let overflowFrameView = textEditorFrameView,
+              let insertionX = textEditorInsertionX(editor),
+              let overflowEditingState = textEditingState
+        else {
+            preconditionFailure("Text stability regression could not inspect wrapping of long inline text.")
+        }
+        guard let wrapWidth = textEditorCanonicalWrapWidthInDocument else {
+            preconditionFailure("Text stability regression lost its canonical wrap width.")
+        }
+        precondition(
+            abs(overflowLineOrigin.y - initialLineOrigin.y) < 0.01,
+            "Wrapping long inline text changed the calibrated first-line baseline."
+        )
+        let horizontalScrollOffset = presentation.documentBaseOrigin.x
+            - documentView.frame.minX
+        let overflowFieldFrame = overflowFrameView.fieldFrame(in: self)
+        precondition(
+            overflowLineOrigin.x >= overflowFieldFrame.minX - 0.5
+                && overflowLineOrigin.x <= overflowFieldFrame.maxX + 0.5,
+            "Wrapping must keep the first line reachable inside the viewport."
+        )
+        precondition(
+            overflowFrameView.fieldFrame(in: self).height > initialFrame.height + 1,
+            "Long inline text must grow the field downward when it wraps."
+        )
+        let visibleInsertionX = documentView.frame.minX + insertionX
+        let insertionInset = textEditorChromeInsetsInView(
+            for: overflowEditingState
+        ).width
+        precondition(
+            visibleInsertionX >= insertionInset - 0.5
+                && visibleInsertionX <= container.bounds.maxX
+                    - insertionInset + 0.5,
+            "Wrapping did not keep the insertion point visible: visibleX=\(visibleInsertionX), documentX=\(documentView.frame.minX), insertionX=\(insertionX), viewportWidth=\(container.bounds.width)."
+        )
+        precondition(
+            AnnotationTextLayout.visualLineCount(
+                in: editor.string,
+                style: overflowEditingState.style,
+                wrapWidth: wrapWidth
+            ) > 1,
+            "Long inline text must wrap onto additional visible lines."
+        )
+        let lineOriginBeforeCommit = renderedTextLineOriginInView(
+            state: overflowEditingState,
+            text: editor.string,
+            layout: textEditorLayoutPayload
+        )
+        precondition(
+            abs(
+                overflowLineOrigin.x
+                    + horizontalScrollOffset
+                    - lineOriginBeforeCommit.x
+            ) < 0.01
+                && abs(overflowLineOrigin.y - lineOriginBeforeCommit.y) < 0.01,
+            "Wrapped editor origin must match the renderer after explicit scroll conversion."
+        )
+        assertTextEditorLinesMatchRenderer(
+            editor,
+            state: overflowEditingState,
+            layout: textEditorLayoutPayload,
+            canonicalHorizontalOffset: horizontalScrollOffset,
+            context: "wrapped mixed-script text"
+        )
+        let baselineCorrections = textEditorBaselineCorrectionCount
+        precondition(
+            baselineCorrections > 0,
+            "Text stability regression did not exercise a fallback-font baseline change."
+        )
+        _ = endTextEditingIfNeeded(reason: .focusChange)
+        guard let committedItem = session.controller.document.annotations.last,
+              committedItem.kind == .text,
+              case .rect(let committedRect) = committedItem.geometry,
+              let committedText = committedItem.text
+        else {
+            preconditionFailure("Text stability regression did not commit a text annotation.")
+        }
+        let committedState = TextEditingState(
+            itemID: committedItem.id,
+            anchor: AnnotationTextLayout.alignmentAnchor(
+                in: committedRect,
+                text: committedText,
+                style: committedItem.style,
+                layout: committedItem.textLayout
+            ),
+            style: committedItem.style,
+            transform: committedItem.transform
+        )
+        let committedLineOrigin = renderedTextLineOriginInView(
+            state: committedState,
+            text: committedText,
+            layout: committedItem.textLayout
+        )
+        precondition(
+            max(
+                abs(committedLineOrigin.x - lineOriginBeforeCommit.x),
+                abs(committedLineOrigin.y - lineOriginBeforeCommit.y)
+            ) < 0.01,
+            "Focus-change commit moved text from \(lineOriginBeforeCommit) to \(committedLineOrigin)."
+        )
+        precondition(
+            max(
+                abs(lastTextCommitBaselineError?.x ?? .infinity),
+                abs(lastTextCommitBaselineError?.y ?? .infinity)
+            ) < 0.01,
+            "Focus-change commit retained a visible editor-to-renderer baseline error."
+        )
+        precondition(
+            selectionGeometry.handlePoints(for: committedItem).isEmpty,
+            "Committed text must never return to the standard eight-handle selection path."
+        )
+        runInlineTextFieldGeometryRegression(style: committedItem.style)
+        beginTextEditing(item: committedItem)
+        guard let existingEditor = textEditor,
+              textEditingState?.itemID == committedItem.id
+        else {
+            preconditionFailure("Active text resize regression could not reopen the committed CJK text.")
+        }
+        existingEditor.insertText(
+            "",
+            replacementRange: NSRange(
+                location: overflowStart,
+                length: overflowText.utf16.count
+            )
+        )
+        precondition(
+            existingEditor.string == textBeforeOverflow,
+            "Overflow commit regression must restore the original mixed-script text before resizing."
+        )
+        let activeResizeText = existingEditor.string
+        runEdgeClampedNoOpTextResizeRegression(eventNumberBase: 150)
+        runTextResizeCancellationRegression(eventNumberBase: 170)
+        let activeOverflowStart = activeResizeText.utf16.count
+        let activeOverflowText = String(repeating: "W", count: 40)
+        existingEditor.setSelectedRange(NSRange(location: activeOverflowStart, length: 0))
+        existingEditor.insertText(
+            activeOverflowText,
+            replacementRange: NSRange(location: activeOverflowStart, length: 0)
+        )
+        guard let activeOverflowDocumentView = textEditorDocumentView,
+              let activeOverflowPresentation = textEditorPresentationLayout,
+              let activeOverflowState = textEditingState
+        else {
+            preconditionFailure("Active resize overflow regression lost its document viewport.")
+        }
+        let activeOverflowScroll = activeOverflowPresentation.documentBaseOrigin.x
+            - activeOverflowDocumentView.frame.minX
+        assertTextEditorLinesMatchRenderer(
+            existingEditor,
+            state: activeOverflowState,
+            layout: textEditorLayoutPayload,
+            canonicalHorizontalOffset: activeOverflowScroll,
+            context: "active-resize wrapped overflow"
+        )
+        let fontSizeAfterSouthEast = runActiveTextResizeRegression(
+            handle: .southEast,
+            pointerDelta: CGPoint(x: 112, y: -56),
+            steps: 16,
+            eventNumberBase: 200
+        )
+        precondition(
+            fontSizeAfterSouthEast > 20,
+            "Active CJK text resize must cross the 18-to-20 point metric boundary."
+        )
+        existingEditor.insertText(
+            "",
+            replacementRange: NSRange(
+                location: activeOverflowStart,
+                length: activeOverflowText.utf16.count
+            )
+        )
+        precondition(
+            existingEditor.string == activeResizeText,
+            "Active resize overflow regression must restore its original mixed-script text."
+        )
+        existingEditor.setSelectedRange(NSRange(location: 1, length: 2))
+        let activeResizeSelection = existingEditor.selectedRange()
+        _ = runActiveTextResizeRegression(
+            handle: .northWest,
+            pointerDelta: CGPoint(x: 24, y: -12),
+            steps: 12,
+            eventNumberBase: 300
+        )
+        _ = runActiveTextResizeRegression(
+            handle: .southWest,
+            pointerDelta: CGPoint(x: 20, y: 10),
+            steps: 12,
+            eventNumberBase: 400
+        )
+        precondition(
+            existingEditor.selectedRange() == activeResizeSelection,
+            "Three-corner active resizing must preserve the text selection."
+        )
+        guard let activeEditingStateBeforeCommit = textEditingState else {
+            preconditionFailure("Active text resize regression lost the canonical state before commit.")
+        }
+        let activeLineOriginBeforeCommit = renderedTextLineOriginInView(
+            state: activeEditingStateBeforeCommit,
+            text: existingEditor.string,
+            layout: textEditorLayoutPayload
+        )
+        _ = endTextEditingIfNeeded(reason: .focusChange)
+        guard let activeResizedItem = session.controller.document.annotations.first(where: {
+            $0.id == committedItem.id
+        }), let activeResizedText = activeResizedItem.text,
+              case .rect(let activeResizedRect) = activeResizedItem.geometry
+        else {
+            preconditionFailure("Active text resize regression lost the committed annotation.")
+        }
+        let activeResizedState = TextEditingState(
+            itemID: activeResizedItem.id,
+            anchor: AnnotationTextLayout.alignmentAnchor(
+                in: activeResizedRect,
+                text: activeResizedText,
+                style: activeResizedItem.style,
+                layout: activeResizedItem.textLayout
+            ),
+            style: activeResizedItem.style,
+            transform: activeResizedItem.transform
+        )
+        let activeLineOriginAfterCommit = renderedTextLineOriginInView(
+            state: activeResizedState,
+            text: activeResizedText,
+            layout: activeResizedItem.textLayout
+        )
+        precondition(
+            hypot(
+                activeLineOriginAfterCommit.x - activeLineOriginBeforeCommit.x,
+                activeLineOriginAfterCommit.y - activeLineOriginBeforeCommit.y
+            ) < 0.01,
+            "Committing continuously resized text must not move its rendered line."
+        )
+        session.currentTool = .select
+        session.controller.selectedItemIDs.removeAll()
+        precondition(selectedTextFrameView == nil, "Deselected text must remove its dedicated chrome.")
+        session.controller.selectedItemIDs = [activeResizedItem.id]
+        guard let selectedTextFrameView else {
+            preconditionFailure("Reselecting committed text must install its dedicated chrome.")
+        }
+        precondition(
+            selectedTextFrameView.resizeHandleCount == 3
+                && selectedTextFrameView.deleteControlCount == 1,
+            "Selected text must expose exactly three font-size handles and one delete control."
+        )
+        guard let window else {
+            preconditionFailure("Selected-text resize regression requires a presented window.")
+        }
+        let resizeStartInView = selectedTextFrameView.fieldPoint(
+            corner: .southEast,
+            in: self
+        )
+        let resizeStartInWindow = convert(resizeStartInView, to: nil)
+        let resizeEndInWindow = CGPoint(
+            x: resizeStartInWindow.x + 24,
+            y: resizeStartInWindow.y - 12
+        )
+        guard let resizeDown = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: resizeStartInWindow,
+            modifierFlags: [],
+            timestamp: 1,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 101,
+            clickCount: 1,
+            pressure: 1
+        ), let resizeDrag = NSEvent.mouseEvent(
+            with: .leftMouseDragged,
+            location: resizeEndInWindow,
+            modifierFlags: [],
+            timestamp: 1.1,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 102,
+            clickCount: 1,
+            pressure: 1
+        ), let resizeUp = NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: resizeEndInWindow,
+            modifierFlags: [],
+            timestamp: 1.2,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 103,
+            clickCount: 1,
+            pressure: 0
+        ) else {
+            preconditionFailure("Selected-text resize regression could not synthesize pointer events.")
+        }
+        beginSelectedTextResize(handle: .southEast, event: resizeDown)
+        updateSelectedTextResize(handle: .southEast, event: resizeDrag)
+        endSelectedTextResize(handle: .southEast, event: resizeUp)
+        guard let resizedText = session.controller.document.annotations.first(where: {
+            $0.id == activeResizedItem.id
+        }) else {
+            preconditionFailure("Selected-text resize regression lost its committed annotation.")
+        }
+        precondition(
+            resizedText.style.fontSize > activeResizedItem.style.fontSize,
+            "Dragging selected text from the bottom-right must increase its font size."
+        )
+        precondition(
+            textResizeFixedCornerError < 0.51,
+            "Selected-text resize must keep its opposite corner fixed."
+        )
+        let cancellationHandle = InlineAnnotationTextResizeHandle.northWest
+        let cancellationStart = convert(
+            selectedTextFrameView.fieldPoint(corner: .northWest, in: self),
+            to: nil
+        )
+        guard let cancellationDown = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: cancellationStart,
+            modifierFlags: [],
+            timestamp: 1.3,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 104,
+            clickCount: 1,
+            pressure: 1
+        ), let staleCancellationUp = NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: cancellationStart,
+            modifierFlags: [],
+            timestamp: 1.4,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 105,
+            clickCount: 1,
+            pressure: 0
+        ) else {
+            preconditionFailure("Selected-text cancellation regression could not synthesize pointer events.")
+        }
+        beginSelectedTextResize(handle: cancellationHandle, event: cancellationDown)
+        precondition(
+            cancelSelectedTextResize(reason: "debug-simulated-missed-mouse-up"),
+            "Selected-text resizing must expose an explicit cancellation path."
+        )
+        endSelectedTextResize(handle: cancellationHandle, event: staleCancellationUp)
+        precondition(
+            selectedTextResizeInteraction == nil
+                && session.controller.document.annotations.first(where: {
+                    $0.id == resizedText.id
+                }) == resizedText,
+            "A stale selected-text mouse-up must not commit or corrupt a cancelled preview."
+        )
+        runSelectedTextMoveCursorOwnershipRegression(
+            itemID: resizedText.id,
+            eventNumberBase: 500
+        )
+        let rectangleProbe = AnnotationItem(
+            kind: .rectangle,
+            zIndex: 0,
+            geometry: .rect(CGRect(x: 10, y: 10, width: 40, height: 30))
+        )
+        precondition(
+            selectionGeometry.handlePoints(for: rectangleProbe).count == 8,
+            "Text-specific selection chrome must not change rectangle resize handles."
+        )
+        precondition(
+            supportsStableInlineTextEditing(transform: AnnotationTransform(
+                translation: CGSize(width: 12, height: -8),
+                scaleX: 1.5,
+                scaleY: 1.5
+            )),
+            "Axis-aligned uniformly scaled legacy text must remain inline editable."
+        )
+        precondition(
+            !supportsStableInlineTextEditing(transform: AnnotationTransform(
+                rotationRadians: .pi / 8
+            )),
+            "Rotated text must not enter an editor that cannot reproduce its presentation transform."
+        )
+        precondition(
+            !supportsStableInlineTextEditing(transform: AnnotationTransform(
+                scaleX: 1.25,
+                scaleY: 0.75
+            )),
+            "Non-uniformly scaled text must not enter an editor that cannot reproduce its presentation transform."
+        )
+        precondition(
+            !supportsStableInlineTextEditing(transform: AnnotationTransform(
+                rotationRadians: 0.000_001
+            )),
+            "Even a small text rotation must be rejected when the inline editor cannot render rotation."
+        )
+        precondition(
+            !supportsStableInlineTextEditing(transform: AnnotationTransform(
+                scaleX: 1.000_01,
+                scaleY: 1
+            )),
+            "Small non-uniform text scaling must be rejected before its error grows with line length."
+        )
+        let visible = visibleDocumentRect()
+        let subpointScale: CGFloat = 0.02
+        let subpointState = TextEditingState(
+            itemID: nil,
+            anchor: .zero,
+            style: committedItem.style,
+            transform: AnnotationTransform(
+                scaleX: subpointScale,
+                scaleY: subpointScale
+            )
+        )
+        let expectedSubpointFontSize = committedItem.style.fontSize
+            * bounds.height / visible.height
+            * subpointScale
+        let subpointFont = requiredTextEditorFontForRegression(subpointState)
+        precondition(
+            expectedSubpointFontSize < 1
+                && abs(subpointFont.pointSize - committedItem.style.fontSize) < 0.000_1
+                && abs(
+                    textEditorFieldHeightInView(
+                        fromUntransformedDocumentHeight: subpointFont.pointSize,
+                        state: subpointState
+                    ) - expectedSubpointFontSize
+                ) < 0.000_1,
+            "Inline TextKit must keep canonical typography while the document host projects it below one presentation point."
+        )
+        runInitiallyOverflowingTextAlignmentRegression(style: committedItem.style)
+        runLegacyOverhangNoOpTextResizeRegression(eventNumberBase: 1_200)
+        runInlineTextPointerAndLineBreakRegression()
+        runInlineTextEditorAdmissionRegression()
+        AppLog.capture.notice(
+            "Inline text stability regression passed: characters=7, background=clear, origin=\(initialLineOrigin.x, privacy: .public),\(initialLineOrigin.y, privacy: .public), baselineCorrections=\(baselineCorrections, privacy: .public), commitError=\(self.lastTextCommitBaselineError?.y ?? .infinity, privacy: .public), activeResizeHandles=3, activeResizeFrames=58, selectedResizeHandles=3, selectedDeleteControls=1, selectedMoveCursorCycles=2, initialOverflowAlignments=3, fractionalScaleMultilineCases=12"
+        )
+    }
+
+    private func runSelectedTextMoveCursorOwnershipRegression(
+        itemID: UUID,
+        eventNumberBase: Int
+    ) {
+        guard let window,
+              let initialItem = session.controller.document.annotations.first(where: {
+                  $0.id == itemID
+              })
+        else {
+            preconditionFailure("Selected-text cursor regression requires a presented text annotation.")
+        }
+        precondition(initialItem.kind == .text, "The move cursor regression requires text geometry.")
+        precondition(
+            textEditor == nil && selectionInteraction == nil,
+            "The move cursor regression requires an idle inline editor and pointer lifecycle."
+        )
+        session.currentTool = .select
+        session.controller.selectedItemIDs = [itemID]
+        syncSelectedTextChrome()
+
+        let initialBounds = selectionGeometry.transformedBounds(for: initialItem)
+        let startInView = viewPoint(fromDocumentPoint: CGPoint(
+            x: initialBounds.midX,
+            y: initialBounds.midY
+        ))
+        let subthresholdInView = CGPoint(x: startInView.x + 2, y: startInView.y + 1)
+        let movedInView = CGPoint(x: startInView.x + 18, y: startInView.y + 12)
+        let timestamp = ProcessInfo.processInfo.systemUptime
+
+        func event(
+            _ type: NSEvent.EventType,
+            at point: CGPoint,
+            number: Int,
+            pressure: Float
+        ) -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: convert(point, to: nil),
+                modifierFlags: [],
+                timestamp: timestamp + Double(number - eventNumberBase) * 0.01,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: number,
+                clickCount: 1,
+                pressure: pressure
+            ) else {
+                preconditionFailure("Selected-text cursor regression could not synthesize \(type.rawValue).")
+            }
+            return event
+        }
+
+        func assertPressedCursor(_ context: String, expectsMovement: Bool) {
+            guard let interaction = selectionInteraction else {
+                preconditionFailure("Selected-text cursor regression lost its interaction during \(context).")
+            }
+            guard case .move = interaction.mode else {
+                preconditionFailure("Selected-text cursor regression entered a non-move interaction during \(context).")
+            }
+            precondition(
+                interaction.hasMoved == expectsMovement,
+                "Selected-text cursor regression reported the wrong movement threshold state during \(context)."
+            )
+            precondition(
+                NSCursor.current == NSCursor.closedHand,
+                "Selected-text move must retain its closed-hand cursor during \(context)."
+            )
+            precondition(
+                selectedTextFrameView?.areChromeCursorRectsSuppressed == true,
+                "Selected-text chrome must yield cursor ownership during \(context)."
+            )
+        }
+
+        mouseDown(with: event(
+            .leftMouseDown,
+            at: startInView,
+            number: eventNumberBase,
+            pressure: 1
+        ))
+        assertPressedCursor("zero-movement press", expectsMovement: false)
+
+        NSCursor.arrow.set()
+        resetCursorRects()
+        assertPressedCursor("cursor-rect rebuild", expectsMovement: false)
+
+        NSCursor.arrow.set()
+        layout()
+        assertPressedCursor("selected-text chrome layout", expectsMovement: false)
+
+        mouseDragged(with: event(
+            .leftMouseDragged,
+            at: subthresholdInView,
+            number: eventNumberBase + 1,
+            pressure: 1
+        ))
+        assertPressedCursor("subthreshold drag", expectsMovement: false)
+        mouseUp(with: event(
+            .leftMouseUp,
+            at: subthresholdInView,
+            number: eventNumberBase + 2,
+            pressure: 0
+        ))
+        precondition(selectionInteraction == nil, "Pointer-up must release annotation move ownership.")
+        precondition(
+            selectedTextFrameView?.areChromeCursorRectsSuppressed == false,
+            "Pointer-up must restore selected-text chrome cursor regions."
+        )
+        precondition(
+            session.controller.document.annotations.first(where: { $0.id == itemID }) == initialItem,
+            "A subthreshold text drag must not mutate the document."
+        )
+        precondition(
+            NSCursor.current == NSCursor.openHand,
+            "Releasing an unmoved selected text must restore its open-hand hover cursor."
+        )
+
+        mouseDown(with: event(
+            .leftMouseDown,
+            at: startInView,
+            number: eventNumberBase + 3,
+            pressure: 1
+        ))
+        assertPressedCursor("committing press", expectsMovement: false)
+        mouseDragged(with: event(
+            .leftMouseDragged,
+            at: movedInView,
+            number: eventNumberBase + 4,
+            pressure: 1
+        ))
+        assertPressedCursor("live move", expectsMovement: true)
+
+        NSCursor.arrow.set()
+        applyCursor(for: CGPoint(x: bounds.maxX - 1, y: bounds.midY))
+        assertPressedCursor("pinned-window edge crossing", expectsMovement: true)
+
+        NSCursor.arrow.set()
+        resetCursorRects()
+        assertPressedCursor("live cursor-rect rebuild", expectsMovement: true)
+        mouseUp(with: event(
+            .leftMouseUp,
+            at: movedInView,
+            number: eventNumberBase + 5,
+            pressure: 0
+        ))
+        precondition(selectionInteraction == nil, "Committed mouse-up must release move ownership.")
+        precondition(
+            selectedTextFrameView?.areChromeCursorRectsSuppressed == false
+                && NSCursor.current == NSCursor.openHand,
+            "Committed mouse-up must restore selected-text hover cursor ownership."
+        )
+        guard let movedItem = session.controller.document.annotations.first(where: {
+            $0.id == itemID
+        }) else {
+            preconditionFailure("Selected-text cursor regression lost its moved item.")
+        }
+        let documentDelta = documentOffset(fromViewOffset: CGSize(
+            width: movedInView.x - startInView.x,
+            height: movedInView.y - startInView.y
+        ))
+        let movedBounds = selectionGeometry.transformedBounds(for: movedItem)
+        precondition(
+            abs(movedBounds.minX - initialBounds.minX - documentDelta.width) < 0.01
+                && abs(movedBounds.minY - initialBounds.minY - documentDelta.height) < 0.01,
+            "Selected-text cursor regression committed the wrong move delta."
+        )
+        session.controller.undo()
+        precondition(
+            session.controller.document.annotations.first(where: { $0.id == itemID }) == initialItem,
+            "One undo must restore the text moved during cursor regression."
+        )
+        session.controller.selectedItemIDs = [itemID]
+        syncSelectedTextChrome()
+        AppLog.capture.notice(
+            "Selected-text move cursor regression passed: pressCursor=closed-hand, subthresholdMutation=false, liveCursor=closed-hand, edgeCursor=closed-hand, releaseCursor=open-hand"
+        )
+    }
+
+    private func runInitiallyOverflowingTextAlignmentRegression(
+        style sourceStyle: AnnotationStyle
+    ) {
+        precondition(
+            textEditor == nil && textEditingState == nil,
+            "Initial-overflow regression requires no active inline editor."
+        )
+        let originalStyle = session.currentStyle
+        let originalStyleOrigin = session.currentStyleOrigin
+        let originalSelection = session.controller.selectedItemIDs
+        let availableFieldBounds = bounds.insetBy(
+            dx: InlineAnnotationTextEditorFrameView.chromeOutset,
+            dy: InlineAnnotationTextEditorFrameView.chromeOutset
+        )
+        let overflowText = String(repeating: "W中", count: 48)
+        let appendedOverflowText = "宽W"
+
+        func encodedItem(_ item: AnnotationItem) -> Data {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            do {
+                return try encoder.encode(item)
+            } catch {
+                preconditionFailure(
+                    "Initial-overflow regression could not encode its no-op fixture: \(error)"
+                )
+            }
+        }
+
+        func assertCanonicalPresentation(
+            context: String,
+            expectedAnchor: CGPoint,
+            expectedFieldFrame: CGRect,
+            requiresOverflow: Bool?,
+            allowsViewportGrowth: Bool = false
+        ) -> CGPoint {
+            updateTextEditorFrame(scrollsToInsertionPoint: true)
+            updateTextEditorLayout(scrollsToInsertionPoint: true)
+            layoutSubtreeIfNeeded()
+            window?.displayIfNeeded()
+            guard let editor = textEditor,
+                  let frameView = textEditorFrameView,
+                  let container = textEditorContainer,
+                  let documentView = textEditorDocumentView,
+                  let presentation = textEditorPresentationLayout,
+                  let state = textEditingState,
+                  let visibleLineOrigin = textEditorLineOriginInView(editor)
+            else {
+                preconditionFailure(
+                    "Initial-overflow regression lost editor geometry during \(context)."
+                )
+            }
+            guard let wrapWidthInDocument = textEditorCanonicalWrapWidthInDocument else {
+                preconditionFailure(
+                    "Initial-overflow regression lost semantic wrap ownership during \(context)."
+                )
+            }
+            let wrapWidth = wrapWidthInDocument
+            let renderedLineOrigin = renderedTextLineOriginInView(
+                state: state,
+                text: editor.string,
+                layout: textEditorLayoutPayload
+            )
+            let horizontalScrollOffset = presentation.documentBaseOrigin.x
+                - documentView.frame.minX
+            let canonicalTextKitOrigin = CGPoint(
+                x: visibleLineOrigin.x + horizontalScrollOffset,
+                y: visibleLineOrigin.y
+            )
+            precondition(
+                hypot(
+                    canonicalTextKitOrigin.x - renderedLineOrigin.x,
+                    canonicalTextKitOrigin.y - renderedLineOrigin.y
+                ) < 0.01,
+                "TextKit and Core Text lost their canonical origin during \(context): textKit=\(canonicalTextKitOrigin), renderer=\(renderedLineOrigin), scroll=\(horizontalScrollOffset)."
+            )
+            assertTextEditorLinesMatchRenderer(
+                editor,
+                state: state,
+                layout: textEditorLayoutPayload,
+                canonicalHorizontalOffset: horizontalScrollOffset,
+                context: context
+            )
+            precondition(
+                hypot(
+                    state.anchor.x - expectedAnchor.x,
+                    state.anchor.y - expectedAnchor.y
+                ) < 0.001,
+                "Canonical text anchor changed during \(context)."
+            )
+            let currentField = frameView.fieldFrame(in: self)
+            if allowsViewportGrowth {
+                let anchoredEdgeError: CGFloat
+                switch state.style.textAlignment {
+                case .leading:
+                    anchoredEdgeError = abs(expectedFieldFrame.minX - currentField.minX)
+                case .center:
+                    anchoredEdgeError = abs(expectedFieldFrame.midX - currentField.midX)
+                case .trailing:
+                    anchoredEdgeError = abs(expectedFieldFrame.maxX - currentField.maxX)
+                }
+                precondition(
+                    currentField.width + 0.001 >= expectedFieldFrame.width
+                        && anchoredEdgeError < 0.001
+                        && abs(expectedFieldFrame.maxY - currentField.maxY) < 0.001,
+                    "Growing text must expand its viewport monotonically around the same placement anchor during \(context)."
+                )
+            } else {
+                precondition(
+                    abs(expectedFieldFrame.minX - currentField.minX) < 0.001
+                        && abs(expectedFieldFrame.width - currentField.width) < 0.001
+                        && abs(expectedFieldFrame.maxY - currentField.maxY) < 0.001,
+                    "Wrapping must keep the field's leading edge, width and first-line top fixed during \(context)."
+                )
+            }
+            precondition(
+                frameView.fieldFrame(in: self).width
+                    <= min(
+                        InlineTextEditorMetrics.maximumViewportWidth,
+                        availableFieldBounds.width
+                    ) + 0.01,
+                "The interaction viewport exceeded its usability bound during \(context)."
+            )
+            precondition(
+                abs((editor.textContainer?.containerSize.width ?? 0) - wrapWidth) < 0.01,
+                "TextKit did not retain the persisted semantic wrap width during \(context)."
+            )
+            let measuredWidth = AnnotationTextLayout.maximumLineWidth(
+                for: editor.string,
+                style: state.style
+            )
+            if requiresOverflow == true {
+                precondition(
+                    measuredWidth > wrapWidth + 0.01,
+                    "Regression text must remain wider than the wrap width during \(context)."
+                )
+                precondition(
+                    AnnotationTextLayout.visualLineCount(
+                        in: editor.string,
+                        style: state.style,
+                        wrapWidth: wrapWidth
+                    ) > 1,
+                    "Overlong text must wrap onto additional lines during \(context)."
+                )
+            } else if requiresOverflow == false {
+                precondition(
+                    measuredWidth <= wrapWidth + 0.5,
+                    "Regression text must fit the wrap width during \(context)."
+                )
+            }
+            if let insertionX = textEditorInsertionX(editor) {
+                let visibleInsertionX = documentView.frame.minX + insertionX
+                let insertionInset = textEditorChromeInsetsInView(
+                    for: state
+                ).width
+                precondition(
+                    visibleInsertionX
+                        >= insertionInset - 0.5
+                        && visibleInsertionX
+                            <= container.bounds.maxX
+                                - insertionInset + 0.5,
+                    "Wrapping lost the insertion point during \(context): visibleX=\(visibleInsertionX), viewport=\(container.bounds)."
+                )
+            }
+            return renderedLineOrigin
+        }
+
+        for (alignmentIndex, alignment) in [
+            AnnotationTextAlignment.leading,
+            .center,
+            .trailing
+        ].enumerated() {
+            var style = sourceStyle
+            style.fontName = "Menlo-Regular"
+            style.fontSize = 18
+            style.textAlignment = alignment
+            let anchorXInView: CGFloat
+            switch alignment {
+            case .leading:
+                // Exercise canonical calibration independently from a field
+                // placement clamp in the same initial-overflow session.
+                anchorXInView = availableFieldBounds.minX + 2
+            case .center:
+                anchorXInView = availableFieldBounds.midX
+            case .trailing:
+                anchorXInView = availableFieldBounds.maxX
+                    - InlineTextEditorMetrics.horizontalPadding
+                    - 2
+            }
+            let anchor = documentPoint(fromViewPoint: CGPoint(
+                x: anchorXInView,
+                y: availableFieldBounds.midY
+            ))
+            let layout = AnnotationTextRegressionFixtures.requiredRendererReadyTextLayoutForRegression(
+                baselineAnchor: anchor,
+                text: overflowText,
+                style: style
+            )
+            let item = AnnotationItem(
+                kind: .text,
+                zIndex: session.controller.document.annotations.count,
+                geometry: .rect(layout.rect),
+                style: style,
+                text: overflowText,
+                textLayout: layout.payload
+            )
+            session.controller.add(item)
+            let itemBytesBeforeEditing = encodedItem(item)
+            let undoCountBeforeEditing = session.controller.undoStack.count
+            beginTextEditing(item: item)
+            guard let editor = textEditor,
+                  let frameView = textEditorFrameView,
+                  let fieldPlacementAnchorInDocument = textEditorFieldPlacementAnchorInDocument,
+                  let state = textEditingState
+            else {
+                preconditionFailure(
+                    "Could not open initially overflowing \(alignment) text."
+                )
+            }
+            let initialFieldFrame = frameView.fieldFrame(in: self)
+            if alignment == .leading {
+                let contentAnchor = textEditorAlignmentAnchor(
+                    for: state,
+                    text: editor.string,
+                    layout: textEditorLayoutPayload
+                )
+                let fieldPlacementAnchor = viewPoint(
+                    fromDocumentPoint: fieldPlacementAnchorInDocument
+                )
+                precondition(
+                    hypot(
+                        contentAnchor.x - fieldPlacementAnchor.x,
+                        contentAnchor.y - fieldPlacementAnchor.y
+                    ) > 1,
+                    "Initial-overflow regression requires one edge-clamped field."
+                )
+            }
+            editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
+            _ = assertCanonicalPresentation(
+                context: "initial \(alignment) overflow",
+                expectedAnchor: anchor,
+                expectedFieldFrame: initialFieldFrame,
+                requiresOverflow: false
+            )
+            editor.setSelectedRange(NSRange(location: 0, length: 0))
+            _ = assertCanonicalPresentation(
+                context: "initial \(alignment) overflow at first caret",
+                expectedAnchor: anchor,
+                expectedFieldFrame: initialFieldFrame,
+                requiresOverflow: false
+            )
+            editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
+            _ = assertCanonicalPresentation(
+                context: "initial \(alignment) overflow at final caret",
+                expectedAnchor: anchor,
+                expectedFieldFrame: initialFieldFrame,
+                requiresOverflow: false
+            )
+
+            editor.insertText(
+                appendedOverflowText,
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
+            editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
+            _ = assertCanonicalPresentation(
+                context: "growing \(alignment) overflow",
+                expectedAnchor: anchor,
+                expectedFieldFrame: initialFieldFrame,
+                requiresOverflow: true
+            )
+            editor.insertText(
+                "",
+                replacementRange: NSRange(
+                    location: editor.string.utf16.count - appendedOverflowText.utf16.count,
+                    length: appendedOverflowText.utf16.count
+                )
+            )
+            editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
+            let lineOriginBeforeCommit = assertCanonicalPresentation(
+                context: "shrinking but still-overflowed \(alignment) text",
+                expectedAnchor: anchor,
+                expectedFieldFrame: initialFieldFrame,
+                requiresOverflow: false
+            )
+            _ = endTextEditingIfNeeded(reason: .focusChange)
+            guard let committedItem = session.controller.document.annotations.first(where: {
+                $0.id == item.id
+            }), let committedText = committedItem.text,
+                  case .rect(let committedRect) = committedItem.geometry
+            else {
+                preconditionFailure(
+                    "Initial-overflow regression lost committed \(alignment) text."
+                )
+            }
+            let committedAnchor = AnnotationTextLayout.alignmentAnchor(
+                in: committedRect,
+                text: committedText,
+                style: committedItem.style,
+                layout: committedItem.textLayout
+            )
+            let committedState = TextEditingState(
+                itemID: committedItem.id,
+                anchor: committedAnchor,
+                style: committedItem.style,
+                transform: committedItem.transform
+            )
+            let lineOriginAfterCommit = renderedTextLineOriginInView(
+                state: committedState,
+                text: committedText,
+                layout: committedItem.textLayout
+            )
+            precondition(
+                committedItem == item
+                    && encodedItem(committedItem) == itemBytesBeforeEditing
+                    && session.controller.undoStack.count == undoCountBeforeEditing
+                    && committedText == overflowText
+                    && hypot(
+                        committedAnchor.x - anchor.x,
+                        committedAnchor.y - anchor.y
+                    ) < 0.001
+                    && hypot(
+                        lineOriginAfterCommit.x - lineOriginBeforeCommit.x,
+                        lineOriginAfterCommit.y - lineOriginBeforeCommit.y
+                    ) < 0.01
+                    && max(
+                        abs(lastTextCommitBaselineError?.x ?? .infinity),
+                        abs(lastTextCommitBaselineError?.y ?? .infinity)
+                    ) < 0.01,
+                "No-op focus-change commit changed initially overflowing \(alignment) text or its undo history."
+            )
+
+            if alignment == .trailing {
+                beginTextEditing(item: committedItem)
+                guard let transitionEditor = textEditor,
+                      let transitionFrame = textEditorFrameView
+                else {
+                    preconditionFailure(
+                        "Could not reopen trailing overflow for fit-transition regression."
+                    )
+                }
+                let transitionFieldFrame = transitionFrame.fieldFrame(in: self)
+                transitionEditor.insertText(
+                    "短",
+                    replacementRange: NSRange(
+                        location: 0,
+                        length: transitionEditor.string.utf16.count
+                    )
+                )
+                transitionEditor.setSelectedRange(
+                    NSRange(location: transitionEditor.string.utf16.count, length: 0)
+                )
+                _ = assertCanonicalPresentation(
+                    context: "trailing overflow-to-fit transition",
+                    expectedAnchor: anchor,
+                    expectedFieldFrame: transitionFieldFrame,
+                    requiresOverflow: false
+                )
+                transitionEditor.insertText(
+                    overflowText,
+                    replacementRange: NSRange(
+                        location: 0,
+                        length: transitionEditor.string.utf16.count
+                    )
+                )
+                transitionEditor.setSelectedRange(
+                    NSRange(location: transitionEditor.string.utf16.count, length: 0)
+                )
+                _ = assertCanonicalPresentation(
+                    context: "trailing fit-to-overflow transition",
+                    expectedAnchor: anchor,
+                    expectedFieldFrame: transitionFieldFrame,
+                    requiresOverflow: false
+                )
+                _ = endTextEditingIfNeeded(reason: .focusChange)
+                precondition(
+                    max(
+                        abs(lastTextCommitBaselineError?.x ?? .infinity),
+                        abs(lastTextCommitBaselineError?.y ?? .infinity)
+                    ) < 0.01,
+                    "Trailing fit-to-overflow commit moved the rendered line."
+                )
+            }
+
+            guard let wideItem = session.controller.document.annotations.first(where: {
+                $0.id == item.id
+            }) else {
+                preconditionFailure("Wide semantic resize regression lost its probe item.")
+            }
+            beginTextEditing(item: wideItem)
+            guard let wideStateBeforeResize = textEditingState,
+                  let wideViewportBeforeResize = textEditorContainer,
+                  let wideCanonicalBeforeResize = textEditorCanonicalWrapWidthInDocument
+            else {
+                preconditionFailure("Wide semantic resize regression lost its editor state.")
+            }
+            let wideViewportWidthBeforeResize = wideViewportBeforeResize.bounds.width
+            let wideFontBeforeResize = wideStateBeforeResize.style.fontSize
+            let wideFontAfterResize = runActiveTextResizeRegression(
+                handle: .southEast,
+                pointerDelta: CGPoint(x: 16, y: -8),
+                steps: 4,
+                eventNumberBase: 800 + alignmentIndex * 20
+            )
+            guard let wideCanonicalAfterResize = textEditorCanonicalWrapWidthInDocument,
+                  let wideViewportAfterResize = textEditorContainer,
+                  let widePayloadAfterResize = textEditorLayoutPayload
+            else {
+                preconditionFailure("Wide semantic resize regression lost resized ownership.")
+            }
+            let expectedWideCanonical = wideCanonicalBeforeResize
+                * wideFontAfterResize / wideFontBeforeResize
+            let completeWidePresentationWidth = AnnotationTextLayout.presentationFieldWidth(
+                layout: widePayloadAfterResize,
+                canvasScale: textEditorCanvasScaleX,
+                uniformTransformScale: abs(wideStateBeforeResize.transform.scaleX)
+            )
+            precondition(
+                abs(wideCanonicalAfterResize - expectedWideCanonical) < 0.01
+                    && wideViewportWidthBeforeResize
+                        <= InlineTextEditorMetrics.maximumViewportWidth + 0.01
+                    && wideViewportAfterResize.bounds.width
+                        <= InlineTextEditorMetrics.maximumViewportWidth + 0.01
+                    && completeWidePresentationWidth
+                        > wideViewportAfterResize.bounds.width + 0.01,
+                "Wide \(alignment) resize must scale semantic width while keeping the viewport capped."
+            )
+            _ = endTextEditingIfNeeded(reason: .focusChange)
+            guard let resizedWideItem = session.controller.document.annotations.first(where: {
+                $0.id == item.id
+            }) else {
+                preconditionFailure("Wide semantic resize regression lost its committed item.")
+            }
+            precondition(
+                abs(
+                    AnnotationTextLayout.canonicalWrapWidth(for: resizedWideItem)
+                        - wideCanonicalAfterResize
+                ) < 0.01,
+                "Wide semantic resize commit replaced canonical width with the capped viewport."
+            )
+
+            session.controller.selectedItemIDs = [item.id]
+            session.controller.deleteSelection()
+            precondition(
+                !session.controller.document.annotations.contains { $0.id == item.id },
+                "Initial-overflow regression failed to remove its probe annotation."
+            )
+        }
+
+        // Include a raw form-feed followed by more text. TextKit's default
+        // action changes containers, whereas the canonical planner treats it
+        // as an LF without changing document UTF-16 ranges.
+        let scaledText = "Scale中 first\u{000C}Second mixed 行\nThird line 文"
+        let scaledAppend = "WWWWWW"
+        for uniformScale in [
+            CGFloat(0.75),
+            CGFloat(1.25),
+            CGFloat(4) / 3,
+            CGFloat(1.5)
+        ] {
+            for alignment in [
+                AnnotationTextAlignment.leading,
+                .center,
+                .trailing
+            ] {
+                var style = sourceStyle
+                style.fontName = "Menlo-Regular"
+                style.fontSize = 18
+                style.textAlignment = alignment
+                let anchorXInView: CGFloat
+                switch alignment {
+                case .leading: anchorXInView = bounds.width * 0.3
+                case .center: anchorXInView = bounds.width * 0.5
+                case .trailing: anchorXInView = bounds.width * 0.7
+                }
+                let anchor = documentPoint(fromViewPoint: CGPoint(
+                    x: anchorXInView,
+                    y: bounds.height * 0.42
+                ))
+                let transform = AnnotationTransform(
+                    translation: CGSize(width: 12, height: -8),
+                    scaleX: uniformScale,
+                    scaleY: uniformScale
+                )
+                let layout = AnnotationTextRegressionFixtures.requiredRendererReadyTextLayoutForRegression(
+                    baselineAnchor: anchor,
+                    text: scaledText,
+                    style: style
+                )
+                let item = AnnotationItem(
+                    kind: .text,
+                    zIndex: session.controller.document.annotations.count,
+                    geometry: .rect(layout.rect),
+                    style: style,
+                    transform: transform,
+                    text: scaledText,
+                    textLayout: layout.payload
+                )
+                session.controller.add(item)
+                let itemBytesBeforeEditing = encodedItem(item)
+                let undoCountBeforeEditing = session.controller.undoStack.count
+                beginTextEditing(item: item)
+                guard let editor = textEditor,
+                      let frameView = textEditorFrameView,
+                      let initialState = textEditingState
+                else {
+                    preconditionFailure(
+                        "Could not open uniformly scaled \(alignment) text at \(uniformScale)x."
+                    )
+                }
+                guard let scaledWrapWidth = textEditorCanonicalWrapWidthInDocument else {
+                    preconditionFailure(
+                        "Uniform-scale multiline regression lost its canonical wrap width."
+                    )
+                }
+                let scaledPlan = AnnotationTextLayout.layoutPlan(
+                    in: editor.string,
+                    style: initialState.style,
+                    wrapWidth: scaledWrapWidth
+                )
+                let scaledTextKitLines = textEditorLineSnapshotsInView(editor)
+                let expectedBaselineAdvanceInView = textEditorFieldHeightInView(
+                    fromUntransformedDocumentHeight: scaledPlan.lineAdvance,
+                    state: initialState
+                )
+                precondition(
+                    scaledTextKitLines.count >= 3
+                        && zip(
+                            scaledTextKitLines,
+                            scaledTextKitLines.dropFirst()
+                        ).allSatisfy { pair in
+                            let (upper, lower) = pair
+                            return abs(
+                                upper.originInView.y
+                                    - lower.originInView.y
+                                    - expectedBaselineAdvanceInView
+                            ) < 0.01
+                        },
+                    "Uniform-scale fixture must expose at least three live TextKit baselines at the canonical line advance for \(alignment) at \(uniformScale)x."
+                )
+                let initialFieldFrame = frameView.fieldFrame(in: self)
+                let initialContentAnchor = textEditorAlignmentAnchor(
+                    for: initialState,
+                    text: editor.string,
+                    layout: textEditorLayoutPayload
+                )
+                let initialRectWidth = AnnotationTextLayout.annotationRect(
+                    baselineAnchor: anchor,
+                    text: editor.string,
+                    style: style
+                ).width
+                editor.setSelectedRange(
+                    NSRange(location: editor.string.utf16.count, length: 0)
+                )
+                let initialLineOrigin = assertCanonicalPresentation(
+                    context: "initial \(uniformScale)x \(alignment) text",
+                    expectedAnchor: anchor,
+                    expectedFieldFrame: initialFieldFrame,
+                    requiresOverflow: nil
+                )
+
+                editor.insertText(
+                    scaledAppend,
+                    replacementRange: NSRange(location: NSNotFound, length: 0)
+                )
+                editor.setSelectedRange(
+                    NSRange(location: editor.string.utf16.count, length: 0)
+                )
+                let lineOriginBeforeCommit = assertCanonicalPresentation(
+                    context: "wider \(uniformScale)x \(alignment) text",
+                    expectedAnchor: anchor,
+                    expectedFieldFrame: initialFieldFrame,
+                    requiresOverflow: nil,
+                    allowsViewportGrowth: true
+                )
+                guard let widenedState = textEditingState else {
+                    preconditionFailure(
+                        "Uniform-scale regression lost its widened editing state."
+                    )
+                }
+                let widenedContentAnchor = textEditorAlignmentAnchor(
+                    for: widenedState,
+                    text: editor.string,
+                    layout: textEditorLayoutPayload
+                )
+                let widenedRectWidth = AnnotationTextLayout.annotationRect(
+                    baselineAnchor: anchor,
+                    text: editor.string,
+                    style: style
+                ).width
+                let alignmentCenterFactor: CGFloat
+                switch alignment {
+                case .leading: alignmentCenterFactor = 0.5
+                case .center: alignmentCenterFactor = 0
+                case .trailing: alignmentCenterFactor = -0.5
+                }
+                let expectedContentAnchorDeltaInView = viewOffset(
+                    fromDocumentOffset: CGSize(
+                        width: (1 - uniformScale)
+                            * alignmentCenterFactor
+                            * (widenedRectWidth - initialRectWidth),
+                        height: 0
+                    )
+                ).width
+                precondition(
+                    abs(
+                        widenedContentAnchor.x
+                            - initialContentAnchor.x
+                            - expectedContentAnchorDeltaInView
+                    ) < 0.01
+                        && widenedState.anchor == anchor
+                        && widenedState.transform == transform,
+                    "Uniform-scale presentation anchor did not follow renderer geometry for \(alignment) at \(uniformScale)x."
+                )
+
+                editor.insertText(
+                    "",
+                    replacementRange: NSRange(
+                        location: editor.string.utf16.count - scaledAppend.utf16.count,
+                        length: scaledAppend.utf16.count
+                    )
+                )
+                editor.setSelectedRange(
+                    NSRange(location: editor.string.utf16.count, length: 0)
+                )
+                let restoredLineOrigin = assertCanonicalPresentation(
+                    context: "restored \(uniformScale)x \(alignment) no-op text",
+                    expectedAnchor: anchor,
+                    expectedFieldFrame: initialFieldFrame,
+                    requiresOverflow: nil,
+                    allowsViewportGrowth: true
+                )
+                _ = endTextEditingIfNeeded(reason: .focusChange)
+                guard let restoredItem = session.controller.document.annotations.first(where: {
+                    $0.id == item.id
+                }) else {
+                    preconditionFailure(
+                        "Uniform-scale no-op regression lost \(alignment) text."
+                    )
+                }
+                precondition(
+                    restoredItem == item
+                        && encodedItem(restoredItem) == itemBytesBeforeEditing
+                        && session.controller.undoStack.count == undoCountBeforeEditing
+                        && hypot(
+                            restoredLineOrigin.x - initialLineOrigin.x,
+                            restoredLineOrigin.y - initialLineOrigin.y
+                        ) < 0.01
+                        && max(
+                            abs(lastTextCommitBaselineError?.x ?? .infinity),
+                            abs(lastTextCommitBaselineError?.y ?? .infinity)
+                        ) < 0.01,
+                    "Uniform-scale grow-and-restore changed \(alignment) bytes or undo history at \(uniformScale)x."
+                )
+
+                beginTextEditing(item: restoredItem)
+                guard let reopenedEditor = textEditor else {
+                    preconditionFailure(
+                        "Uniform-scale regression could not reopen \(alignment) text after no-op."
+                    )
+                }
+                reopenedEditor.setSelectedRange(
+                    NSRange(location: reopenedEditor.string.utf16.count, length: 0)
+                )
+                reopenedEditor.insertText(
+                    scaledAppend,
+                    replacementRange: NSRange(location: NSNotFound, length: 0)
+                )
+                reopenedEditor.setSelectedRange(
+                    NSRange(location: reopenedEditor.string.utf16.count, length: 0)
+                )
+                let finalLineOriginBeforeCommit = assertCanonicalPresentation(
+                    context: "reopened wider \(uniformScale)x \(alignment) text",
+                    expectedAnchor: anchor,
+                    expectedFieldFrame: initialFieldFrame,
+                    requiresOverflow: nil,
+                    allowsViewportGrowth: true
+                )
+                precondition(
+                    hypot(
+                        finalLineOriginBeforeCommit.x - lineOriginBeforeCommit.x,
+                        finalLineOriginBeforeCommit.y - lineOriginBeforeCommit.y
+                    ) < 0.01,
+                    "Reopening uniformly scaled text changed its widened renderer origin."
+                )
+
+                _ = endTextEditingIfNeeded(reason: .focusChange)
+                guard let committedItem = session.controller.document.annotations.first(where: {
+                    $0.id == item.id
+                }), let committedText = committedItem.text,
+                      case .rect(let committedRect) = committedItem.geometry
+                else {
+                    preconditionFailure(
+                        "Uniform-scale regression lost committed \(alignment) text."
+                    )
+                }
+                let committedAnchor = AnnotationTextLayout.alignmentAnchor(
+                    in: committedRect,
+                    text: committedText,
+                    style: committedItem.style,
+                    layout: committedItem.textLayout
+                )
+                let committedState = TextEditingState(
+                    itemID: committedItem.id,
+                    anchor: committedAnchor,
+                    style: committedItem.style,
+                    transform: committedItem.transform
+                )
+                let lineOriginAfterCommit = renderedTextLineOriginInView(
+                    state: committedState,
+                    text: committedText,
+                    layout: committedItem.textLayout
+                )
+                precondition(
+                    committedText == scaledText + scaledAppend
+                        && committedAnchor == anchor
+                        && committedItem.transform == transform
+                        && hypot(
+                            lineOriginAfterCommit.x - finalLineOriginBeforeCommit.x,
+                            lineOriginAfterCommit.y - finalLineOriginBeforeCommit.y
+                        ) < 0.01
+                        && max(
+                            abs(lastTextCommitBaselineError?.x ?? .infinity),
+                            abs(lastTextCommitBaselineError?.y ?? .infinity)
+                        ) < 0.01,
+                    "Committing \(uniformScale)x \(alignment) text changed its renderer presentation."
+                )
+
+                session.controller.selectedItemIDs = [item.id]
+                session.controller.deleteSelection()
+            }
+        }
+
+        var resizeStyle = sourceStyle
+        resizeStyle.fontName = "Menlo-Regular"
+        resizeStyle.fontSize = 18
+        resizeStyle.textAlignment = .leading
+        let resizeAnchor = documentPoint(fromViewPoint: CGPoint(
+            x: bounds.width * 0.38,
+            y: bounds.height * 0.38
+        ))
+        let resizeTransform = AnnotationTransform(
+            translation: CGSize(width: 12, height: -8),
+            scaleX: 1.5,
+            scaleY: 1.5
+        )
+        let resizeLayout = AnnotationTextRegressionFixtures.requiredRendererReadyTextLayoutForRegression(
+            baselineAnchor: resizeAnchor,
+            text: "ResizeScale",
+            style: resizeStyle
+        )
+        let resizeItem = AnnotationItem(
+            kind: .text,
+            zIndex: session.controller.document.annotations.count,
+            geometry: .rect(resizeLayout.rect),
+            style: resizeStyle,
+            transform: resizeTransform,
+            text: "ResizeScale",
+            textLayout: resizeLayout.payload
+        )
+        session.controller.add(resizeItem)
+        beginTextEditing(item: resizeItem)
+        _ = runActiveTextResizeRegression(
+            handle: .southEast,
+            pointerDelta: CGPoint(x: 24, y: -12),
+            steps: 6,
+            eventNumberBase: 600
+        )
+        _ = runActiveTextResizeRegression(
+            handle: .northWest,
+            pointerDelta: CGPoint(x: 12, y: -6),
+            steps: 6,
+            eventNumberBase: 650
+        )
+        _ = runActiveTextResizeRegression(
+            handle: .southWest,
+            pointerDelta: CGPoint(x: 10, y: 5),
+            steps: 6,
+            eventNumberBase: 700
+        )
+        guard let resizedEditor = textEditor,
+              let resizedFrameView = textEditorFrameView,
+              let resizedState = textEditingState
+        else {
+            preconditionFailure(
+                "Uniform-scale active resize regression lost the editor."
+            )
+        }
+        let resizedLineOriginBeforeCommit = assertCanonicalPresentation(
+            context: "uniform-scale three-corner resize",
+            expectedAnchor: resizedState.anchor,
+            expectedFieldFrame: resizedFrameView.fieldFrame(in: self),
+            requiresOverflow: nil
+        )
+        let resizedText = resizedEditor.string
+        _ = endTextEditingIfNeeded(reason: .focusChange)
+        guard let committedResizeItem = session.controller.document.annotations.first(where: {
+            $0.id == resizeItem.id
+        }), let committedResizeText = committedResizeItem.text,
+              case .rect(let committedResizeRect) = committedResizeItem.geometry
+        else {
+            preconditionFailure(
+                "Uniform-scale active resize regression lost its committed item."
+            )
+        }
+        let committedResizeState = TextEditingState(
+            itemID: committedResizeItem.id,
+            anchor: AnnotationTextLayout.alignmentAnchor(
+                in: committedResizeRect,
+                text: committedResizeText,
+                style: committedResizeItem.style,
+                layout: committedResizeItem.textLayout
+            ),
+            style: committedResizeItem.style,
+            transform: committedResizeItem.transform
+        )
+        let resizedLineOriginAfterCommit = renderedTextLineOriginInView(
+            state: committedResizeState,
+            text: committedResizeText,
+            layout: committedResizeItem.textLayout
+        )
+        precondition(
+            committedResizeText == resizedText
+                && committedResizeItem.transform == resizeTransform
+                && hypot(
+                    resizedLineOriginAfterCommit.x - resizedLineOriginBeforeCommit.x,
+                    resizedLineOriginAfterCommit.y - resizedLineOriginBeforeCommit.y
+                ) < 0.01
+                && max(
+                    abs(lastTextCommitBaselineError?.x ?? .infinity),
+                    abs(lastTextCommitBaselineError?.y ?? .infinity)
+                ) < 0.01,
+            "Committing uniformly scaled three-corner resize changed its presentation."
+        )
+        session.controller.selectedItemIDs = [resizeItem.id]
+        session.controller.deleteSelection()
+
+        session.adoptCurrentStyle(originalStyle, origin: originalStyleOrigin)
+        session.controller.selectedItemIDs = originalSelection
+        syncSelectedTextChrome()
+    }
+
+    private func runInlineTextPointerAndLineBreakRegression() {
+        _ = endTextEditingIfNeeded(reason: .externalAction)
+        var style = session.defaultStyle(for: .text)
+        style.fontName = "Menlo-Regular"
+        style.fontSize = 18
+        let anchor = documentPoint(fromViewPoint: CGPoint(
+            x: bounds.midX,
+            y: bounds.midY
+        ))
+        installTextEditor(
+            text: "AB",
+            state: TextEditingState(
+                itemID: nil,
+                anchor: anchor,
+                style: style,
+                transform: AnnotationTransform()
+            )
+        )
+        guard let editor = textEditor,
+              let frameView = textEditorFrameView,
+              let initialLineOrigin = textEditorLineOriginInView(editor)
+        else {
+            preconditionFailure("Pointer and line-break regression could not start the inline editor.")
+        }
+        let initialField = frameView.fieldFrame(in: self)
+        let clickPoint = CGPoint(x: initialField.midX, y: initialField.midY)
+        let framePoint = frameView.convert(clickPoint, from: self)
+        let fieldHit = frameView.hitTest(framePoint)
+        precondition(
+            fieldHit === editor,
+            "Clicking the active text field must hit the NSTextView, not \(String(describing: fieldHit.map { type(of: $0) }))."
+        )
+        let canvasHit = hitTest(clickPoint)
+        precondition(
+            canvasHit === editor,
+            "Canvas hit testing must route field clicks to the NSTextView, not \(String(describing: canvasHit.map { type(of: $0) }))."
+        )
+
+        editor.insertNewlineIgnoringFieldEditor(nil)
+        updateTextEditorLayout(scrollsToInsertionPoint: true)
+        layoutSubtreeIfNeeded()
+        window?.displayIfNeeded()
+        guard let brokenLineOrigin = textEditorLineOriginInView(editor) else {
+            preconditionFailure("Pointer and line-break regression lost the first-line origin after inserting a newline.")
+        }
+        precondition(
+            editor.string.contains("\n"),
+            "Shift-Return must insert a hard line break instead of committing the annotation."
+        )
+        precondition(
+            AnnotationTextLayout.lineCount(in: editor.string) == 2,
+            "A single line break must produce exactly two visual lines."
+        )
+        precondition(
+            abs(brokenLineOrigin.x - initialLineOrigin.x) < 0.01
+                && abs(brokenLineOrigin.y - initialLineOrigin.y) < 0.01,
+            "Inserting a line break moved the first-line origin from \(initialLineOrigin) to \(brokenLineOrigin)."
+        )
+        let grownField = frameView.fieldFrame(in: self)
+        precondition(
+            grownField.height > initialField.height + 1,
+            "A line break must grow the text field. initial=\(initialField.height), grown=\(grownField.height)."
+        )
+        precondition(
+            abs(grownField.maxY - initialField.maxY) < 0.51,
+            "A line break must keep the first-line top edge fixed. initialMaxY=\(initialField.maxY), grownMaxY=\(grownField.maxY)."
+        )
+
+        _ = endTextEditingIfNeeded(reason: .focusChange)
+        guard let committedItem = session.controller.document.annotations.last,
+              committedItem.kind == .text,
+              let committedText = committedItem.text
+        else {
+            preconditionFailure("Pointer and line-break regression did not commit the multiline annotation.")
+        }
+        precondition(
+            committedText.contains("\n"),
+            "Committing inline text must preserve hard line breaks instead of flattening them to spaces."
+        )
+        session.controller.selectedItemIDs = [committedItem.id]
+        session.controller.deleteSelection()
+        AppLog.capture.notice(
+            "Inline text pointer and line-break regression passed: fieldHit=editor, firstLineOriginStable=true, fieldGrewDownward=true, committedNewline=true"
+        )
+    }
+
+    private func runInlineTextEditorAdmissionRegression() {
+        precondition(textEditor == nil, "Canvas admission regression requires no active editor.")
+        let originalBounds = bounds
+        for size in [
+            CGSize(width: 2, height: 2),
+            CGSize(width: 20, height: 20),
+            CGSize(width: 19, height: 40)
+        ] {
+            bounds = CGRect(origin: originalBounds.origin, size: size)
+            beginTextEditing(at: .zero)
+            precondition(
+                textEditor == nil,
+                "A \(size.width)x\(size.height) canvas must reject inline text controls without crashing."
+            )
+        }
+        bounds = originalBounds
+
+        var probeStyle = session.defaultStyle(for: .text)
+        probeStyle.fontName = "Menlo-Regular"
+        probeStyle.fontSize = 18
+        probeStyle.textAlignment = .center
+        let probeText = "Probe first\u{000C}Probe second\u{000B}Probe third\n"
+        let probeLayout = AnnotationTextRegressionFixtures.requiredRendererReadyTextLayoutForRegression(
+            baselineAnchor: .zero,
+            text: probeText,
+            style: probeStyle,
+            maximumWrapWidth: 240
+        )
+        let probePlan: AnnotationTextLayoutPlan
+        do {
+            probePlan = try AnnotationTextLayout.persistedPlan(
+                text: probeText,
+                style: probeStyle,
+                payload: probeLayout.payload
+            )
+            try validateInlineTextKitEditingCapability(
+                text: probeText,
+                style: probeStyle,
+                payload: probeLayout.payload,
+                plan: probePlan
+            )
+        } catch {
+            preconditionFailure(
+                "The native offscreen TextKit admission fixture did not reproduce its persisted plan: \(error)"
+            )
+        }
+        precondition(
+            probePlan.lineCount >= 4
+                && probePlan.lines.last?.utf16Range.length == 0
+                && probePlan.lines.last?.consumedUTF16Range.length == 0,
+            "The native offscreen TextKit admission fixture must cover three drawable lines and the terminal extra line."
+        )
+        let selectionBeforeRejectedProbe = session.controller.selectedItemIDs
+        let chromeBeforeRejectedProbe = selectedTextFrameView
+        var rejectedMismatchedText = false
+        do {
+            try validateInlineTextKitEditingCapability(
+                text: probeText + "X",
+                style: probeStyle,
+                payload: probeLayout.payload,
+                plan: probePlan
+            )
+        } catch is InlineTextKitEditingCapabilityError {
+            rejectedMismatchedText = true
+        } catch {
+            preconditionFailure(
+                "The native offscreen TextKit mismatch fixture returned an unexpected error: \(error)"
+            )
+        }
+        precondition(
+            rejectedMismatchedText
+                && textEditor == nil
+                && textEditingState == nil
+                && session.controller.selectedItemIDs == selectionBeforeRejectedProbe
+                && selectedTextFrameView === chromeBeforeRejectedProbe,
+            "A rejected offscreen TextKit capability probe must leave editor, selection and chrome state unchanged."
+        )
+        syncSelectedTextChrome()
+        updateAccessibilitySummary(
+            document: session.controller.document,
+            captured: session.previewImage
+        )
+    }
+
+    private func runInlineTextFieldGeometryRegression(style: AnnotationStyle) {
+        let availableFieldBounds = bounds.insetBy(
+            dx: InlineAnnotationTextEditorFrameView.chromeOutset,
+            dy: InlineAnnotationTextEditorFrameView.chromeOutset
+        )
+        precondition(
+            availableFieldBounds.width > 420 && availableFieldBounds.height > 180,
+            "Inline text geometry regression requires room away from every canvas edge."
+        )
+        for alignment in [
+            AnnotationTextAlignment.leading,
+            .center,
+            .trailing
+        ] {
+            for fontSize in [CGFloat(18), 19.15, 20, 31] {
+                var candidateStyle = style
+                candidateStyle.textAlignment = alignment
+                candidateStyle.fontSize = fontSize
+                let candidateState = TextEditingState(
+                    itemID: nil,
+                    anchor: .zero,
+                    style: candidateStyle,
+                    transform: AnnotationTransform()
+                )
+                let font = requiredTextEditorFontForRegression(candidateState)
+                let targetFrame = CGRect(
+                    x: availableFieldBounds.minX + 90,
+                    y: availableFieldBounds.minY + 70,
+                    width: 287,
+                    height: textEditorFieldHeight(
+                        font: font,
+                        state: candidateState
+                    )
+                )
+                let alignmentAnchor = textFieldAlignmentAnchor(
+                    for: targetFrame,
+                    font: font,
+                    alignment: alignment,
+                    state: candidateState
+                )
+                let resolvedFrame = resolvedTextFieldFrame(
+                    alignmentAnchor: alignmentAnchor,
+                    font: font,
+                    preferredViewportWidth: targetFrame.width,
+                    availableFieldBounds: availableFieldBounds,
+                    alignment: alignment,
+                    state: candidateState
+                )
+                precondition(
+                    maxFrameDelta(targetFrame, resolvedFrame) < 0.001,
+                    "Inline text frame and anchor geometry must round-trip at font size \(fontSize) for \(alignment)."
+                )
+            }
+        }
+
+        var clampedCases = 0
+        for alignment in [
+            AnnotationTextAlignment.leading,
+            .center,
+            .trailing
+        ] {
+            var candidateStyle = style
+            candidateStyle.textAlignment = alignment
+            candidateStyle.fontSize = 18
+            let candidateState = TextEditingState(
+                itemID: nil,
+                anchor: .zero,
+                style: candidateStyle,
+                transform: AnnotationTransform()
+            )
+            let font = requiredTextEditorFontForRegression(candidateState)
+            for canonicalAnchor in [
+                CGPoint(x: availableFieldBounds.minX + 2, y: availableFieldBounds.minY + 2),
+                CGPoint(x: availableFieldBounds.maxX - 2, y: availableFieldBounds.minY + 2),
+                CGPoint(x: availableFieldBounds.minX + 2, y: availableFieldBounds.maxY - 2),
+                CGPoint(x: availableFieldBounds.maxX - 2, y: availableFieldBounds.maxY - 2)
+            ] {
+                let initialFrame = resolvedTextFieldFrame(
+                    alignmentAnchor: canonicalAnchor,
+                    font: font,
+                    preferredViewportWidth: 287,
+                    availableFieldBounds: availableFieldBounds,
+                    alignment: alignment,
+                    state: candidateState
+                )
+                let fieldAnchor = textFieldAlignmentAnchor(
+                    for: initialFrame,
+                    font: font,
+                    alignment: alignment,
+                    state: candidateState
+                )
+                let residual = CGSize(
+                    width: canonicalAnchor.x - fieldAnchor.x,
+                    height: canonicalAnchor.y - fieldAnchor.y
+                )
+                if hypot(residual.width, residual.height) > 1 {
+                    clampedCases += 1
+                }
+                for handle in [
+                    InlineAnnotationTextResizeHandle.northWest,
+                    .southWest,
+                    .southEast
+                ] {
+                    let fixedPoint = textFramePoint(
+                        corner: handle.fixedCorner,
+                        in: initialFrame
+                    )
+                    let identicalTarget = textFieldFrame(
+                        fixedCorner: handle.fixedCorner,
+                        fixedPoint: fixedPoint,
+                        size: initialFrame.size
+                    )
+                    let targetFieldAnchor = textFieldAlignmentAnchor(
+                        for: identicalTarget,
+                        font: font,
+                        alignment: alignment,
+                        state: candidateState
+                    )
+                    let reconstructedCanonicalAnchor = CGPoint(
+                        x: targetFieldAnchor.x + residual.width,
+                        y: targetFieldAnchor.y + residual.height
+                    )
+                    precondition(
+                        hypot(
+                            reconstructedCanonicalAnchor.x - canonicalAnchor.x,
+                            reconstructedCanonicalAnchor.y - canonicalAnchor.y
+                        ) < 0.001,
+                        "Clamped text field placement must preserve its independent canonical anchor for \(alignment) and \(handle.rawValue)."
+                    )
+                }
+            }
+        }
+        precondition(
+            clampedCases == 12,
+            "Edge field regression must exercise every alignment at every canvas corner."
+        )
+    }
+
+    private func runEdgeClampedNoOpTextResizeRegression(eventNumberBase: Int) {
+        guard let window,
+              let editor = textEditor,
+              let frameView = textEditorFrameView,
+              var edgeState = textEditingState,
+              let preferredViewportWidthInDocument = textEditorPreferredViewportWidthInDocument,
+              let canonicalWrapWidthInDocument = textEditorCanonicalWrapWidthInDocument
+        else {
+            preconditionFailure("Edge-clamped text resize regression requires an active editor.")
+        }
+        let initialLayoutPayload = textEditorLayoutPayload
+        let initialExplicitResizeState = textEditorCanonicalWrapWidthWasExplicitlyResized
+        edgeState.anchor.x = documentPoint(fromViewPoint: CGPoint(
+            x: bounds.maxX - InlineAnnotationTextEditorFrameView.chromeOutset - 2,
+            y: bounds.midY
+        )).x
+        textEditingState = edgeState
+        textEditorFieldPlacementAnchorInDocument = nil
+        textEditorPresentationLayout = nil
+        updateTextEditorFrame(scrollsToInsertionPoint: true)
+        guard let fieldPlacementAnchorInDocument = textEditorFieldPlacementAnchorInDocument,
+              let initialLineOrigin = textEditorLineOriginInView(editor)
+        else {
+            preconditionFailure("Edge-clamped text resize regression could not resolve field placement.")
+        }
+        let contentAnchor = textEditorAlignmentAnchor(
+            for: edgeState,
+            text: editor.string,
+            layout: textEditorLayoutPayload
+        )
+        let fieldPlacementAnchor = viewPoint(
+            fromDocumentPoint: fieldPlacementAnchorInDocument
+        )
+        precondition(
+            abs(contentAnchor.x - fieldPlacementAnchor.x) > 20,
+            "Edge-clamped text resize regression requires a non-invertible horizontal clamp."
+        )
+
+        let initialState = edgeState
+        let initialFieldFrame = frameView.fieldFrame(in: self)
+        let handle = InlineAnnotationTextResizeHandle.southEast
+        let activeCorner = textFramePoint(handle: handle, in: initialFieldFrame)
+        let fixedCorner = textFramePoint(corner: handle.fixedCorner, in: initialFieldFrame)
+        let diagonal = CGPoint(
+            x: activeCorner.x - fixedCorner.x,
+            y: activeCorner.y - fixedCorner.y
+        )
+        let perpendicularLength = hypot(diagonal.y, diagonal.x)
+        precondition(perpendicularLength > 1, "Edge resize regression requires a non-empty field diagonal.")
+        let perpendicularDelta = CGPoint(
+            x: diagonal.y / perpendicularLength * 18,
+            y: -diagonal.x / perpendicularLength * 18
+        )
+        let startInWindow = convert(activeCorner, to: nil)
+        let noOpInWindow = CGPoint(
+            x: startInWindow.x + perpendicularDelta.x,
+            y: startInWindow.y + perpendicularDelta.y
+        )
+        let timestamp = ProcessInfo.processInfo.systemUptime
+
+        func event(
+            type: NSEvent.EventType,
+            location: CGPoint,
+            number: Int,
+            pressure: Float
+        ) -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: location,
+                modifierFlags: [],
+                timestamp: timestamp + Double(number) / 120,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: eventNumberBase + number,
+                clickCount: 1,
+                pressure: pressure
+            ) else {
+                preconditionFailure("Edge-clamped text resize regression could not synthesize event \(number).")
+            }
+            return event
+        }
+
+        beginTextResize(
+            handle: handle,
+            event: event(type: .leftMouseDown, location: startInWindow, number: 0, pressure: 1)
+        )
+        updateTextResize(
+            handle: handle,
+            event: event(type: .leftMouseDragged, location: noOpInWindow, number: 1, pressure: 1)
+        )
+        endTextResize(
+            handle: handle,
+            event: event(type: .leftMouseUp, location: noOpInWindow, number: 2, pressure: 0)
+        )
+        guard let finalState = textEditingState,
+              let finalLineOrigin = textEditorLineOriginInView(editor)
+        else {
+            preconditionFailure("Edge-clamped text resize regression lost the active editor.")
+        }
+        precondition(
+            hypot(
+                finalState.anchor.x - initialState.anchor.x,
+                finalState.anchor.y - initialState.anchor.y
+            ) < 0.001
+                && abs(finalState.style.fontSize - initialState.style.fontSize) < 0.001,
+            "A perpendicular edge-clamped drag must not change the canonical text state."
+        )
+        precondition(
+            maxFrameDelta(initialFieldFrame, frameView.fieldFrame(in: self)) < 0.001
+                && hypot(
+                    finalLineOrigin.x - initialLineOrigin.x,
+                    finalLineOrigin.y - initialLineOrigin.y
+                ) < 0.001,
+            "A perpendicular edge-clamped drag must not move the field or visible text."
+        )
+        precondition(
+            abs(
+                (textEditorPreferredViewportWidthInDocument ?? .infinity)
+                    - preferredViewportWidthInDocument
+            ) < 0.001
+                && abs(
+                    (textEditorCanonicalWrapWidthInDocument ?? .infinity)
+                        - canonicalWrapWidthInDocument
+                ) < 0.001
+                && textEditorLayoutPayload == initialLayoutPayload
+                && textEditorCanonicalWrapWidthWasExplicitlyResized
+                    == initialExplicitResizeState
+                && window.firstResponder === editor,
+            "A perpendicular edge-clamped drag must preserve viewport and semantic layout ownership."
+        )
+    }
+
+    private func runLegacyOverhangNoOpTextResizeRegression(eventNumberBase: Int) {
+        precondition(
+            textEditor == nil && textEditingState == nil,
+            "Legacy overhang resize regression requires an idle inline editor."
+        )
+        func encodedProbeItem(_ item: AnnotationItem) -> Data {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            do {
+                return try encoder.encode(item)
+            } catch {
+                preconditionFailure(
+                    "Legacy overhang regression could not encode its no-op fixture: \(error)"
+                )
+            }
+        }
+
+        let originalSelection = session.controller.selectedItemIDs
+        let originalStyle = session.currentStyle
+        let originalStyleOrigin = session.currentStyleOrigin
+        var style = originalStyle
+        style.fontName = "Zapfino"
+        style.fontSize = 18
+        style.fontWeight = .regular
+        style.textAlignment = .leading
+        let text = "Zapfino fj Ág"
+        let canonicalWrapWidth: CGFloat = 140
+        let legacyRect = CGRect(
+            x: documentPoint(fromViewPoint: CGPoint(
+                x: bounds.maxX - InlineAnnotationTextEditorFrameView.chromeOutset - 2,
+                y: bounds.midY
+            )).x,
+            y: visibleDocumentRect().midY - 13.5,
+            width: canonicalWrapWidth,
+            height: 27
+        )
+        let safePayload = AnnotationTextRegressionFixtures.requiredRendererReadyTextPayloadForRegression(
+            text: text,
+            style: style,
+            proposedWrapWidth: canonicalWrapWidth,
+            chromeMode: .legacyTight
+        )
+        precondition(
+            safePayload.leadingOverhang + safePayload.trailingOverhang > 0.01
+                && abs(
+                    safePayload.leadingOverhang - safePayload.trailingOverhang
+                ) > 0.01,
+            "Legacy overhang regression requires asymmetric Zapfino glyph bearings."
+        )
+        let transform = AnnotationTransform(scaleX: 1.5, scaleY: 1.5)
+        let item = AnnotationItem(
+            kind: .text,
+            zIndex: session.controller.document.annotations.count,
+            geometry: .rect(legacyRect),
+            style: style,
+            transform: transform,
+            text: text,
+            textLayout: nil
+        )
+        session.controller.add(item)
+        let encodedItemBeforeEditing = encodedProbeItem(item)
+        let undoCountBeforeEditing = session.controller.undoStack.count
+        let originalAnchor = AnnotationTextLayout.alignmentAnchor(
+            in: legacyRect,
+            text: text,
+            style: style,
+            layout: nil
+        )
+
+        beginTextEditing(item: item)
+        guard let container = textEditorContainer,
+              let documentView = textEditorDocumentView,
+              let activeState = textEditingState,
+              let activeCanonicalWrapWidth = textEditorCanonicalWrapWidthInDocument
+        else {
+            preconditionFailure("Legacy overhang regression could not open its probe item.")
+        }
+        precondition(
+            textEditorLayoutPayload == nil
+                && abs(activeCanonicalWrapWidth - canonicalWrapWidth) < 0.001
+                && documentView.frame.width > container.bounds.width + 0.01
+                && activeState.transform == transform,
+            "A legacy nil layout must keep semantic width while its overhang scrolls inside the viewport."
+        )
+        runEdgeClampedNoOpTextResizeRegression(eventNumberBase: eventNumberBase)
+        guard let finalState = textEditingState else {
+            preconditionFailure("Legacy overhang regression lost its active state after resize.")
+        }
+        precondition(
+            hypot(
+                finalState.anchor.x - originalAnchor.x,
+                finalState.anchor.y - originalAnchor.y
+            ) < 0.001
+                && finalState.style.fontSize == style.fontSize
+                && textEditorLayoutPayload == nil
+                && !textEditorCanonicalWrapWidthWasExplicitlyResized,
+            "A projected scale-one drag must preserve the complete legacy text owner."
+        )
+        _ = endTextEditingIfNeeded(reason: .focusChange)
+        guard let committedItem = session.controller.document.annotations.first(where: {
+            $0.id == item.id
+        }) else {
+            preconditionFailure("Legacy overhang regression lost its committed probe item.")
+        }
+        precondition(
+            committedItem == item
+                && encodedProbeItem(committedItem) == encodedItemBeforeEditing
+                && session.controller.undoStack.count == undoCountBeforeEditing,
+            "A projected scale-one legacy resize must remain byte- and undo-equivalent."
+        )
+
+        session.controller.selectedItemIDs = [item.id]
+        session.controller.deleteSelection()
+        session.adoptCurrentStyle(originalStyle, origin: originalStyleOrigin)
+        session.controller.selectedItemIDs = originalSelection
+        syncSelectedTextChrome()
+    }
+
+    private func runTextResizeCancellationRegression(eventNumberBase: Int) {
+        guard let window,
+              let editor = textEditor,
+              let frameView = textEditorFrameView
+        else {
+            preconditionFailure("Text resize cancellation regression requires an active editor.")
+        }
+        let timestamp = ProcessInfo.processInfo.systemUptime
+
+        func event(
+            type: NSEvent.EventType,
+            location: CGPoint,
+            number: Int,
+            pressure: Float
+        ) -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: location,
+                modifierFlags: [],
+                timestamp: timestamp + Double(number) / 120,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: eventNumberBase + number,
+                clickCount: 1,
+                pressure: pressure
+            ) else {
+                preconditionFailure("Text resize cancellation regression could not synthesize event \(number).")
+            }
+            return event
+        }
+
+        func startPoint(for handle: InlineAnnotationTextResizeHandle) -> CGPoint {
+            convert(
+                textFramePoint(handle: handle, in: frameView.fieldFrame(in: self)),
+                to: nil
+            )
+        }
+
+        let firstHandle = InlineAnnotationTextResizeHandle.northWest
+        let firstStart = startPoint(for: firstHandle)
+        beginTextResize(
+            handle: firstHandle,
+            event: event(type: .leftMouseDown, location: firstStart, number: 0, pressure: 1)
+        )
+        precondition(
+            cancelTextResize(reason: "debug-simulated-missed-mouse-up"),
+            "A lost mouse-up must have an explicit cancellation path."
+        )
+        endTextResize(
+            handle: firstHandle,
+            event: event(type: .leftMouseUp, location: firstStart, number: 1, pressure: 0)
+        )
+        precondition(
+            textResizeInteraction == nil && window.firstResponder === editor,
+            "A stale mouse-up after cancellation must preserve the active editor."
+        )
+
+        let secondHandle = InlineAnnotationTextResizeHandle.southWest
+        let secondStart = startPoint(for: secondHandle)
+        beginTextResize(
+            handle: secondHandle,
+            event: event(type: .leftMouseDown, location: secondStart, number: 2, pressure: 1)
+        )
+        let originalBounds = bounds
+        bounds = CGRect(
+            origin: originalBounds.origin,
+            size: CGSize(
+                width: originalBounds.width - 1,
+                height: originalBounds.height
+            )
+        )
+        let geometryUpdateWasAccepted = updateTextResize(
+            handle: secondHandle,
+            event: event(
+                type: .leftMouseDragged,
+                location: CGPoint(x: secondStart.x + 1, y: secondStart.y),
+                number: 3,
+                pressure: 1
+            )
+        )
+        bounds = originalBounds
+        updateTextEditorFrame(scrollsToInsertionPoint: true)
+        precondition(
+            !geometryUpdateWasAccepted && textResizeInteraction == nil,
+            "Canvas geometry changes must cancel active text resizing instead of trapping."
+        )
+        endTextResize(
+            handle: secondHandle,
+            event: event(type: .leftMouseUp, location: secondStart, number: 4, pressure: 0)
+        )
+
+        let finalHandle = InlineAnnotationTextResizeHandle.southEast
+        let finalStart = startPoint(for: finalHandle)
+        beginTextResize(
+            handle: finalHandle,
+            event: event(type: .leftMouseDown, location: finalStart, number: 5, pressure: 1)
+        )
+        endTextResize(
+            handle: finalHandle,
+            event: event(type: .leftMouseUp, location: finalStart, number: 6, pressure: 0)
+        )
+        precondition(
+            textResizeInteraction == nil && window.firstResponder === editor,
+            "A new text resize must start normally after every cancellation path."
+        )
+
+        guard let stableViewportWidthInDocument = textEditorPreferredViewportWidthInDocument,
+              let stableFieldPlacementAnchorInDocument = textEditorFieldPlacementAnchorInDocument,
+              let frameView = textEditorFrameView,
+              let container = textEditorContainer
+        else {
+            preconditionFailure("Viewport persistence regression lost its document geometry.")
+        }
+        let initialViewportWidthInView = container.bounds.width
+        let initialFieldFrame = frameView.fieldFrame(in: self)
+        bounds = CGRect(
+            origin: originalBounds.origin,
+            size: CGSize(
+                width: originalBounds.width * 0.8,
+                height: originalBounds.height * 0.8
+            )
+        )
+        updateTextEditorFrame(scrollsToInsertionPoint: true)
+        precondition(
+            abs(
+                (textEditorPreferredViewportWidthInDocument ?? .infinity)
+                    - stableViewportWidthInDocument
+            ) < 0.001
+                && textEditorFieldPlacementAnchorInDocument
+                    == stableFieldPlacementAnchorInDocument,
+            "Canvas resizing must preserve the user-owned field geometry in document space."
+        )
+        bounds = originalBounds
+        updateTextEditorFrame(scrollsToInsertionPoint: true)
+        precondition(
+            abs(container.bounds.width - initialViewportWidthInView) < 0.01
+                && maxFrameDelta(
+                    frameView.fieldFrame(in: self),
+                    initialFieldFrame
+                ) < 0.01
+                && textEditorFieldPlacementAnchorInDocument
+                    == stableFieldPlacementAnchorInDocument,
+            "Restoring canvas bounds must restore the explicit text field geometry."
+        )
+    }
+
+    @discardableResult
+    private func runActiveTextResizeRegression(
+        handle: InlineAnnotationTextResizeHandle,
+        pointerDelta: CGPoint,
+        steps: Int,
+        eventNumberBase: Int
+    ) -> CGFloat {
+        guard steps > 1,
+              let window,
+              let editor = textEditor,
+              let frameView = textEditorFrameView,
+              let initialState = textEditingState,
+              let initialCanonicalWrapWidth = textEditorCanonicalWrapWidthInDocument,
+              initialState.itemID != nil
+        else {
+            preconditionFailure("Active text resize regression requires existing inline text in a window.")
+        }
+        let initialText = editor.string
+        let initialSelection = editor.selectedRange()
+        let initialFieldFrame = frameView.fieldFrame(in: self)
+        let initialLayoutPlan = AnnotationTextLayout.layoutPlan(
+            in: editor.string,
+            style: initialState.style,
+            wrapWidth: initialCanonicalWrapWidth
+        )
+        let initialFieldAnchor = textFieldAlignmentAnchor(
+            for: initialFieldFrame,
+            font: requiredTextEditorFontForRegression(initialState),
+            alignment: initialState.style.textAlignment,
+            lineCount: initialLayoutPlan.lineCount,
+            layoutPlan: initialLayoutPlan,
+            layoutPayload: textEditorLayoutPayload,
+            state: initialState
+        )
+        let initialContentAnchor = textEditorAlignmentAnchor(
+            for: initialState,
+            text: editor.string,
+            layout: textEditorLayoutPayload
+        )
+        let initialContentToFieldResidual = documentOffset(
+            fromViewOffset: CGSize(
+                width: initialContentAnchor.x - initialFieldAnchor.x,
+                height: initialContentAnchor.y - initialFieldAnchor.y
+            )
+        )
+        let activeCornerInView = textFramePoint(handle: handle, in: initialFieldFrame)
+        let fixedCornerInView = textFramePoint(
+            corner: handle.fixedCorner,
+            in: initialFieldFrame
+        )
+        let startInWindow = convert(activeCornerInView, to: nil)
+        let timestamp = ProcessInfo.processInfo.systemUptime
+
+        func pointerEvent(
+            type: NSEvent.EventType,
+            location: CGPoint,
+            step: Int,
+            pressure: Float
+        ) -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: location,
+                modifierFlags: [],
+                timestamp: timestamp + Double(step) / 120,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: eventNumberBase + step,
+                clickCount: 1,
+                pressure: pressure
+            ) else {
+                preconditionFailure("Active text resize regression could not synthesize event \(step).")
+            }
+            return event
+        }
+
+        beginTextResize(
+            handle: handle,
+            event: pointerEvent(
+                type: .leftMouseDown,
+                location: startInWindow,
+                step: 0,
+                pressure: 1
+            )
+        )
+        updateTextResize(
+            handle: handle,
+            event: pointerEvent(
+                type: .leftMouseDragged,
+                location: startInWindow,
+                step: 1,
+                pressure: 1
+            )
+        )
+        precondition(
+            maxFrameDelta(initialFieldFrame, frameView.fieldFrame(in: self)) < 0.001,
+            "Pressing an active text resize handle without movement must not change its frame."
+        )
+
+        for step in 1...steps {
+            let progress = CGFloat(step) / CGFloat(steps)
+            let location = CGPoint(
+                x: startInWindow.x + pointerDelta.x * progress,
+                y: startInWindow.y + pointerDelta.y * progress
+            )
+            updateTextResize(
+                handle: handle,
+                event: pointerEvent(
+                    type: .leftMouseDragged,
+                    location: location,
+                    step: step + 1,
+                    pressure: 1
+                )
+            )
+            let currentFixedCorner = frameView.fieldPoint(
+                corner: handle.fixedCorner,
+                in: self
+            )
+            precondition(
+                hypot(
+                    currentFixedCorner.x - fixedCornerInView.x,
+                    currentFixedCorner.y - fixedCornerInView.y
+                ) < 0.01,
+                "Active text resize moved its fixed corner during frame \(step) for \(handle.rawValue)."
+            )
+            guard let currentState = textEditingState,
+                  let currentCanonicalWrapWidth = textEditorCanonicalWrapWidthInDocument
+            else {
+                preconditionFailure(
+                    "Active text resize lost its canonical state during frame \(step)."
+                )
+            }
+            let currentLayoutPlan = AnnotationTextLayout.layoutPlan(
+                in: editor.string,
+                style: currentState.style,
+                wrapWidth: currentCanonicalWrapWidth
+            )
+            let currentFieldAnchor = textFieldAlignmentAnchor(
+                for: frameView.fieldFrame(in: self),
+                font: requiredTextEditorFontForRegression(currentState),
+                alignment: currentState.style.textAlignment,
+                lineCount: currentLayoutPlan.lineCount,
+                layoutPlan: currentLayoutPlan,
+                layoutPayload: textEditorLayoutPayload,
+                state: currentState
+            )
+            let currentContentAnchor = textEditorAlignmentAnchor(
+                for: currentState,
+                text: editor.string,
+                layout: textEditorLayoutPayload
+            )
+            let currentContentToFieldResidual = documentOffset(
+                fromViewOffset: CGSize(
+                    width: currentContentAnchor.x - currentFieldAnchor.x,
+                    height: currentContentAnchor.y - currentFieldAnchor.y
+                )
+            )
+            precondition(
+                hypot(
+                    currentContentToFieldResidual.width
+                        - initialContentToFieldResidual.width,
+                    currentContentToFieldResidual.height
+                        - initialContentToFieldResidual.height
+                ) < 0.01,
+                "Active text resize changed its content-to-field relationship during frame \(step) for \(handle.rawValue)."
+            )
+            precondition(
+                window.firstResponder === editor
+                    && editor.string == initialText
+                    && editor.selectedRange() == initialSelection,
+                "Active text resize changed focus, text, or selection during frame \(step)."
+            )
+            precondition(
+                abs(textEditorBaselineError?.y ?? .infinity) < 0.01,
+                "Active text resize left a vertical baseline error during frame \(step)."
+            )
+            if let presentation = textEditorPresentationLayout,
+               let documentView = textEditorDocumentView,
+               abs(documentView.frame.minX - presentation.documentBaseOrigin.x) < 0.01
+            {
+                precondition(
+                    abs(textEditorBaselineError?.x ?? .infinity) < 0.01,
+                    "Unscrolled active text resize left a horizontal baseline error during frame \(step)."
+                )
+            }
+            if let insertionX = textEditorInsertionX(editor),
+               let documentView = textEditorDocumentView,
+               let container = textEditorContainer
+            {
+                let visibleInsertionX = documentView.frame.minX + insertionX
+                let insertionInset = textEditorChromeInsetsInView(
+                    for: currentState
+                ).width
+                precondition(
+                    visibleInsertionX
+                        >= insertionInset - 0.5
+                        && visibleInsertionX
+                            <= container.bounds.maxX
+                                - insertionInset + 0.5,
+                    "Active text resize moved the insertion point outside the viewport during frame \(step): visibleX=\(visibleInsertionX), viewport=\(container.bounds), document=\(documentView.frame), font=\(textEditingState?.style.fontSize ?? -1)."
+                )
+            }
+        }
+        let endInWindow = CGPoint(
+            x: startInWindow.x + pointerDelta.x,
+            y: startInWindow.y + pointerDelta.y
+        )
+        endTextResize(
+            handle: handle,
+            event: pointerEvent(
+                type: .leftMouseUp,
+                location: endInWindow,
+                step: steps + 2,
+                pressure: 0
+            )
+        )
+        guard let finalState = textEditingState else {
+            preconditionFailure("Active text resize regression lost the editing state.")
+        }
+        precondition(
+            textResizeInteraction == nil
+                && window.firstResponder === editor
+                && editor.string == initialText
+                && editor.selectedRange() == initialSelection,
+            "Ending active text resize must preserve the inline editing session."
+        )
+        precondition(
+            abs(finalState.style.fontSize - initialState.style.fontSize) > 0.05,
+            "Active text resize regression must change the font size for \(handle.rawValue)."
+        )
+        return finalState.style.fontSize
+    }
+
+    func prepareInlineTextResizeUITest() {
+        layoutSubtreeIfNeeded()
+        precondition(bounds.width > 0 && bounds.height > 0, "Inline text resize UI testing requires a laid-out canvas.")
+        session.currentTool = .text
+        beginTextEditing(at: documentPoint(fromViewPoint: CGPoint(
+            x: bounds.width * 0.18,
+            y: bounds.height * 0.52
+        )))
+        guard let editor = textEditor else {
+            preconditionFailure("Inline text resize UI testing could not start the editor.")
+        }
+        editor.insertText(
+            "Resize 中文混排",
+            replacementRange: NSRange(location: 0, length: editor.string.utf16.count)
+        )
+        updateTextEditorLayout(scrollsToInsertionPoint: true)
+        updateAccessibilitySummary(
+            document: session.controller.document,
+            captured: session.previewImage
+        )
+        AppLog.capture.notice("Prepared active inline text editor for resize UI testing")
+    }
+
+    private func textEditorGeometryDescription(_ editor: NSTextView) -> String {
+        guard let frameView = textEditorFrameView,
+              let container = textEditorContainer,
+              let documentView = textEditorDocumentView
+        else { return "missing" }
+        return "canvasBounds=\(bounds), canvasFrame=\(frame), field=\(frameView.frame), viewport=\(container.frame), viewportBounds=\(container.bounds), documentFrame=\(documentView.frame), documentBounds=\(documentView.bounds), editorDocumentFrame=\(editor.frame), textContainerOrigin=\(editor.textContainerOrigin), windowFrame=\(window?.frame ?? .zero)"
+    }
+
+    private func textEditorLineSnapshotsInView(
+        _ editor: NSTextView
+    ) -> [InlineTextEditorLineSnapshot] {
+        guard let textContainer = editor.textContainer,
+              let layoutManager = editor.layoutManager
+        else {
+            preconditionFailure("Inline text line inspection requires its TextKit stack.")
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        let nsText = editor.string as NSString
+        let glyphRange = layoutManager.glyphRange(for: textContainer)
+        var snapshots: [InlineTextEditorLineSnapshot] = []
+        layoutManager.enumerateLineFragments(
+            forGlyphRange: glyphRange
+        ) { lineFragmentRect, usedRect, _, lineGlyphRange, _ in
+            let consumedRange = layoutManager.characterRange(
+                forGlyphRange: lineGlyphRange,
+                actualGlyphRange: nil
+            )
+            var drawableRange = consumedRange
+            while drawableRange.length > 0 {
+                let finalUTF16Unit = nsText.character(at: NSMaxRange(drawableRange) - 1)
+                guard self.isInlineTextHardBreakUTF16Unit(finalUTF16Unit) else {
+                    break
+                }
+                drawableRange.length -= 1
+            }
+            let baselineLocation = lineGlyphRange.length > 0
+                ? layoutManager.location(forGlyphAt: lineGlyphRange.location)
+                : usedRect.origin
+            snapshots.append(InlineTextEditorLineSnapshot(
+                utf16Range: drawableRange,
+                consumedUTF16Range: consumedRange,
+                originInView: editor.convert(
+                    CGPoint(
+                        // Match the canonical plan's visual line origin. The
+                        // first logical glyph can live at the opposite edge of
+                        // an RTL or mixed-direction fragment.
+                        x: editor.textContainerOrigin.x + usedRect.minX,
+                        y: editor.textContainerOrigin.y
+                            + lineFragmentRect.minY
+                            + baselineLocation.y
+                    ),
+                    to: self
+                )
+            ))
+        }
+        let terminatesWithHardBreak = nsText.length > 0
+            && isInlineTextHardBreakUTF16Unit(
+                nsText.character(at: nsText.length - 1)
+            )
+        if editor.string.isEmpty || terminatesWithHardBreak {
+            guard let stableBaselineOffset = textEditorSessionBaselineOffset else {
+                preconditionFailure(
+                    "Inline text extra-line inspection requires a canonical baseline offset."
+                )
+            }
+            let emptyRange = NSRange(location: nsText.length, length: 0)
+            snapshots.append(InlineTextEditorLineSnapshot(
+                utf16Range: emptyRange,
+                consumedUTF16Range: emptyRange,
+                originInView: editor.convert(
+                    CGPoint(
+                        x: editor.textContainerOrigin.x
+                            + layoutManager.extraLineFragmentUsedRect.minX,
+                        y: editor.textContainerOrigin.y
+                            + layoutManager.extraLineFragmentRect.minY
+                            + stableBaselineOffset
+                    ),
+                    to: self
+                )
+            ))
+        }
+        return snapshots
+    }
+
+    private func assertTextEditorLinesMatchRenderer(
+        _ editor: NSTextView,
+        state: TextEditingState,
+        layout: AnnotationTextLayoutPayload?,
+        canonicalHorizontalOffset: CGFloat = 0,
+        context: String
+    ) {
+        let editorLines = textEditorLineSnapshotsInView(editor)
+        let renderedLines = renderedTextLineSnapshotsInView(
+            state: state,
+            text: editor.string,
+            layout: layout
+        )
+        precondition(
+            editorLines.count == renderedLines.count,
+            "Inline text line count diverged from the canonical renderer during \(context): editor=\(editorLines.count), renderer=\(renderedLines.count)."
+        )
+        for (index, pair) in zip(editorLines, renderedLines).enumerated() {
+            let (editorLine, renderedLine) = pair
+            precondition(
+                NSEqualRanges(editorLine.utf16Range, renderedLine.utf16Range)
+                    && NSEqualRanges(
+                        editorLine.consumedUTF16Range,
+                        renderedLine.consumedUTF16Range
+                    ),
+                "Inline text line \(index) range diverged from the canonical renderer during \(context): editor=\(editorLine.utf16Range)/\(editorLine.consumedUTF16Range), renderer=\(renderedLine.utf16Range)/\(renderedLine.consumedUTF16Range)."
+            )
+            precondition(
+                hypot(
+                    editorLine.originInView.x
+                        + canonicalHorizontalOffset
+                        - renderedLine.originInView.x,
+                    editorLine.originInView.y - renderedLine.originInView.y
+                ) < 0.01,
+                "Inline text line \(index) origin diverged from the canonical renderer during \(context): editor=\(editorLine.originInView), renderer=\(renderedLine.originInView)."
+            )
+        }
+    }
+}
+#endif

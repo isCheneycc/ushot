@@ -55,7 +55,6 @@ final class AnnotationEditingSession: ObservableObject {
     private var interactiveRenderGeneration = 0
     private var authoritativeRenderTask: Task<CapturedImage, Error>?
     private var authoritativeRenderedDocument: AnnotationDocument?
-    private var reportedRenderFailures: Set<String> = []
     private var historyRecorder: HistorySessionRecorder?
     private var previewExcludedAnnotationIDs: Set<UUID> = []
     /// Configured logical region corner radius for this session, when the session
@@ -64,8 +63,6 @@ final class AnnotationEditingSession: ObservableObject {
 
     /// Configured logical region corner radius for region drafts; `nil` otherwise.
     var configuredRegionCornerRadius: CGFloat? { storedConfiguredRegionCornerRadius }
-
-    var isShowingTransientPreview: Bool { !previewExcludedAnnotationIDs.isEmpty }
 
     init(
         capturedImage: CapturedImage,
@@ -138,26 +135,24 @@ final class AnnotationEditingSession: ObservableObject {
         }
     }
 
-    func scheduleRender(document: AnnotationDocument? = nil) {
-        let sourceDocument = document ?? controller.document
+    private func scheduleRender(document sourceDocument: AnnotationDocument) {
         authoritativeRenderGeneration += 1
         let generation = authoritativeRenderGeneration
         let updateSensitiveActivityTracker = updateSensitiveActivityTracker
         let lease = updateSensitiveActivityTracker.begin(
             operation: "authoritative-annotation-render"
         )
-        let task = makeRenderTask(document: sourceDocument)
-        authoritativeRenderTask = task
-        scheduleInteractivePreview(document: sourceDocument)
-
-        Task { [weak self, task] in
+        let renderTask = makeRenderTask(document: sourceDocument)
+        // Every output waiter shares this publication boundary. Receiving the
+        // same pixels must not publish another history snapshot or debounce.
+        authoritativeRenderTask = Task { [weak self, renderTask] in
             defer { updateSensitiveActivityTracker.finish(lease) }
             do {
-                let rendered = try await task.value
+                let rendered = try await renderTask.value
                 guard let self,
                       generation == self.authoritativeRenderGeneration,
                       sourceDocument == self.controller.document
-                else { return }
+                else { return rendered }
                 self.acceptSuccessfulAuthoritativeRender(
                     rendered,
                     document: sourceDocument
@@ -165,11 +160,15 @@ final class AnnotationEditingSession: ObservableObject {
                 AppLog.export.debug(
                     "Rendered authoritative annotation generation \(generation, privacy: .public): annotations=\(sourceDocument.annotations.count, privacy: .public), pixels=\(rendered.image.width, privacy: .public)x\(rendered.image.height, privacy: .public), scale=\(rendered.scale, privacy: .public)x"
                 )
+                return rendered
             } catch {
-                guard let self, generation == self.authoritativeRenderGeneration else { return }
-                self.reportRenderFailure(error, key: "authoritative-\(generation)")
+                if let self, generation == self.authoritativeRenderGeneration {
+                    self.reportRenderFailure(error, key: "authoritative-\(generation)")
+                }
+                throw error
             }
         }
+        scheduleInteractivePreview(document: sourceDocument)
     }
 
     func resolvedPreviewImage() async throws -> CapturedImage {
@@ -188,11 +187,9 @@ final class AnnotationEditingSession: ObservableObject {
                 guard generation == authoritativeRenderGeneration,
                       document == controller.document
                 else { continue }
-                acceptSuccessfulAuthoritativeRender(rendered, document: document)
                 return rendered
             } catch {
                 guard generation == authoritativeRenderGeneration else { continue }
-                reportRenderFailure(error, key: "authoritative-\(generation)")
                 throw error
             }
         }
@@ -362,7 +359,34 @@ final class AnnotationEditingSession: ObservableObject {
     }
 
     func attachHistoryRecorder(_ recorder: HistorySessionRecorder) {
+        precondition(historyRecorder == nil, "An annotation session must have one history persistence owner.")
         historyRecorder = recorder
+    }
+
+    var hasHistoryRecorder: Bool { historyRecorder != nil }
+    var isHistoryRecordingAuthorized: Bool { historyRecorder?.isAuthorized == true }
+
+    /// The presentation owner freezes input before awaiting this barrier and
+    /// keeps the session alive until it succeeds. A failed save is retryable.
+    func flushHistory() async throws {
+        guard let historyRecorder else { return }
+        let lease = updateSensitiveActivityTracker.begin(operation: "history-session-flush")
+        defer { updateSensitiveActivityTracker.finish(lease) }
+        while historyRecorder.canPersist {
+            do {
+                _ = try await resolvedPreviewImage()
+            } catch {
+                guard !historyRecorder.isAuthorized else { throw error }
+                // A successful delete may revoke this obligation while the
+                // renderer is suspended. Closing must not renew that writer.
+                try await historyRecorder.flush(snapshot: nil)
+                return
+            }
+            let document = controller.document
+            try await historyRecorder.flush(snapshot: historyPreviewSnapshot)
+            if document == controller.document { return }
+        }
+        try await historyRecorder.flush(snapshot: nil)
     }
 
     func replaceBaseImage(
@@ -513,7 +537,6 @@ final class AnnotationEditingSession: ObservableObject {
     }
 
     private func reportRenderFailure(_ error: Error, key: String) {
-        guard reportedRenderFailures.insert(key).inserted else { return }
         AppLog.export.error(
             "Annotation render \(key, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
         )
@@ -551,4 +574,95 @@ final class AnnotationEditingSession: ObservableObject {
         return tool == .highlight ? style.asHighlightStyle() : style
     }
 
+}
+
+/// Document identity is shared by History, pinned surfaces and Canvas windows.
+/// Weak entries discover existing presentation owners without keeping closed
+/// screenshots alive; an in-flight History open is retained and deduplicated.
+@MainActor
+final class AnnotationSessionRegistry {
+    private final class Entry {
+        weak var session: AnnotationEditingSession?
+
+        init(_ session: AnnotationEditingSession) {
+            self.session = session
+        }
+    }
+
+    private var entries: [UUID: Entry] = [:]
+    private var pendingOpens: [UUID: Task<AnnotationEditingSession, Error>] = [:]
+
+    func session(for documentID: UUID) -> AnnotationEditingSession? {
+        guard let entry = entries[documentID] else { return nil }
+        guard let session = entry.session else {
+            entries[documentID] = nil
+            return nil
+        }
+        return session
+    }
+
+    @discardableResult
+    func register(_ candidate: AnnotationEditingSession) -> AnnotationEditingSession {
+        let documentID = candidate.controller.document.id
+        if let existing = session(for: documentID) {
+            return existing
+        }
+        entries[documentID] = Entry(candidate)
+        return candidate
+    }
+
+    /// Take the authorization and reserve the document synchronously at the
+    /// command boundary, before any load, render or recorder can be scheduled.
+    func openHistory(
+        id: UUID,
+        store: any ScreenshotHistoryStoring,
+        settingsStore: SettingsStore,
+        updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
+        onError: ((Error) -> Void)? = nil
+    ) -> Task<AnnotationEditingSession, Error> {
+        if let pending = pendingOpens[id] { return pending }
+        if let existing = session(for: id), existing.isHistoryRecordingAuthorized {
+            return Task { existing }
+        }
+        let authorization = store.writeAuthority.authorization(for: id)
+        let task = Task { @MainActor [self] in
+            defer { pendingOpens[id] = nil }
+            do {
+                let record = try await store.load(id: id)
+                guard store.writeAuthority.isCurrent(authorization) else {
+                    throw HistoryWriteAuthorizationError.revoked
+                }
+                let candidate = session(for: id) ?? AnnotationEditingSession(
+                    capturedImage: record.baseImage,
+                    previewImage: record.previewImage,
+                    document: record.document,
+                    editorSettings: settingsStore.settings.editor,
+                    updateSensitiveActivityTracker: updateSensitiveActivityTracker
+                )
+                _ = try await candidate.resolvedPreviewImage()
+                guard store.writeAuthority.isCurrent(authorization) else {
+                    throw HistoryWriteAuthorizationError.revoked
+                }
+                let canonical = register(candidate)
+                if !canonical.hasHistoryRecorder {
+                    canonical.attachHistoryRecorder(HistorySessionRecorder(
+                        session: canonical,
+                        store: store,
+                        settingsStore: settingsStore,
+                        updateSensitiveActivityTracker: updateSensitiveActivityTracker,
+                        authorization: authorization,
+                        onError: onError
+                    ))
+                }
+                return canonical
+            } catch {
+                guard store.writeAuthority.isCurrent(authorization) else {
+                    throw HistoryWriteAuthorizationError.revoked
+                }
+                throw error
+            }
+        }
+        pendingOpens[id] = task
+        return task
+    }
 }
