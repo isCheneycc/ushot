@@ -14,6 +14,8 @@ public struct CaptureRequest: Sendable {
     public var showsCursor: Bool
     public var includesWindowShadow: Bool
     public var excludesOwnApplication: Bool
+    /// Committed image windows that remain capturable when the host app is excluded.
+    public var includedOwnWindowIDs: Set<CGWindowID>
     public var targetDisplayID: CGDirectDisplayID?
     public var targetWindowID: CGWindowID?
     public var region: CGRect?
@@ -23,6 +25,7 @@ public struct CaptureRequest: Sendable {
         showsCursor: Bool = false,
         includesWindowShadow: Bool = true,
         excludesOwnApplication: Bool = true,
+        includedOwnWindowIDs: Set<CGWindowID> = [],
         targetDisplayID: CGDirectDisplayID? = nil,
         targetWindowID: CGWindowID? = nil,
         region: CGRect? = nil
@@ -31,6 +34,7 @@ public struct CaptureRequest: Sendable {
         self.showsCursor = showsCursor
         self.includesWindowShadow = includesWindowShadow
         self.excludesOwnApplication = excludesOwnApplication
+        self.includedOwnWindowIDs = includedOwnWindowIDs
         self.targetDisplayID = targetDisplayID
         self.targetWindowID = targetWindowID
         self.region = region
@@ -123,6 +127,8 @@ public struct WindowDescriptor: Identifiable, Equatable, Sendable {
     public let frame: CGRect
     public let layer: Int
     public let processID: pid_t?
+    /// Set only for a host-owned image admitted by the current capture request.
+    public let isPinnedImage: Bool
 
     public init(
         id: CGWindowID,
@@ -130,7 +136,8 @@ public struct WindowDescriptor: Identifiable, Equatable, Sendable {
         applicationName: String,
         frame: CGRect,
         layer: Int,
-        processID: pid_t? = nil
+        processID: pid_t? = nil,
+        isPinnedImage: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -138,6 +145,7 @@ public struct WindowDescriptor: Identifiable, Equatable, Sendable {
         self.frame = frame
         self.layer = layer
         self.processID = processID
+        self.isPinnedImage = isPinnedImage
     }
 }
 
@@ -204,7 +212,7 @@ public enum CaptureResult: @unchecked Sendable {
 
 @MainActor
 public protocol ScreenCapturing: AnyObject {
-    func discoverTargets() async throws -> CaptureTargets
+    func discoverTargets(includingOwnWindowIDs: Set<CGWindowID>) async throws -> CaptureTargets
     func capture(_ request: CaptureRequest) async throws -> CaptureResult
     func prepareRegionCapture(_ request: CaptureRequest) async throws -> RegionCapturePreparation
     func cropRegion(

@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-09-09
+
+### Added
+
+- Add P as a quick Pin shortcut after selecting a region, preserving the latest annotations and normal text-field input.
+- Add a persistent Freeze screen while picking colors switch under Settings → Color Picker, allowing live sampling when disabled.
+
+### Changed
+
+- Keep pinned screenshots visible and selectable during later captures so their images can be captured again.
+- Freeze all displays by default when Color Picker starts so the visible screen, magnifier and copied color share the same pixels.
+
+### Fixed
+
+- Cancel frozen color picking when the display configuration changes and ignore late sampling results after cancellation.
+
+## [0.1.13] - 2026-09-05
+
+### Changed
+
+- Save final edits before closing an editor or pinned image, or quitting Ushot, when history is enabled; keep content available for retry if saving fails.
+- Require active capture, editing or output work to finish before a language change or settings reset can restart Ushot.
+
+### Fixed
+
+- Keep ongoing edits synchronized when reopening the same history screenshot, preventing newer changes from being overwritten.
+- Prevent pending autosaves from recreating deleted or cleared history items.
+- Fix misplaced or ineffective Blur and Mosaic effects after resizing a capture region, and refresh affected previews when reopening history screenshots.
+- Prevent smart-snap selection from unexpectedly entering confirmation after cancellation with Esc.
+
+### Removed
+
+- Remove the inactive log-level option from Advanced settings.
+
 ## [0.1.12] - 2026-08-27
 
 ### Changed
@@ -174,7 +208,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Limited the manual Gatekeeper workaround to removing `com.apple.quarantine` from an official Ushot release instead of clearing every extended attribute.
 - Defined the Sparkle EdDSA private key as release-critical secret material requiring protected storage, an independent encrypted backup and an exercised recovery process.
 
-[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/isCheneycc/ushot/compare/v0.1.14...HEAD
+[0.1.14]: https://github.com/isCheneycc/ushot/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/isCheneycc/ushot/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/isCheneycc/ushot/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/isCheneycc/ushot/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/isCheneycc/ushot/compare/v0.1.9...v0.1.10

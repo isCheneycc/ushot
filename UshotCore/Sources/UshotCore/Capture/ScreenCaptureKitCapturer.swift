@@ -14,14 +14,15 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         self.processIdentifier = processIdentifier
     }
 
-    public func discoverTargets() async throws -> CaptureTargets {
+    public func discoverTargets(includingOwnWindowIDs: Set<CGWindowID> = []) async throws -> CaptureTargets {
         let content = try await loadShareableContent()
         let transformer = desktopTransformer()
         let currentDisplayID = currentMouseDisplayID()
         return try makeTargets(
             content: content,
             transformer: transformer,
-            currentDisplayID: currentDisplayID
+            currentDisplayID: currentDisplayID,
+            includedOwnWindowIDs: includingOwnWindowIDs
         )
     }
 
@@ -51,7 +52,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         let targets = try makeTargets(
             content: content,
             transformer: transformer,
-            currentDisplayID: currentMouseDisplayID()
+            currentDisplayID: currentMouseDisplayID(),
+            includedOwnWindowIDs: request.includedOwnWindowIDs
         )
         guard !targets.displays.isEmpty else {
             throw ScreenshotAppError.noDisplayAvailable
@@ -139,11 +141,12 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
             throw ScreenshotAppError.contentUnavailable
         }
+        let isPinnedImage = isIncludedOwnWindow(window, windowIDs: request.includedOwnWindowIDs)
         guard
             window.isOnScreen,
-            window.frame.width >= 40,
-            window.frame.height >= 40,
-            !request.excludesOwnApplication || window.owningApplication?.processID != processIdentifier
+            window.frame.width >= (isPinnedImage ? 1 : 40),
+            window.frame.height >= (isPinnedImage ? 1 : 40),
+            !request.excludesOwnApplication || window.owningApplication?.processID != processIdentifier || isPinnedImage
         else {
             throw ScreenshotAppError.noWindowAvailable
         }
@@ -155,7 +158,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
             applicationName: window.owningApplication?.applicationName ?? "Unknown Application",
             frame: transformer.appKitRect(fromScreenCaptureRect: window.frame),
             layer: window.windowLayer,
-            processID: window.owningApplication?.processID
+            processID: window.owningApplication?.processID,
+            isPinnedImage: isPinnedImage
         )
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let scale = CGFloat(filter.pointPixelScale)
@@ -785,7 +789,9 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         let filter = SCContentFilter(
             display: display,
             excludingApplications: excludedApplications,
-            exceptingWindows: []
+            exceptingWindows: request.excludesOwnApplication
+                ? content.windows.filter { isIncludedOwnWindow($0, windowIDs: request.includedOwnWindowIDs) }
+                : []
         )
         if #available(macOS 14.2, *) {
             filter.includeMenuBar = true
@@ -845,7 +851,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
     private func makeTargets(
         content: SCShareableContent,
         transformer: CoordinateTransformer,
-        currentDisplayID: CGDirectDisplayID?
+        currentDisplayID: CGDirectDisplayID?,
+        includedOwnWindowIDs: Set<CGWindowID> = []
     ) throws -> CaptureTargets {
         let screenNames: [CGDirectDisplayID: String] = Dictionary(
             uniqueKeysWithValues: NSScreen.screens.compactMap { screen in
@@ -880,9 +887,10 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         var rejectedOwnApplicationCount = 0
         windows.reserveCapacity(content.windows.count)
         for window in content.windows {
+            let isPinnedImage = isIncludedOwnWindow(window, windowIDs: includedOwnWindowIDs)
             guard window.isOnScreen,
-                  window.frame.width >= 40,
-                  window.frame.height >= 40
+                  window.frame.width >= (isPinnedImage ? 1 : 40),
+                  window.frame.height >= (isPinnedImage ? 1 : 40)
             else {
                 rejectedGeometryCount += 1
                 continue
@@ -890,7 +898,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
             // Layer zero is the normal application-window plane. Menu-bar,
             // Dock, desktop and WindowServer surfaces can cover an entire
             // display and must never outrank the app windows beneath them.
-            guard window.windowLayer == 0 else {
+            // Registered pinned images are selectable in their floating layer.
+            guard window.windowLayer == 0 || isPinnedImage else {
                 rejectedLayerCount += 1
                 continue
             }
@@ -898,7 +907,7 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
                 rejectedOwnerCount += 1
                 continue
             }
-            guard application.processID != processIdentifier else {
+            guard application.processID != processIdentifier || isPinnedImage else {
                 rejectedOwnApplicationCount += 1
                 continue
             }
@@ -909,13 +918,18 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
                 applicationName: application.applicationName,
                 frame: transformer.appKitRect(fromScreenCaptureRect: window.frame),
                 layer: window.windowLayer,
-                processID: application.processID
+                processID: application.processID,
+                isPinnedImage: isPinnedImage
             ))
         }
         AppLog.capture.notice(
             "Discovered selectable app windows: source=\(content.windows.count, privacy: .public), accepted=\(windows.count, privacy: .public), rejectedGeometry=\(rejectedGeometryCount, privacy: .public), rejectedLayer=\(rejectedLayerCount, privacy: .public), rejectedMissingOwner=\(rejectedOwnerCount, privacy: .public), rejectedOwnApp=\(rejectedOwnApplicationCount, privacy: .public)"
         )
         return CaptureTargets(displays: displays, windows: windows)
+    }
+
+    private func isIncludedOwnWindow(_ window: SCWindow, windowIDs: Set<CGWindowID>) -> Bool {
+        window.owningApplication?.processID == processIdentifier && windowIDs.contains(window.windowID)
     }
 
     private func desktopTransformer() -> CoordinateTransformer {

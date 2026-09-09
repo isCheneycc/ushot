@@ -2,7 +2,7 @@ import Foundation
 import UniformTypeIdentifiers
 
 public struct AppSettings: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 11
+    public static let currentSchemaVersion = 12
 
     public var schemaVersion: Int
     public var general: GeneralSettings
@@ -58,7 +58,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
             from: container.superDecoder(forKey: .editor),
             allowsLegacyColorPalette: schemaVersion <= 8
         )
-        colorPicker = try container.decode(ColorPickerSettings.self, forKey: .colorPicker)
+        colorPicker = try ColorPickerSettings(
+            from: container.superDecoder(forKey: .colorPicker),
+            allowsMissingFreezePreference: schemaVersion <= 11
+        )
         shortcuts = try container.decode(ShortcutSettings.self, forKey: .shortcuts)
         history = try container.decode(HistorySettings.self, forKey: .history)
         advanced = try container.decode(AdvancedSettings.self, forKey: .advanced)
@@ -733,8 +736,40 @@ public enum ColorCopyFormat: String, Codable, CaseIterable, Sendable {
 public struct ColorPickerSettings: Codable, Equatable, Sendable {
     public var colorSpace: ColorSpacePreference = .sRGB
     public var copyFormat: ColorCopyFormat = .hex
+    public var freezesScreen = true
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case colorSpace
+        case copyFormat
+        case freezesScreen
+    }
+
+    public init(from decoder: Decoder) throws {
+        try self.init(from: decoder, allowsMissingFreezePreference: false)
+    }
+
+    fileprivate init(
+        from decoder: Decoder,
+        allowsMissingFreezePreference: Bool
+    ) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        colorSpace = try container.decode(ColorSpacePreference.self, forKey: .colorSpace)
+        copyFormat = try container.decode(ColorCopyFormat.self, forKey: .copyFormat)
+        if allowsMissingFreezePreference, !container.contains(.freezesScreen) {
+            freezesScreen = true
+        } else {
+            freezesScreen = try container.decode(Bool.self, forKey: .freezesScreen)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(colorSpace, forKey: .colorSpace)
+        try container.encode(copyFormat, forKey: .copyFormat)
+        try container.encode(freezesScreen, forKey: .freezesScreen)
+    }
 }
 
 public struct HistorySettings: Codable, Equatable, Sendable {

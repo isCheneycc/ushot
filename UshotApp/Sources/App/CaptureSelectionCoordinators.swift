@@ -698,6 +698,11 @@ final class RegionSelectionCoordinator {
             )
         }
 
+        if window.isPinnedImage {
+            pendingElementResolution = nil
+            return
+        }
+
         pendingElementResolution = ElementResolutionRequest(
             point: point,
             window: window,

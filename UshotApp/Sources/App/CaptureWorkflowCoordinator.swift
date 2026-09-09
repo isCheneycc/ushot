@@ -11,6 +11,7 @@ final class CaptureWorkflowCoordinator {
     private let capturer: any ScreenCapturing
     private let permissionChecker: any CapturePermissionChecking
     private let settingsStore: SettingsStore
+    private let pinnedShotManager: PinnedShotManager
     private let stateMachine: CaptureStateMachine
     private let displaySelector: DisplaySelectionCoordinator
     private let windowSelector: WindowSelectionCoordinator
@@ -26,6 +27,7 @@ final class CaptureWorkflowCoordinator {
         self.capturer = capturer
         self.permissionChecker = permissionChecker
         self.settingsStore = settingsStore
+        self.pinnedShotManager = pinnedShotManager
         self.stateMachine = stateMachine
         self.displaySelector = DisplaySelectionCoordinator()
         self.windowSelector = WindowSelectionCoordinator()
@@ -76,7 +78,11 @@ final class CaptureWorkflowCoordinator {
                 mode: mode,
                 showsCursor: captureSettings.capturesCursor,
                 includesWindowShadow: captureSettings.includesWindowShadow,
-                excludesOwnApplication: true
+                excludesOwnApplication: true,
+                includedOwnWindowIDs: pinnedShotManager.captureWindowIDs
+            )
+            AppLog.capture.notice(
+                "Capture sources prepared: includedPinnedImages=\(request.includedOwnWindowIDs.count, privacy: .public)"
             )
             let result: CaptureResult
 
@@ -86,14 +92,14 @@ final class CaptureWorkflowCoordinator {
                 result = try await capturer.capture(request)
 
             case .selectedDisplay:
-                let targets = try await capturer.discoverTargets()
+                let targets = try await capturer.discoverTargets(includingOwnWindowIDs: request.includedOwnWindowIDs)
                 try await stateMachine.contentPrepared(requiresSelection: true)
                 request.targetDisplayID = try await displaySelector.select(from: targets.displays)
                 try await stateMachine.selectionCompleted()
                 result = try await capturer.capture(request)
 
             case .window:
-                let targets = try await capturer.discoverTargets()
+                let targets = try await capturer.discoverTargets(includingOwnWindowIDs: request.includedOwnWindowIDs)
                 try await stateMachine.contentPrepared(requiresSelection: true)
                 request.targetWindowID = try await windowSelector.select(from: targets.windows)
                 try await stateMachine.selectionCompleted()
