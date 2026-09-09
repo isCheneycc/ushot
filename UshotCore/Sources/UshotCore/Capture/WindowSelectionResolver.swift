@@ -9,11 +9,11 @@ public struct WindowSelectionResolver: Sendable {
         candidates: [WindowDescriptor]
     ) -> WindowDescriptor? {
         candidates.first { candidate in
-            // Only normal application windows are selectable. Higher layers
-            // include the menu bar and Dock; allowing them here made a
+            // Normal application windows and registered pinned images are
+            // selectable. Other layers include the menu bar and Dock; allowing them made a
             // display-sized Dock surface win every hit test before windows
             // from other applications were considered.
-            candidate.layer == 0 && candidate.frame.contains(point)
+            (candidate.layer == 0 || candidate.isPinnedImage) && candidate.frame.contains(point)
         }
     }
 }

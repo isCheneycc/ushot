@@ -27,6 +27,11 @@ final class PinnedShotManager {
             || pinnedControllers.values.contains(where: \.hasBlockingUpdateActivity)
     }
 
+    /// Only committed image surfaces may appear in a new desktop capture.
+    var captureWindowIDs: Set<CGWindowID> {
+        Set(pinnedControllers.values.compactMap(\.captureWindowID))
+    }
+
     init(
         exporter: any ImageExporting = SystemImageExporter(),
         settingsStore: SettingsStore,
@@ -802,6 +807,16 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
 
     var isRegionDraft: Bool { presentationMode.isRegionDraft }
     var presentedFrame: CGRect { imagePanel.frame }
+    var captureWindowID: CGWindowID? {
+        guard !presentationMode.isRegionDraft,
+              closeReason == nil,
+              !imageIsHidden,
+              imagePanel.isVisible,
+              imagePanel.alphaValue > 0,
+              imagePanel.windowNumber > 0
+        else { return nil }
+        return CGWindowID(imagePanel.windowNumber)
+    }
     private var exportInProgress: Bool { activeExportTransaction != nil }
     /// The pinned image panel draws exactly one shadow around the screenshot.
     /// A window capture captured with "Keep window shadow" already contains
@@ -1505,7 +1520,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             guard self.presentationMode.showsToolbar else { return event }
 
             if self.presentationMode.isRegionDraft,
-               (event.keyCode == 36 || event.keyCode == 76),
+               (event.keyCode == 35 || event.keyCode == 36 || event.keyCode == 76),
                dismissalModifiers.isEmpty
             {
                 self.pinRegionDraft()
@@ -4179,7 +4194,7 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
             stack.addArrangedSubview(regionActionSeparator)
             let pinButton = button(
                 symbol: "pin.fill",
-                help: "Pin selected region",
+                help: "Pin selected region (P / Return)",
                 action: #selector(pinSelectedRegion),
                 identifier: "capture.region.pin"
             )

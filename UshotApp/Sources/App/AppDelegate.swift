@@ -123,7 +123,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let colorPickerCoordinator = ColorPickerCoordinator(
                 samplerFactory: environment.pixelSamplerFactory,
                 permissionChecker: environment.permissionChecker,
-                settingsStore: environment.settingsStore
+                settingsStore: environment.settingsStore,
+                pinnedShotManager: pinnedShotManager
             )
             colorPickerCoordinator.onPermissionRequired = { [weak self] in
                 self?.showSettings(selecting: .capture)
@@ -516,12 +517,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if arguments.contains("--uitest-settings")
             || arguments.contains("--uitest-settings-editor")
+            || arguments.contains("--uitest-settings-color-picker")
             || arguments.contains("--uitest-settings-shortcuts") {
             let section: SettingsSection
             if arguments.contains("--uitest-settings-editor") {
                 section = .editor
             } else if arguments.contains("--uitest-settings-shortcuts") {
                 section = .shortcuts
+            } else if arguments.contains("--uitest-settings-color-picker") {
+                section = .colorPicker
             } else {
                 section = .general
             }
@@ -573,6 +577,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if arguments.contains("--uitest-region-selection") {
             try startUITestRegionSelection()
+            return true
+        }
+        if arguments.contains("--uitest-color-picker-display-change") {
+            try startUITestColorPicker(
+                environment: environment,
+                usesDeterministicFirstNudgeFixture: true,
+                holdsInitialSampleUntilFirstNudge: true,
+                simulatesDisplayChangeAfterFirstNudge: true
+            )
             return true
         }
         if arguments.contains("--uitest-color-picker-first-nudge") {
@@ -694,10 +707,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startUITestColorPicker(
         environment: AppEnvironment,
         usesDeterministicFirstNudgeFixture: Bool = false,
-        holdsInitialSampleUntilFirstNudge: Bool = false
+        holdsInitialSampleUntilFirstNudge: Bool = false,
+        simulatesDisplayChangeAfterFirstNudge: Bool = false
     ) throws {
         guard
-            let screen = NSScreen.main ?? NSScreen.screens.first,
+            let pinnedShotManager,
+            let screen = NSScreen.screens.first,
             let displayNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
         else {
             throw ScreenshotAppError.noDisplayAvailable
@@ -728,10 +743,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             scale: scale,
             isCurrent: true
         )
-        let frozenSampler = try FrozenFramePixelSampler(preparation: RegionCapturePreparation(
-            displays: [DisplayCapture(descriptor: descriptor, capturedImage: captured)],
-            windows: []
-        ))
+        let displayCaptures = try NSScreen.screens.map { candidate -> DisplayCapture in
+            if candidate === screen {
+                return DisplayCapture(descriptor: descriptor, capturedImage: captured)
+            }
+            guard let number = candidate.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                throw ScreenshotAppError.noDisplayAvailable
+            }
+            let image = try makeUITestCapturedImage(
+                logicalSize: candidate.frame.size,
+                desktopFrame: candidate.frame,
+                displayID: number.uint32Value,
+                scale: candidate.backingScaleFactor
+            )
+            return DisplayCapture(
+                descriptor: DisplayDescriptor(
+                    id: number.uint32Value, name: "UI Test Display", frame: candidate.frame,
+                    pixelSize: image.pixelSize, scale: image.scale, isCurrent: false
+                ),
+                capturedImage: image
+            )
+        }
+        let preparation = RegionCapturePreparation(displays: displayCaptures, windows: [])
+        let frozenSampler = try FrozenFramePixelSampler(preparation: preparation)
         let sampler: any PixelSampling
         let controlledSampler: UITestControlledPixelSampler?
         if holdsInitialSampleUntilFirstNudge {
@@ -764,16 +798,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             cursorController = SystemColorPickerCursorController()
         }
         let coordinator = ColorPickerCoordinator(
-            samplerFactory: UITestPixelSamplerFactory(sampler: sampler),
+            samplerFactory: UITestPixelSamplerFactory(sampler: sampler, frozenDisplays: preparation.displays),
             permissionChecker: UITestAuthorizedCapturePermissionChecker(),
             settingsStore: environment.settingsStore,
+            pinnedShotManager: pinnedShotManager,
             cursorController: cursorController
         )
         uiTestCursorController?.onFirstMove = { [weak coordinator] in
-            coordinator?.injectPointerMoveForUITesting(
-                to: initialPoint,
-                eventTimestamp: -1
-            )
+            if simulatesDisplayChangeAfterFirstNudge {
+                NotificationCenter.default.post(
+                    name: NSApplication.didChangeScreenParametersNotification,
+                    object: NSApp
+                )
+            } else {
+                coordinator?.injectPointerMoveForUITesting(
+                    to: initialPoint,
+                    eventTimestamp: -1
+                )
+            }
             controlledSampler?.releaseFirstRequest()
         }
         coordinator.onPermissionRequired = {
@@ -1020,13 +1062,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 private final class UITestPixelSamplerFactory: PixelSamplerCreating {
     private let sampler: any PixelSampling
+    private let frozenDisplays: [DisplayCapture]
 
-    init(sampler: any PixelSampling) {
+    init(sampler: any PixelSampling, frozenDisplays: [DisplayCapture]) {
         self.sampler = sampler
+        self.frozenDisplays = frozenDisplays
     }
 
-    func makePixelSampler() async throws -> any PixelSampling {
-        sampler
+    func makePixelSampler(
+        freezesScreen: Bool,
+        includingOwnWindowIDs: Set<CGWindowID>
+    ) async throws -> PixelSamplerPreparation {
+        PixelSamplerPreparation(sampler: sampler, frozenDisplays: freezesScreen ? frozenDisplays : nil)
     }
 }
 

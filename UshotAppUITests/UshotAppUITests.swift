@@ -754,6 +754,74 @@ final class UshotAppUITests: XCTestCase {
     }
 
     @MainActor
+    func testRegionBarePPinsCommittedTextWithoutInterceptingTypingOrModifiers() {
+        let app = launch(arguments: ["--uitest-reset-settings", "--uitest-region-selection"])
+        defer { app.terminate() }
+
+        let overlay = app.groups["capture.region.overlay"]
+        XCTAssertTrue(overlay.waitForExistence(timeout: 5))
+        overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.28, dy: 0.32))
+            .press(
+                forDuration: 0.1,
+                thenDragTo: overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.62, dy: 0.60))
+            )
+
+        let canvas = app.groups["pinned.canvas"]
+        XCTAssertTrue(canvas.waitForExistence(timeout: 3))
+        for modifier in [XCUIElement.KeyModifierFlags.command, .control, .option, .shift] {
+            app.typeKey("p", modifierFlags: modifier)
+            XCTAssertTrue(overlay.exists, "Modified P must leave region confirmation active.")
+            XCTAssertFalse(app.dialogs["pinned.image"].exists)
+        }
+
+        let textTool = app.checkBoxes["pinned.tool.text"]
+        XCTAssertTrue(textTool.waitForExistence(timeout: 3))
+        textTool.click()
+        let textPosition = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.20, dy: 0.42))
+        textPosition.click()
+        let textEditor = app.textViews["pinned.text.editor"]
+        XCTAssertTrue(textEditor.waitForExistence(timeout: 3))
+        textEditor.typeText("pP")
+        XCTAssertEqual(textEditor.value as? String, "pP")
+        XCTAssertTrue(overlay.exists, "Typing p or P must remain native inline text input.")
+        XCTAssertFalse(app.dialogs["pinned.image"].exists)
+
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(textEditor.waitForNonExistence(timeout: 3))
+        waitForValue(of: canvas, containing: "textAnnotations=1")
+        XCTAssertTrue(overlay.exists, "Return in the text editor must commit text without pinning.")
+        XCTAssertFalse(app.dialogs["pinned.image"].exists)
+
+        app.typeKey("p", modifierFlags: [])
+
+        XCTAssertTrue(overlay.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["capture.region.annotationSurface"]
+                .waitForNonExistence(timeout: 3)
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["capture.region.toolbar"]
+                .waitForNonExistence(timeout: 3)
+        )
+        XCTAssertTrue(app.dialogs["pinned.image"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["pinned.toolbar.window"].exists)
+        waitForValue(of: canvas, containing: "editing=disabled")
+        waitForValue(of: canvas, containing: "textAnnotations=1")
+        textPosition.click()
+        XCTAssertFalse(textEditor.exists, "The newly pinned image must start read-only.")
+
+        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.18)).rightClick()
+        let showToolbar = app.menuItems["pinned.context.toggleToolbar"]
+        XCTAssertTrue(showToolbar.waitForExistence(timeout: 3))
+        showToolbar.click()
+        XCTAssertTrue(textTool.waitForExistence(timeout: 3))
+        textTool.click()
+        textPosition.click()
+        XCTAssertTrue(textEditor.waitForExistence(timeout: 3))
+        XCTAssertEqual(textEditor.value as? String, "pP", "Pin must retain the latest committed text.")
+    }
+
+    @MainActor
     func testRegionCopyMaterializesOutputAndEndsCaptureWithoutPinning() {
         NSPasteboard.general.clearContents()
         let pasteboardChangeCount = NSPasteboard.general.changeCount
@@ -1682,6 +1750,115 @@ final class UshotAppUITests: XCTestCase {
         XCTAssertTrue(editorWindow.waitForNonExistence(timeout: 3))
         app.buttons["pinned.action.close"].click()
         XCTAssertTrue(imagePanel.waitForNonExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testColorPickerFreezeSettingDefaultsOnAndPersistsLiveMode() {
+        var app = launch(arguments: [
+            "--uitest-reset-settings", "--uitest-settings-color-picker"
+        ])
+        defer { app.terminate() }
+
+        var freezeToggle = app.switches["settings.colorPicker.freezesScreen"]
+        XCTAssertTrue(freezeToggle.waitForExistence(timeout: 5))
+        XCTAssertEqual((freezeToggle.value as? NSNumber)?.intValue, 1)
+        freezeToggle.click()
+        XCTAssertEqual((freezeToggle.value as? NSNumber)?.intValue, 0)
+        app.terminate()
+
+        app = launch(arguments: ["--uitest-settings-color-picker"])
+        freezeToggle = app.switches["settings.colorPicker.freezesScreen"]
+        XCTAssertTrue(freezeToggle.waitForExistence(timeout: 5))
+        XCTAssertEqual((freezeToggle.value as? NSNumber)?.intValue, 0)
+        app.terminate()
+
+        app = launch(arguments: ["--uitest-color-picker"])
+        let overlay = app.groups["colorPicker.overlay"].firstMatch
+        XCTAssertTrue(overlay.waitForExistence(timeout: 5))
+        overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).hover()
+        waitForValue(of: overlay, containing: "state=ready")
+        waitForValue(of: overlay, containing: "mode=live")
+
+        NSPasteboard.general.clearContents()
+        let pasteboardChangeCount = NSPasteboard.general.changeCount
+        app.typeKey("c", modifierFlags: .command)
+        XCTAssertEqual(waitForPasteboardString(after: pasteboardChangeCount), "#292E38")
+        XCTAssertTrue(overlay.waitForNonExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testColorPickerFrozenDefaultPaintsSourcePixelsAndCopiesSameColor() throws {
+        let app = launch(arguments: ["--uitest-reset-settings", "--uitest-color-picker"])
+        defer { app.terminate() }
+
+        let overlay = app.groups["colorPicker.overlay"].firstMatch
+        XCTAssertTrue(overlay.waitForExistence(timeout: 5))
+        overlay.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).hover()
+        waitForValue(of: overlay, containing: "state=ready")
+        waitForValue(of: overlay, containing: "mode=frozen")
+        let card = app.groups["colorPicker.card"].firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 3))
+        let cardBounds = card.frame.insetBy(dx: -12, dy: -12)
+        let overlayBounds = overlay.frame
+        let backgroundPoints = [
+            CGPoint(x: 0.1, y: 0.1), CGPoint(x: 0.9, y: 0.1),
+            CGPoint(x: 0.1, y: 0.9), CGPoint(x: 0.9, y: 0.9)
+        ].filter { point in
+            !cardBounds.contains(CGPoint(
+                x: overlayBounds.minX + overlayBounds.width * point.x,
+                y: overlayBounds.minY + overlayBounds.height * point.y
+            ))
+        }
+        XCTAssertGreaterThanOrEqual(backgroundPoints.count, 3)
+
+        let screenshot = overlay.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = "Color picker frozen source background"
+        attachment.lifetime = .deleteOnSuccess
+        add(attachment)
+        for point in backgroundPoints {
+            let color = try colorPickerRenderedColor(in: screenshot, normalizedPoint: point)
+            let message = "Frozen background at \(point) must match the sampled source image."
+            XCTAssertEqual(color.red, 0.16, accuracy: 0.025, message)
+            XCTAssertEqual(color.green, 0.18, accuracy: 0.025, message)
+            XCTAssertEqual(color.blue, 0.22, accuracy: 0.025, message)
+        }
+
+        NSPasteboard.general.clearContents()
+        let pasteboardChangeCount = NSPasteboard.general.changeCount
+        app.typeKey("c", modifierFlags: .command)
+        XCTAssertEqual(waitForPasteboardString(after: pasteboardChangeCount), "#292E38")
+        XCTAssertTrue(overlay.waitForNonExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testFrozenColorPickerDisplayChangeCancelsLateSampleWithoutCopying() {
+        let sentinel = "Ushot color picker display-change sentinel"
+        NSPasteboard.general.clearContents()
+        XCTAssertTrue(NSPasteboard.general.setString(sentinel, forType: .string))
+        let pasteboardChangeCount = NSPasteboard.general.changeCount
+        let app = launch(arguments: [
+            "--uitest-reset-settings", "--uitest-color-picker-display-change"
+        ])
+        defer { app.terminate() }
+
+        let overlays = app.groups.matching(identifier: "colorPicker.overlay")
+        let overlay = overlays.firstMatch
+        XCTAssertTrue(overlay.waitForExistence(timeout: 5))
+        waitForValue(of: overlay, containing: "state=waiting; mode=frozen")
+
+        app.typeKey(.rightArrow, modifierFlags: [])
+
+        XCTAssertTrue(overlay.waitForNonExistence(timeout: 3))
+        let lateMutation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                overlays.count != 0 || NSPasteboard.general.changeCount != pasteboardChangeCount
+            },
+            object: nil
+        )
+        lateMutation.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [lateMutation], timeout: 2), .completed)
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), sentinel)
     }
 
     @MainActor

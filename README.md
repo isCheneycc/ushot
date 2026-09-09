@@ -52,7 +52,7 @@ Open the project and run the `ScreenshotApp` scheme:
 open ScreenshotApp.xcodeproj
 ```
 
-Grant Screen Recording permission when macOS asks, press `⌃⌥A`, select a region, add a mark, and choose **Copy**, **Save**, or **Pin**.
+Grant Screen Recording permission when macOS asks, press `⌃⌥A`, select a region, add a mark, and choose **Copy**, **Save**, or **Pin**. Press `P` after selecting a region to pin it quickly. Pinned images stay visible in subsequent captures and can themselves be captured.
 
 ### Default global shortcuts
 
@@ -65,6 +65,8 @@ Grant Screen Recording permission when macOS asks, press `⌃⌥A`, select a reg
 | Capture All Displays | `⌃⌥M` |
 | Color Picker | `⌃⌥C` |
 | Screen Ruler | `⌃⌥R` |
+
+Color Picker freezes the screen by default. Turn off **Settings → Color Picker → Freeze screen while picking colors** to sample the live screen instead.
 
 Global shortcuts are configurable, and F1–F20 can be assigned without an additional modifier. Annotation-tool shortcuts are configurable separately and apply only while editing a screenshot.
 

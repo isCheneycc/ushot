@@ -267,6 +267,23 @@ private enum SettingsTestSupport {
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 
+    static func colorPickerSettingsData(
+        _ settings: AppSettings,
+        freezePreference: Any?
+    ) throws -> Data {
+        let encoded = try JSONEncoder().encode(settings)
+        guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any],
+              var colorPicker = object["colorPicker"] as? [String: Any]
+        else {
+            throw ScreenshotAppError.settingsCorrupted(
+                description: "The test could not construct color-picker settings."
+            )
+        }
+        colorPicker["freezesScreen"] = freezePreference
+        object["colorPicker"] = colorPicker
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
     static func settingsDataWithoutRegionDoubleClickPreference() throws -> Data {
         let encoded = try JSONEncoder().encode(AppSettings.defaults)
         guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any],
@@ -566,6 +583,7 @@ final class UshotCoreFoundationTests: XCTestCase {
         XCTAssertFalse(settings.history.isEnabled)
         XCTAssertEqual(settings.output.format, .png)
         XCTAssertEqual(settings.colorPicker.colorSpace, .sRGB)
+        XCTAssertTrue(settings.colorPicker.freezesScreen)
         XCTAssertEqual(settings.general.startupBehavior, .doNothing)
         XCTAssertEqual(settings.editor.defaultLineWidthUnit, .pixels)
         XCTAssertEqual(settings.editor.defaultFontSizeUnit, .pixels)
@@ -668,6 +686,66 @@ final class UshotCoreFoundationTests: XCTestCase {
 
         XCTAssertNotNil(store.loadError)
         XCTAssertEqual(store.settings, .defaults)
+    }
+
+    @MainActor
+    func testVersionElevenSettingsEnableFrozenColorPickingWithoutChangingOtherPreferences() throws {
+        let context = SettingsTestSupport.makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.suite) }
+        var legacy = AppSettings.defaults
+        legacy.schemaVersion = 11
+        legacy.colorPicker.colorSpace = .displayP3
+        legacy.colorPicker.copyFormat = .components
+        legacy.capture.automaticallyCopies = true
+        legacy.advanced.language = .english
+        context.defaults.set(
+            try SettingsTestSupport.colorPickerSettingsData(legacy, freezePreference: nil),
+            forKey: context.key
+        )
+
+        let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
+        var expected = legacy
+        expected.schemaVersion = AppSettings.currentSchemaVersion
+
+        XCTAssertNil(store.loadError)
+        XCTAssertTrue(store.settings.colorPicker.freezesScreen)
+        XCTAssertEqual(store.settings, expected)
+    }
+
+    @MainActor
+    func testColorPickerLiveSamplingPreferencePersistsAcrossReload() throws {
+        let context = SettingsTestSupport.makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.suite) }
+        let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
+        try store.update(\AppSettings.colorPicker.colorSpace, to: .displayP3)
+        try store.update(\AppSettings.colorPicker.copyFormat, to: .css)
+        try store.update(\AppSettings.colorPicker.freezesScreen, to: false)
+
+        let reloaded = SettingsStore(defaults: context.defaults, storageKey: context.key)
+
+        XCTAssertNil(reloaded.loadError)
+        XCTAssertFalse(reloaded.settings.colorPicker.freezesScreen)
+        XCTAssertEqual(reloaded.settings.colorPicker.colorSpace, .displayP3)
+        XCTAssertEqual(reloaded.settings.colorPicker.copyFormat, .css)
+        XCTAssertEqual(reloaded.settings, store.settings)
+    }
+
+    @MainActor
+    func testCurrentSettingsRequireValidColorPickerFreezePreference() throws {
+        let context = SettingsTestSupport.makeDefaults()
+        defer { context.defaults.removePersistentDomain(forName: context.suite) }
+        let invalidValues: [Any?] = [nil, NSNull(), "true"]
+        for value in invalidValues {
+            let data = try SettingsTestSupport.colorPickerSettingsData(
+                .defaults, freezePreference: value
+            )
+            context.defaults.set(data, forKey: context.key)
+
+            let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
+
+            XCTAssertNotNil(store.loadError)
+            XCTAssertEqual(context.defaults.data(forKey: context.key), data)
+        }
     }
 
     @MainActor
@@ -1595,6 +1673,53 @@ final class UshotCoreFoundationTests: XCTestCase {
                 at: CGPoint(x: 50, y: 50),
                 candidates: [desktopSurface, appWindow]
             )
+        )
+    }
+
+    func testWindowResolverSelectsSmallPinnedImagesAndRejectsUnregisteredFloatingWindows() {
+        let toolbar = WindowDescriptor(
+            id: 9, title: "Toolbar", applicationName: "Ushot",
+            frame: CGRect(x: 100, y: 100, width: 800, height: 32), layer: 3
+        )
+        let pinned = WindowDescriptor(
+            id: 10, title: "Pinned Image", applicationName: "Ushot",
+            frame: CGRect(x: 120, y: 120, width: 20, height: 16), layer: 3,
+            isPinnedImage: true
+        )
+        let appWindow = WindowDescriptor(
+            id: 11, title: "Application Window", applicationName: "Another App",
+            frame: CGRect(x: 100, y: 100, width: 800, height: 600), layer: 0
+        )
+        let resolver = WindowSelectionResolver()
+        let pinnedPoint = CGPoint(x: 125, y: 125)
+
+        XCTAssertEqual(
+            resolver.topmostWindow(at: pinnedPoint, candidates: [toolbar, pinned, appWindow]),
+            pinned
+        )
+        XCTAssertEqual(
+            resolver.topmostWindow(at: CGPoint(x: 200, y: 120), candidates: [toolbar, pinned, appWindow]),
+            appWindow
+        )
+        XCTAssertEqual(
+            resolver.topmostWindow(at: pinnedPoint, candidates: [appWindow, pinned]),
+            appWindow
+        )
+    }
+
+    func testPinnedImagesDoNotResolveAccessibilityControls() {
+        let pinned = WindowDescriptor(
+            id: 10, title: "Pinned Image", applicationName: "Ushot",
+            frame: CGRect(x: 120, y: 120, width: 20, height: 16), layer: 3,
+            processID: ProcessInfo.processInfo.processIdentifier,
+            isPinnedImage: true
+        )
+
+        XCTAssertEqual(
+            InterfaceElementSelectionResolver().resolve(
+                at: CGPoint(x: 125, y: 125), in: pinned, primaryDisplayHeight: 1080
+            ),
+            .noElement
         )
     }
 
@@ -3035,6 +3160,7 @@ func defaultSettingsMatchProductDefaults() {
     #expect(!settings.history.isEnabled)
     #expect(settings.output.format == .png)
     #expect(settings.colorPicker.colorSpace == .sRGB)
+    #expect(settings.colorPicker.freezesScreen)
     #expect(settings.general.startupBehavior == .doNothing)
     #expect(settings.editor.defaultLineWidthUnit == .pixels)
     #expect(settings.editor.defaultFontSizeUnit == .pixels)
@@ -3131,6 +3257,66 @@ func corruptSettingsAreObservable() {
     let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
     #expect(store.loadError != nil)
     #expect(store.settings == .defaults)
+}
+
+@Test @MainActor
+func versionElevenSettingsEnableFrozenColorPickingWithoutChangingOtherPreferences() throws {
+    let context = SettingsTestSupport.makeDefaults()
+    defer { context.defaults.removePersistentDomain(forName: context.suite) }
+    var legacy = AppSettings.defaults
+    legacy.schemaVersion = 11
+    legacy.colorPicker.colorSpace = .displayP3
+    legacy.colorPicker.copyFormat = .components
+    legacy.capture.automaticallyCopies = true
+    legacy.advanced.language = .english
+    context.defaults.set(
+        try SettingsTestSupport.colorPickerSettingsData(legacy, freezePreference: nil),
+        forKey: context.key
+    )
+
+    let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
+    var expected = legacy
+    expected.schemaVersion = AppSettings.currentSchemaVersion
+
+    #expect(store.loadError == nil)
+    #expect(store.settings.colorPicker.freezesScreen)
+    #expect(store.settings == expected)
+}
+
+@Test @MainActor
+func colorPickerLiveSamplingPreferencePersistsAcrossReload() throws {
+    let context = SettingsTestSupport.makeDefaults()
+    defer { context.defaults.removePersistentDomain(forName: context.suite) }
+    let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
+    try store.update(\AppSettings.colorPicker.colorSpace, to: .displayP3)
+    try store.update(\AppSettings.colorPicker.copyFormat, to: .css)
+    try store.update(\AppSettings.colorPicker.freezesScreen, to: false)
+
+    let reloaded = SettingsStore(defaults: context.defaults, storageKey: context.key)
+
+    #expect(reloaded.loadError == nil)
+    #expect(!reloaded.settings.colorPicker.freezesScreen)
+    #expect(reloaded.settings.colorPicker.colorSpace == .displayP3)
+    #expect(reloaded.settings.colorPicker.copyFormat == .css)
+    #expect(reloaded.settings == store.settings)
+}
+
+@Test @MainActor
+func currentSettingsRequireValidColorPickerFreezePreference() throws {
+    let context = SettingsTestSupport.makeDefaults()
+    defer { context.defaults.removePersistentDomain(forName: context.suite) }
+    let invalidValues: [Any?] = [nil, NSNull(), "true"]
+    for value in invalidValues {
+        let data = try SettingsTestSupport.colorPickerSettingsData(
+            .defaults, freezePreference: value
+        )
+        context.defaults.set(data, forKey: context.key)
+
+        let store = SettingsStore(defaults: context.defaults, storageKey: context.key)
+
+        #expect(store.loadError != nil)
+        #expect(context.defaults.data(forKey: context.key) == data)
+    }
 }
 
 @Test @MainActor
@@ -4092,6 +4278,51 @@ func windowResolverRejectsDisplayCoveringSystemLayersBeforeAppWindows() {
             at: CGPoint(x: 50, y: 50),
             candidates: [desktopSurface, appWindow]
         ) == nil
+    )
+}
+
+@Test
+func windowResolverSelectsSmallPinnedImagesAndRejectsUnregisteredFloatingWindows() {
+    let toolbar = WindowDescriptor(
+        id: 9, title: "Toolbar", applicationName: "Ushot",
+        frame: CGRect(x: 100, y: 100, width: 800, height: 32), layer: 3
+    )
+    let pinned = WindowDescriptor(
+        id: 10, title: "Pinned Image", applicationName: "Ushot",
+        frame: CGRect(x: 120, y: 120, width: 20, height: 16), layer: 3,
+        isPinnedImage: true
+    )
+    let appWindow = WindowDescriptor(
+        id: 11, title: "Application Window", applicationName: "Another App",
+        frame: CGRect(x: 100, y: 100, width: 800, height: 600), layer: 0
+    )
+    let resolver = WindowSelectionResolver()
+    let pinnedPoint = CGPoint(x: 125, y: 125)
+
+    #expect(
+        resolver.topmostWindow(at: pinnedPoint, candidates: [toolbar, pinned, appWindow]) == pinned
+    )
+    #expect(
+        resolver.topmostWindow(at: CGPoint(x: 200, y: 120), candidates: [toolbar, pinned, appWindow]) == appWindow
+    )
+    #expect(
+        resolver.topmostWindow(at: pinnedPoint, candidates: [appWindow, pinned]) == appWindow
+    )
+}
+
+@Test
+func pinnedImagesDoNotResolveAccessibilityControls() {
+    let pinned = WindowDescriptor(
+        id: 10, title: "Pinned Image", applicationName: "Ushot",
+        frame: CGRect(x: 120, y: 120, width: 20, height: 16), layer: 3,
+        processID: ProcessInfo.processInfo.processIdentifier,
+        isPinnedImage: true
+    )
+
+    #expect(
+        InterfaceElementSelectionResolver().resolve(
+            at: CGPoint(x: 125, y: 125), in: pinned, primaryDisplayHeight: 1080
+        ) == .noElement
     )
 }
 

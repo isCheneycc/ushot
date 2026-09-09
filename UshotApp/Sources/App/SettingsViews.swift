@@ -2053,6 +2053,17 @@ private struct ColorPickerSettingsView: View {
 
     var body: some View {
         Form {
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Freeze screen while picking colors", isOn: persistedBinding(
+                    store: store,
+                    keyPath: \AppSettings.colorPicker.freezesScreen,
+                    alerts: alerts
+                ))
+                .toggleStyle(.switch)
+                .accessibilityIdentifier("settings.colorPicker.freezesScreen")
+                Text("Freeze all displays when Color Picker starts. Turn off to sample the live screen.")
+                    .foregroundStyle(.secondary)
+            }
             Picker("Color space", selection: persistedBinding(
                 store: store,
                 keyPath: \AppSettings.colorPicker.colorSpace,

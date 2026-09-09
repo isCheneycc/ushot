@@ -157,8 +157,23 @@ public protocol PixelSampling: AnyObject {
 }
 
 @MainActor
+public struct PixelSamplerPreparation {
+    public let sampler: any PixelSampling
+    /// The same display pixels used by the sampler, or nil for live sampling.
+    public let frozenDisplays: [DisplayCapture]?
+
+    public init(sampler: any PixelSampling, frozenDisplays: [DisplayCapture]? = nil) {
+        self.sampler = sampler
+        self.frozenDisplays = frozenDisplays
+    }
+}
+
+@MainActor
 public protocol PixelSamplerCreating: AnyObject {
-    func makePixelSampler() async throws -> any PixelSampling
+    func makePixelSampler(
+        freezesScreen: Bool,
+        includingOwnWindowIDs: Set<CGWindowID>
+    ) async throws -> PixelSamplerPreparation
 }
 
 public struct SystemColorSpaceConverter: Sendable {

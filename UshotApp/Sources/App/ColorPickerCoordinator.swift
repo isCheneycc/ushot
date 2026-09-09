@@ -38,6 +38,7 @@ final class ColorPickerCoordinator {
     private let samplerFactory: any PixelSamplerCreating
     private let permissionChecker: any CapturePermissionChecking
     private let settingsStore: SettingsStore
+    private let pinnedShotManager: PinnedShotManager
     private let cursorController: any ColorPickerCursorControlling
     private var isPreparing = false
     private var sessionGeneration = 0
@@ -46,6 +47,7 @@ final class ColorPickerCoordinator {
     private var preparationTask: Task<Void, Never>?
     private var samplingTask: Task<Void, Never>?
     private var keyboardMonitor: Any?
+    private var displayConfigurationObserver: NSObjectProtocol?
     private var panels: [PixelToolOverlayPanel] = []
     private var views: [ColorPickerOverlayView] = []
     private var sampler: (any PixelSampling)?
@@ -75,11 +77,13 @@ final class ColorPickerCoordinator {
         samplerFactory: any PixelSamplerCreating,
         permissionChecker: any CapturePermissionChecking,
         settingsStore: SettingsStore,
+        pinnedShotManager: PinnedShotManager,
         cursorController: (any ColorPickerCursorControlling)? = nil
     ) {
         self.samplerFactory = samplerFactory
         self.permissionChecker = permissionChecker
         self.settingsStore = settingsStore
+        self.pinnedShotManager = pinnedShotManager
         if let cursorController {
             self.cursorController = cursorController
         } else {
@@ -181,23 +185,37 @@ final class ColorPickerCoordinator {
             onPermissionRequired?()
             return
         }
+        guard generation == sessionGeneration, !Task.isCancelled else { return }
 
         do {
-            let sampler = try await samplerFactory.makePixelSampler()
+            let freezesScreen = settingsStore.settings.colorPicker.freezesScreen
+            if freezesScreen {
+                installDisplayConfigurationObserver(sessionGeneration: generation)
+            }
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            let preparation = try await samplerFactory.makePixelSampler(
+                freezesScreen: freezesScreen,
+                includingOwnWindowIDs: pinnedShotManager.captureWindowIDs
+            )
             guard generation == sessionGeneration, !Task.isCancelled else { return }
+            guard freezesScreen == (preparation.frozenDisplays != nil) else {
+                throw ScreenshotAppError.pixelSamplingFailed(
+                    description: "The color picker did not prepare the requested screen mode."
+                )
+            }
+            let sampler = preparation.sampler
             self.sampler = sampler
             currentPoint = initialPoint(in: sampler.displays)
             isPreparing = false
             preparationTask = nil
-            try present(displays: sampler.displays)
+            try present(displays: sampler.displays, frozenDisplays: preparation.frozenDisplays)
             scheduleSample(origin: .initial)
             AppLog.colorPicker.notice(
-                "Color picker presented across \(sampler.displays.count, privacy: .public) display(s)"
+                "Color picker presented: mode=\(freezesScreen ? "frozen" : "live", privacy: .public), displays=\(sampler.displays.count, privacy: .public), preparationMs=\((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000, privacy: .public)"
             )
         } catch is CancellationError {
             guard generation == sessionGeneration else { return }
-            isPreparing = false
-            preparationTask = nil
+            cleanup(reason: "preparation-cancelled")
         } catch {
             guard generation == sessionGeneration else { return }
             isPreparing = false
@@ -206,9 +224,28 @@ final class ColorPickerCoordinator {
         }
     }
 
-    private func present(displays: [DisplayDescriptor]) throws {
+    private func present(displays: [DisplayDescriptor], frozenDisplays: [DisplayCapture]?) throws {
         guard panels.isEmpty else {
             throw ScreenshotAppError.pixelSamplingFailed(description: "The color picker overlay is already active.")
+        }
+        if let frozenDisplays {
+            guard !frozenDisplays.isEmpty,
+                  frozenDisplays.count == NSScreen.screens.count,
+                  frozenDisplays.map(\.descriptor) == displays
+            else {
+                throw ScreenshotAppError.pixelSamplingFailed(
+                    description: "The frozen color-picker desktop does not match its sampling displays."
+                )
+            }
+            for capture in frozenDisplays {
+                guard NSScreen.screens.contains(where: {
+                    displayID(for: $0) == capture.descriptor.id && $0.frame == capture.descriptor.frame
+                }) else {
+                    throw ScreenshotAppError.pixelSamplingFailed(
+                        description: "The display layout changed while preparing the frozen color picker."
+                    )
+                }
+            }
         }
         var keyPanel: PixelToolOverlayPanel?
         for screen in NSScreen.screens {
@@ -216,7 +253,8 @@ final class ColorPickerCoordinator {
                 let displayID = displayID(for: screen),
                 displays.contains(where: { $0.id == displayID })
             else { continue }
-            let view = ColorPickerOverlayView(coordinator: self)
+            let frozenImage = frozenDisplays?.first { $0.descriptor.id == displayID }?.capturedImage
+            let view = ColorPickerOverlayView(coordinator: self, frozenImage: frozenImage)
             let panel = PixelToolOverlayPanel(screen: screen, contentView: view)
             panel.initialFirstResponder = view
             panels.append(panel)
@@ -732,6 +770,21 @@ final class ColorPickerCoordinator {
         keyboardMonitor = monitor
     }
 
+    private func installDisplayConfigurationObserver(sessionGeneration generation: Int) {
+        precondition(displayConfigurationObserver == nil)
+        displayConfigurationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.sessionGeneration == generation else { return }
+                // A frozen frame cannot retain its pixel mapping after the display configuration changes.
+                self.cleanup(reason: "display-configuration-changed")
+            }
+        }
+    }
+
     private func ownsKeyboardEvent(_ event: NSEvent) -> Bool {
         guard let window = event.window ?? NSApplication.shared.keyWindow else { return false }
         return panels.contains { $0 === window }
@@ -760,6 +813,10 @@ final class ColorPickerCoordinator {
         samplingTask?.cancel()
         samplingTask = nil
         removeKeyboardMonitor()
+        if let displayConfigurationObserver {
+            NotificationCenter.default.removeObserver(displayConfigurationObserver)
+            self.displayConfigurationObserver = nil
+        }
         completionGeneration = nil
         panels.forEach {
             $0.orderOut(nil)
@@ -830,10 +887,14 @@ private struct ColorPickerCardState {
 private final class ColorPickerOverlayView: NSView {
     private weak var coordinator: ColorPickerCoordinator?
     private let cardView: ColorPickerCardView
+    private let frozenImage: NSImage?
     private var trackingAreaReference: NSTrackingArea?
 
-    init(coordinator: ColorPickerCoordinator) {
+    init(coordinator: ColorPickerCoordinator, frozenImage: CapturedImage?) {
         self.coordinator = coordinator
+        self.frozenImage = frozenImage.map {
+            NSImage(cgImage: $0.image, size: $0.logicalSize)
+        }
         cardView = ColorPickerCardView(
             frame: CGRect(origin: .zero, size: ColorPickerCardView.cardSize)
         )
@@ -847,7 +908,7 @@ private final class ColorPickerOverlayView: NSView {
 #endif
         setAccessibilityLabel(NSLocalizedString("Screen color picker", comment: "Color picker overlay"))
 #if DEBUG
-        setAccessibilityValue("state=waiting")
+        setAccessibilityValue("state=waiting; mode=\(self.frozenImage == nil ? "live" : "frozen")")
 #endif
     }
 
@@ -856,7 +917,14 @@ private final class ColorPickerOverlayView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
     override var needsPanelToBecomeKey: Bool { true }
-    override var isOpaque: Bool { false }
+    override var isOpaque: Bool { frozenImage != nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let frozenImage else { return }
+        NSGraphicsContext.current?.imageInterpolation = .none
+        frozenImage.draw(in: bounds, from: .zero, operation: .copy, fraction: 1)
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         bounds.contains(point) ? self : nil
@@ -906,7 +974,7 @@ private final class ColorPickerOverlayView: NSView {
             "\($0.pixelX),\($0.pixelY)"
         } ?? "none"
         setAccessibilityValue(
-            "state=ready; colorSpace=\(state.sample.colorSpace.rawValue); screen=\(Int(state.sample.globalPoint.x)),\(Int(state.sample.globalPoint.y)); pixel=\(Int(state.sample.pixelPoint.x)),\(Int(state.sample.pixelPoint.y)); copy=\(state.sample.copyRepresentation(format: state.copyFormat)); magnifier=\(state.magnifier.image.width)x\(state.magnifier.image.height); magnifierCenter=\(Int(state.magnifier.centerPixel.x)),\(Int(state.magnifier.centerPixel.y)); nudgePixel=\(nudgePixel); firstPublishedAfterNudge=\(firstPublishedPixel)"
+            "state=ready; colorSpace=\(state.sample.colorSpace.rawValue); screen=\(Int(state.sample.globalPoint.x)),\(Int(state.sample.globalPoint.y)); pixel=\(Int(state.sample.pixelPoint.x)),\(Int(state.sample.pixelPoint.y)); copy=\(state.sample.copyRepresentation(format: state.copyFormat)); magnifier=\(state.magnifier.image.width)x\(state.magnifier.image.height); magnifierCenter=\(Int(state.magnifier.centerPixel.x)),\(Int(state.magnifier.centerPixel.y)); nudgePixel=\(nudgePixel); firstPublishedAfterNudge=\(firstPublishedPixel); mode=\(frozenImage == nil ? "live" : "frozen")"
         )
 #endif
     }
@@ -915,7 +983,7 @@ private final class ColorPickerOverlayView: NSView {
         cardView.clear()
         cardView.isHidden = true
 #if DEBUG
-        setAccessibilityValue("state=waiting")
+        setAccessibilityValue("state=waiting; mode=\(frozenImage == nil ? "live" : "frozen")")
 #endif
     }
 

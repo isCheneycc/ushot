@@ -135,6 +135,8 @@ This section covers four rollout stages with independent publication gates: hist
 - [ ] Click Copy and confirm the composed image reaches the clipboard, then the mask, selection border, annotation surface and toolbar all close without creating or replacing a pinned image. Repeat with a selected annotation using `Command-C`; it must copy the complete composite rather than only the annotation and close the same capture group
 - [ ] While a region resize/move recrop is still committing, press `Command-C` and confirm the app rejects it without changing the clipboard or completing the selection; after the handles become active again, retry and confirm the new frame is what gets copied. Also start Copy on a heavily annotated region and immediately press `Esc` or Cancel: the capture must close without a late clipboard write, crash or delayed completion callback
 - [ ] Click Save, cancel its panel and confirm selection remains active; repeat and complete the save, then confirm the entire capture UI closes only after the file is written
+- [ ] After selecting a region, press `P` and confirm it follows the Pin button lifecycle. Repeat after adding text or another annotation; the latest composite must be retained. While typing inline text, `p`/`P` remain text and Return commits without pinning. Command/Control/Option/Shift-P outside text input must not Pin. Return/Enter outside input still Pin.
+- [ ] Pin a visibly annotated region and move it over a different background. Start another region capture: the frozen desktop and magnifier must retain the pinned image, hovering it must snap to its frame as Window, and Copy/Save must include its displayed pixels while leaving the original image pinned. Repeat with current/selected/all-display and window capture; open the pinned toolbar and confirm the image is included but its toolbar is absent. A manually hidden or closed image must stay absent.
 - [ ] Click Pin and confirm the overlay and complete toolbar disappear, the annotated result stays at the exact selected frame as a pinned image, and clicking or dragging over existing annotations cannot select, move, resize or create annotations after Pin
 - [ ] Hover a read-only pinned image: its body must show an open hand; press and hold without moving and confirm it switches immediately to a closed hand, then drag and confirm that same closed hand remains uninterrupted until release without flashing back to the arrow/open hand. Every edge/corner must show the matching horizontal, vertical or diagonal resize cursor and resize proportionally when dragged
 - [ ] Right-click the pinned image, use Copy Screenshot and confirm it stays pinned; choose Show Toolbar and confirm annotations become editable and Click Through, Temporarily Hide Image and Open Canvas Editor are now present, then choose Hide Toolbar and confirm editing ends and the image is read-only again
@@ -142,7 +144,7 @@ This section covers four rollout stages with independent publication gates: hist
 - [ ] On a Retina display, compare the selection's point/pixel label and exported PNG dimensions; a 100 × 60 pt region must produce approximately 200 × 120 physical pixels at 2x
 - [ ] Disconnect a display during capture
 - [ ] Close a candidate window during window selection
-- [ ] Confirm overlays, toolbars and Ushot windows are absent from output
+- [ ] Confirm overlays, toolbars, Settings and Canvas Editor windows are absent from output; visible committed pinned images are included
 
 ## Editing and Interoperability
 
@@ -208,6 +210,11 @@ This section covers four rollout stages with independent publication gates: hist
 - [ ] In region selection, hover a window, press without releasing, then press Esc, release and press Return. No confirmation toolbar should appear; a subsequent Esc must cancel normally. Draw Blur and Mosaic over detailed pixels, shrink/expand the left or bottom selection edge, then Copy/Save/Pin and Undo/Redo at 1x and 2x: the same desktop pixels must remain obscured.
 
 ## Color Picker
+
+- [ ] On a fresh install and after upgrading older settings, Freeze screen while picking colors is on. Start a video/animation and invoke Color Picker: all displays freeze before the picker appears, the magnifier and copied color match that frozen frame, and the real screen resumes after Copy or Esc
+- [ ] Turn off Settings → Color Picker → Freeze screen while picking colors, relaunch, and confirm the switch stays off. Start Color Picker: the background remains live and pointer/arrow/Tab/copy requests sample it. Re-enable the switch and confirm the next session freezes again
+- [ ] Pick a color from a visible pinned image in both modes. The image must remain visible and sampled while its toolbar is excluded; manually hidden/closed images stay absent
+- [ ] On multiple displays and mixed backing scales, freeze and move across display edges; each background uses its own orientation, colors and physical-pixel coordinates. Cancel during preparation or change the display layout/resolution while preparing or picking: the frozen session closes without a late overlay or clipboard write. Any preparation mismatch detected before presentation is surfaced
 
 - [ ] Permission denied and revoked: no overlay appears; Capture settings opens with an actionable status
 - [ ] Move continuously across every display; the magnifier stays responsive and never samples an Ushot overlay

@@ -12,8 +12,41 @@ public final class ScreenCaptureKitPixelSamplerFactory: PixelSamplerCreating {
         self.processIdentifier = processIdentifier
     }
 
-    public func makePixelSampler() async throws -> any PixelSampling {
-        try await ScreenCaptureKitPixelSampler.make(processIdentifier: processIdentifier)
+    public func makePixelSampler(
+        freezesScreen: Bool,
+        includingOwnWindowIDs: Set<CGWindowID>
+    ) async throws -> PixelSamplerPreparation {
+        if freezesScreen {
+            let preparation = try await ScreenCaptureKitCapturer(processIdentifier: processIdentifier)
+                .prepareRegionCapture(CaptureRequest(
+                    mode: .region,
+                    showsCursor: false,
+                    includesWindowShadow: true,
+                    includedOwnWindowIDs: includingOwnWindowIDs
+                ))
+            try Task.checkCancellation()
+            for capture in preparation.displays {
+                let backing = try DisplayBackingMetrics.current(
+                    displayID: capture.descriptor.id,
+                    logicalSize: capture.descriptor.frame.size
+                )
+                guard backing.pixelSize == capture.descriptor.pixelSize,
+                      backing.scale == capture.descriptor.scale
+                else {
+                    throw ScreenshotAppError.pixelSamplingFailed(
+                        description: "The display resolution changed while freezing the color picker."
+                    )
+                }
+            }
+            return PixelSamplerPreparation(
+                sampler: try FrozenFramePixelSampler(preparation: preparation),
+                frozenDisplays: preparation.displays
+            )
+        }
+        return PixelSamplerPreparation(sampler: try await ScreenCaptureKitPixelSampler.make(
+            processIdentifier: processIdentifier,
+            includingOwnWindowIDs: includingOwnWindowIDs
+        ))
     }
 }
 
@@ -32,7 +65,8 @@ public final class ScreenCaptureKitPixelSampler: PixelSampling {
     }
 
     public static func make(
-        processIdentifier: pid_t = ProcessInfo.processInfo.processIdentifier
+        processIdentifier: pid_t = ProcessInfo.processInfo.processIdentifier,
+        includingOwnWindowIDs: Set<CGWindowID> = []
     ) async throws -> ScreenCaptureKitPixelSampler {
         let content: SCShareableContent
         do {
@@ -74,12 +108,16 @@ public final class ScreenCaptureKitPixelSampler: PixelSampling {
         let excludedApplications = content.applications.filter {
             $0.processID == processIdentifier
         }
+        let includedOwnWindows = content.windows.filter {
+            $0.owningApplication?.processID == processIdentifier
+                && includingOwnWindowIDs.contains($0.windowID)
+        }
         let contentFilters = Dictionary(
             uniqueKeysWithValues: content.displays.map { display in
                 let filter = SCContentFilter(
                     display: display,
                     excludingApplications: excludedApplications,
-                    exceptingWindows: []
+                    exceptingWindows: includedOwnWindows
                 )
                 if #available(macOS 14.2, *) {
                     filter.includeMenuBar = true

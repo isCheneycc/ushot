@@ -50,7 +50,7 @@ struct ShortcutsSettingsView: View {
             }
 
             HStack {
-                Text("Global shortcuts require a modifier, except F1–F20. Annotation shortcuts are active only while editing a screenshot. Escape cancels recording.")
+                Text("Global shortcuts require a modifier, except F1–F20. Annotation shortcuts are active only while editing a screenshot. During region confirmation, P is reserved for Pin. Escape cancels recording.")
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Restore Defaults") { restoreDefaults() }

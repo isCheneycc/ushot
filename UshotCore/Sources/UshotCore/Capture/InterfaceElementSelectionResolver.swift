@@ -24,6 +24,9 @@ public struct InterfaceElementSelectionResolver: Sendable {
         in window: WindowDescriptor,
         primaryDisplayHeight: CGFloat
     ) -> InterfaceElementResolution {
+        // A pinned image is already a complete capture target. Querying our
+        // own process here could resolve the live selection overlay instead.
+        guard !window.isPinnedImage else { return .noElement }
         guard Self.isAccessibilityAuthorized else {
             return .accessibilityPermissionRequired
         }
