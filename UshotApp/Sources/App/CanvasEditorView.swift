@@ -50,6 +50,15 @@ final class CanvasEditorCommandGate: ObservableObject {
         return true
     }
 
+    func applyTextFont(_ fontName: String?) {
+        guard !isInteractionSuspended else { return }
+        guard let canvas else {
+            AppLog.capture.fault("Rejected Canvas font change without its registered canvas.")
+            return
+        }
+        canvas.applyTextFont(fontName)
+    }
+
     func registerInspectorFinalizer(identifier: UUID, action: @escaping () throws -> Void) {
         inspectorFinalizer = (identifier, action)
     }
@@ -273,6 +282,25 @@ struct CanvasEditorRootView: View {
                         }
                     )
                     .id(item.id)
+                } else if session.currentTool == .arrow || session.currentTool == .text {
+                    GroupBox("Tool Style") {
+                        if session.currentTool == .arrow {
+                            Picker("Arrow Style", selection: Binding(
+                                get: { session.creationStyle(for: .arrow).arrowHeadStyle },
+                                set: { session.setArrowHeadStyle($0) }
+                            )) {
+                                ForEach(ArrowHeadStyle.allCases, id: \.rawValue) { style in
+                                    Text(style.title).tag(style)
+                                }
+                            }
+                        } else {
+                            AnnotationFontPickerButton(
+                                selection: session.currentStyle.fontName,
+                                onSelect: commandGate.applyTextFont,
+                                accessibilityID: "canvas.tool.text.font"
+                            )
+                        }
+                    }
                 } else {
                     ContentUnavailableView(
                         "No Selection",
@@ -507,6 +535,13 @@ private struct SelectionPropertiesInspector: View {
         GroupBox("Selection") {
             VStack(alignment: .leading, spacing: 10) {
                 Text(draft.item.name).font(.headline)
+                if draft.item.kind == .arrow {
+                    Picker("Arrow Style", selection: $draft.arrowHeadStyle) {
+                        ForEach(ArrowHeadStyle.allCases, id: \.rawValue) { style in
+                            Text(style.title).tag(style)
+                        }
+                    }
+                }
                 LabeledContent("Line width") {
                     inspectorSlider(
                         value: $draft.lineWidth,
@@ -550,6 +585,11 @@ private struct SelectionPropertiesInspector: View {
                     }
                 }
                 if draft.item.kind == .text {
+                    AnnotationFontPickerButton(
+                        selection: draft.item.style.fontName,
+                        onSelect: selectFont,
+                        accessibilityID: "canvas.selection.text.font"
+                    )
                     TextField("Text", text: $draft.text)
                         .focused($isTextFieldFocused)
                         .onSubmit {
@@ -655,6 +695,24 @@ private struct SelectionPropertiesInspector: View {
         .onDisappear {
             commandGate.unregisterInspectorFinalizer(identifier: finalizerID)
             finishInspectorEdit(reason: "inspector-disappear")
+        }
+    }
+
+    private func selectFont(_ fontName: String?) {
+        guard commandGate.resolveActiveTextEditing(reason: "inspector-font-change") else { return }
+        finishInspectorEdit(reason: "font-change")
+        guard let stored = controller.document.annotations.first(where: { $0.id == item.id }),
+              !stored.isLocked, stored.kind == .text else { return }
+        do {
+            try controller.updateTextItemLayout(
+                id: stored.id,
+                text: stored.text ?? "",
+                fontSize: stored.style.fontSize,
+                wrapWidthStrategy: .preserve,
+                fontSelection: fontName.map(AnnotationTextFontSelection.named) ?? .system
+            )
+        } catch {
+            rejectInspectorUpdate(error, operation: "change-font", transaction: nil, annotationID: stored.id)
         }
     }
 
@@ -868,6 +926,11 @@ private struct AnnotationInspectorDraft: Equatable {
         set { item.style.fontSize = newValue }
     }
 
+    var arrowHeadStyle: ArrowHeadStyle {
+        get { item.style.arrowHeadStyle }
+        set { item.style.arrowHeadStyle = newValue }
+    }
+
     func resolvedNonTextItem(from storedItem: AnnotationItem) -> AnnotationItem {
         precondition(
             storedItem.id == item.id && storedItem.kind == item.kind && item.kind != .text,
@@ -875,6 +938,9 @@ private struct AnnotationInspectorDraft: Equatable {
         )
         var resolved = storedItem
         resolved.style.lineWidth = item.style.lineWidth
+        if storedItem.kind == .arrow {
+            resolved.style.arrowHeadStyle = item.style.arrowHeadStyle
+        }
         resolved.opacity = item.opacity
         resolved.transform.rotationRadians = item.transform.rotationRadians
         if storedItem.kind.allowsUserResize {

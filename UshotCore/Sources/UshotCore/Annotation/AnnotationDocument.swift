@@ -62,17 +62,21 @@ public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
     /// arrow heads. Revision 3 introduced multiline text and explicit chrome.
     /// Revision 4 uses the exact TextKit line plan plus persisted asymmetric
     /// glyph overhangs. Revision 5 keeps transformed blur/mosaic masks anchored
-    /// to the current base-image pixels after a canvas rebase.
+    /// to the current base-image pixels after a canvas rebase. Revision 6 adds
+    /// deterministic hand-drawn arrows. Revision 7 strengthens their pen
+    /// variation and retracing. Revision 8 uses a nearly straight single stroke
+    /// and a slender open head without changing the other geometric styles.
     /// This remains independent from `schemaVersion`: it
     /// describes the renderer that produced a cached preview bitmap, while
     /// schema version 2 separately protects the editable text-layout payload
     /// from being opened and destructively rewritten by a version-1 reader.
     public static let legacyCachedPreviewRenderRevision = 1
-    public static let currentCachedPreviewRenderRevision = 5
+    public static let currentCachedPreviewRenderRevision = 8
 
     private static let paperPlaneArrowCachedPreviewRenderRevision = 2
     private static let textKitPlanCachedPreviewRenderRevision = 4
     private static let sourceAnchoredEffectCachedPreviewRenderRevision = 5
+    private static let handDrawnArrowCachedPreviewRenderRevision = 8
 
     public let id: UUID
     public var schemaVersion: Int
@@ -140,6 +144,13 @@ public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
     public var cachedPreviewRevisionAffectedAnnotationCount: Int {
         annotations.reduce(into: 0) { count, item in
             guard item.isVisible else { return }
+            if cachedPreviewRenderRevision < Self.handDrawnArrowCachedPreviewRenderRevision,
+               item.kind == .arrow,
+               item.style.arrowHeadStyle == .handDrawn
+            {
+                count += 1
+                return
+            }
             if cachedPreviewRenderRevision < Self.sourceAnchoredEffectCachedPreviewRenderRevision,
                (item.kind == .blur || item.kind == .mosaic),
                item.transform != AnnotationTransform(),
@@ -160,7 +171,7 @@ public struct AnnotationDocument: Codable, Equatable, Identifiable, Sendable {
                 return
             }
             switch item.style.arrowHeadStyle {
-            case .open:
+            case .open, .handDrawn:
                 return
             case .filled, .double, .tapered:
                 count += 1
@@ -526,6 +537,17 @@ public enum ArrowHeadStyle: String, Codable, CaseIterable, Sendable {
     case filled
     case tapered
     case double
+    case handDrawn
+
+    public var title: String {
+        switch self {
+        case .open: return NSLocalizedString("Line Arrow", comment: "Arrow style name")
+        case .filled: return NSLocalizedString("Solid Arrow", comment: "Arrow style name")
+        case .tapered: return NSLocalizedString("Tapered Arrow", comment: "Arrow style name")
+        case .double: return NSLocalizedString("Double Arrow", comment: "Arrow style name")
+        case .handDrawn: return NSLocalizedString("Hand-drawn Arrow", comment: "Arrow style name")
+        }
+    }
 }
 
 public enum ShapeFillMode: String, Codable, CaseIterable, Sendable {
@@ -1007,6 +1029,9 @@ public struct AnnotationTextLayoutPayload: Codable, Equatable, Sendable {
 
 public struct AnnotationItem: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
+    /// Copies can retain the source pen marks while receiving a new identity.
+    /// Absence uses `id`, keeping new and legacy items deterministic.
+    public let handDrawnSeed: UUID?
     public var name: String
     public var kind: AnnotationKind
     public var zIndex: Int
@@ -1024,6 +1049,7 @@ public struct AnnotationItem: Codable, Equatable, Identifiable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id
+        case handDrawnSeed
         case name
         case kind
         case zIndex
@@ -1051,7 +1077,8 @@ public struct AnnotationItem: Codable, Equatable, Identifiable, Sendable {
         isLocked: Bool = false,
         text: String? = nil,
         textLayout: AnnotationTextLayoutPayload? = nil,
-        counterValue: Int? = nil
+        counterValue: Int? = nil,
+        handDrawnSeed: UUID? = nil
     ) {
         precondition(
             textLayout == nil || kind == .text,
@@ -1076,6 +1103,7 @@ public struct AnnotationItem: Codable, Equatable, Identifiable, Sendable {
             }
         }
         self.id = id
+        self.handDrawnSeed = handDrawnSeed
         self.name = name ?? kind.rawValue.capitalized
         self.kind = kind
         self.zIndex = zIndex
@@ -1093,6 +1121,7 @@ public struct AnnotationItem: Codable, Equatable, Identifiable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
+        handDrawnSeed = try container.decodeIfPresent(UUID.self, forKey: .handDrawnSeed)
         name = try container.decode(String.self, forKey: .name)
         kind = try container.decode(AnnotationKind.self, forKey: .kind)
         zIndex = try container.decode(Int.self, forKey: .zIndex)
@@ -1307,6 +1336,7 @@ public struct AnnotationItem: Codable, Equatable, Identifiable, Sendable {
 
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(handDrawnSeed, forKey: .handDrawnSeed)
         try container.encode(name, forKey: .name)
         try container.encode(kind, forKey: .kind)
         try container.encode(zIndex, forKey: .zIndex)

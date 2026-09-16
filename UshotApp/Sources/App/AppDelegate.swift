@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppKitDrawingFonts.prepare()
         do {
+            try AnnotationFonts.register()
             let environment = try AppEnvironment.live()
             self.environment = environment
 #if DEBUG

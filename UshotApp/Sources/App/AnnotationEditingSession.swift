@@ -33,6 +33,8 @@ final class AnnotationEditingSession: ObservableObject {
     @Published var currentStyle: AnnotationStyle
     private(set) var currentStyleOrigin: CurrentStyleOrigin = .toolDefault
     private var currentToolDefaultStyle: AnnotationStyle
+    private var textFontSelection: AnnotationTextFontSelection?
+    private var arrowHeadStyleSelection: ArrowHeadStyle?
     @Published var lineWidthUnit: AnnotationLineWidthUnit
     @Published private(set) var baseImage: CapturedImage
     @Published private(set) var previewImage: CapturedImage
@@ -273,11 +275,21 @@ final class AnnotationEditingSession: ObservableObject {
     }
 
     func defaultStyle(for tool: AnnotationTool) -> AnnotationStyle {
-        Self.makeDefaultStyle(
+        var style = Self.makeDefaultStyle(
             for: tool,
             editorSettings: editorSettings,
             backingScale: baseImage.scale
         )
+        if tool == .text, let textFontSelection {
+            switch textFontSelection {
+            case .system: style.fontName = nil
+            case .named(let name): style.fontName = name
+            }
+        }
+        if tool == .arrow, let arrowHeadStyleSelection {
+            style.arrowHeadStyle = arrowHeadStyleSelection
+        }
+        return style
     }
 
     /// The style used to create a new annotation is owned independently from
@@ -310,6 +322,24 @@ final class AnnotationEditingSession: ObservableObject {
         let cachedColorHex = AnnotationColorPalette.hexString(
             for: currentToolDefaultStyle.strokeColor
         )
+        if self.editorSettings.defaultTextFontName != editorSettings.defaultTextFontName {
+            textFontSelection = nil
+            if currentTool == .text {
+                currentToolDefaultStyle.fontName = editorSettings.defaultTextFontName
+                if currentStyleOrigin == .toolDefault {
+                    adoptCurrentStyle(currentToolDefaultStyle, origin: .toolDefault)
+                }
+            }
+        }
+        if self.editorSettings.defaultArrowHeadStyle != editorSettings.defaultArrowHeadStyle {
+            arrowHeadStyleSelection = nil
+            if currentTool == .arrow {
+                currentToolDefaultStyle.arrowHeadStyle = editorSettings.defaultArrowHeadStyle
+                if currentStyleOrigin == .toolDefault {
+                    adoptCurrentStyle(currentToolDefaultStyle, origin: .toolDefault)
+                }
+            }
+        }
         self.editorSettings = editorSettings
         let replacementStyle = defaultStyle(for: currentTool)
         let replacementColorHex = AnnotationColorPalette.hexString(
@@ -350,11 +380,22 @@ final class AnnotationEditingSession: ObservableObject {
     }
 
     func setArrowHeadStyle(_ arrowHeadStyle: ArrowHeadStyle) {
+        arrowHeadStyleSelection = arrowHeadStyle
+        guard currentTool == .arrow else { return }
         var style = currentToolDefaultStyle
         style.arrowHeadStyle = arrowHeadStyle
         currentToolDefaultStyle = style
         if currentStyleOrigin == .toolDefault {
             adoptCurrentStyle(style, origin: .toolDefault)
+        }
+    }
+
+    func setTextFont(_ fontName: String?) {
+        textFontSelection = fontName.map(AnnotationTextFontSelection.named) ?? .system
+        guard currentTool == .text else { return }
+        currentToolDefaultStyle.fontName = fontName
+        if currentStyleOrigin == .toolDefault {
+            adoptCurrentStyle(currentToolDefaultStyle, origin: .toolDefault)
         }
     }
 
@@ -567,6 +608,7 @@ final class AnnotationEditingSession: ObservableObject {
             ),
             fontSize: editorSettings.logicalDefaultFontSize(backingScale: backingScale),
             fontName: tool == .text ? editorSettings.defaultTextFontName : nil,
+            arrowHeadStyle: editorSettings.defaultArrowHeadStyle,
             cornerRadius: editorSettings.logicalDefaultRectangleCornerRadius(
                 backingScale: backingScale
             )

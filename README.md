@@ -33,6 +33,7 @@ Region capture keeps the frozen desktop visible from selection through confirmat
 
 - **Capture precisely.** Capture a region, window, current display, selected display, or every display. Region mode freezes participating displays, snaps to the topmost eligible application window, optionally refines to useful controls with Accessibility permission, and preserves native backing pixels across mixed-scale displays. Window and display previews stay crisp at their original size and enter with a brief eased transition.
 - **Annotate without flattening.** Use shapes, lines, paper-plane arrows, freehand, text, counters, highlight, mosaic, blur, Spotlight, layers, and undo/redo. Start in the quick toolbar and continue in the full Canvas Editor with the same editable document.
+- **Use handwritten styles.** Choose Arrow → Hand-drawn Arrow or Text → Handwritten. Bundled Excalifont and Xiaolai support Latin and Chinese text offline. Save your default font and arrow style under Settings → Editor → Text / Arrow; drag the quick toolbar by its left handle to keep it out of the way.
 - **Keep captures within reach.** Pin multiple movable, proportionally resizable screenshots at once; each remains independent across display seams, Spaces, and full-screen apps. Pinned images begin read-only, support anchored trackpad zoom, and show their own toolbar only when you want to edit.
 - **Inspect colors and dimensions.** Sample colors across displays with managed sRGB, Display P3, Generic RGB, and Adobe RGB (1998) output, or measure in logical points and physical pixels with the screen ruler.
 - **Keep local history on your terms.** Editable history is optional, off by default, and stored as inspectable PNG and versioned JSON records. Export PNG, JPEG, or TIFF with optional source-profile preservation.
@@ -149,3 +150,5 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md) and complete the relevant checks i
 ## License
 
 Ushot is available under the [Apache License 2.0](LICENSE). Future separately distributed paid modules or services do not revoke or narrow the rights already granted for published source.
+
+Bundled Excalifont and Xiaolai remain under SIL Open Font License 1.1; see the [font sources and license notices](UshotCore/Sources/UshotCore/Resources/Fonts/README.md).
