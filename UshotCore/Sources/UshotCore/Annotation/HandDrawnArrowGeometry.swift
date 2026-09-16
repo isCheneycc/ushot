@@ -91,7 +91,8 @@ struct HandDrawnArrowGeometry: Equatable, Sendable {
         let headNormal = CGPoint(x: -tangent.y, y: tangent.x)
         let headLength = min(max(12, penWidth * 12), length * 0.24)
         let halfWidth = headLength * 0.34
-        wings = [-1.0, 1.0].map { side in
+        let sides: [CGFloat] = [-1, 1]
+        wings = sides.map { side -> Stroke in
             let reach = headLength * (1 + 0.04 * variation.signedValue())
             let spread = halfWidth * (1 + 0.08 * variation.signedValue()) * side
             let wingStart = CGPoint(
