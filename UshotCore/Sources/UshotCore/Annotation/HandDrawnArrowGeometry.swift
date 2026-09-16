@@ -92,7 +92,8 @@ struct HandDrawnArrowGeometry: Equatable, Sendable {
         let headLength = min(max(12, penWidth * 12), length * 0.24)
         let halfWidth = headLength * 0.34
         let sides: [CGFloat] = [-1, 1]
-        wings = sides.map { side -> Stroke in
+        var headStrokes: [Stroke] = []
+        for side in sides {
             let reach = headLength * (1 + 0.04 * variation.signedValue())
             let spread = halfWidth * (1 + 0.08 * variation.signedValue()) * side
             let wingStart = CGPoint(
@@ -100,22 +101,27 @@ struct HandDrawnArrowGeometry: Equatable, Sendable {
                 y: tip.y - tangent.y * reach + headNormal.y * spread
             )
             let deviation = min(penWidth * 0.7, headLength * 0.055) * variation.signedValue()
+            let wingDX = tip.x - wingStart.x
+            let wingDY = tip.y - wingStart.y
+            let bendX = headNormal.x * deviation
+            let bendY = headNormal.y * deviation
             let control1 = CGPoint(
-                x: wingStart.x + (tip.x - wingStart.x) / 3 + headNormal.x * deviation,
-                y: wingStart.y + (tip.y - wingStart.y) / 3 + headNormal.y * deviation
+                x: wingStart.x + wingDX / 3 + bendX,
+                y: wingStart.y + wingDY / 3 + bendY
             )
             let control2 = CGPoint(
-                x: wingStart.x + (tip.x - wingStart.x) * 2 / 3 + headNormal.x * deviation * 0.6,
-                y: wingStart.y + (tip.y - wingStart.y) * 2 / 3 + headNormal.y * deviation * 0.6
+                x: wingStart.x + wingDX * 2 / 3 + bendX * 0.6,
+                y: wingStart.y + wingDY * 2 / 3 + bendY * 0.6
             )
-            return Stroke(
+            headStrokes.append(Stroke(
                 start: wingStart,
                 control1: control1,
                 control2: control2,
                 end: tip,
                 lineWidth: penWidth * (0.98 + 0.02 * variation.signedValue())
-            )
+            ))
         }
+        wings = headStrokes
     }
 
     func contains(_ point: CGPoint, tolerance: CGFloat) -> Bool {
