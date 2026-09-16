@@ -35,6 +35,7 @@ let package = Package(
         .target(
             name: "UshotCore",
             path: "UshotCore/Sources/UshotCore",
+            resources: [.copy("Resources/Fonts")],
             linkerSettings: screenCaptureKitWeakLinkerSettings
         ),
         .executableTarget(

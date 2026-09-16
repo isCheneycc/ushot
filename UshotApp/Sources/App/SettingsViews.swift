@@ -524,6 +524,7 @@ private struct EditorSettingsView: View {
                     selectedTool: $selectedTool,
                     onSetColor: setToolDefaultColor,
                     onSetTextFont: setDefaultTextFont,
+                    onSetArrowStyle: setDefaultArrowStyle,
                     onSetFontSize: setDefaultFontSize,
                     onSetFontSizeUnit: setDefaultFontSizeUnit,
                     onSetLineWidth: setDefaultLineWidth,
@@ -593,6 +594,8 @@ private struct EditorSettingsView: View {
                     settings.editor.defaultRectangleColorHex = hex
                 case .ellipse:
                     settings.editor.defaultEllipseColorHex = hex
+                case .arrow:
+                    settings.editor.defaultColorHex = hex
                 default:
                     preconditionFailure("Unsupported settings default tool: \(tool.rawValue)")
                 }
@@ -605,6 +608,14 @@ private struct EditorSettingsView: View {
     private func setDefaultTextFont(_ fontName: String?) {
         do {
             try store.update(\AppSettings.editor.defaultTextFontName, to: fontName)
+        } catch {
+            alerts.present(error)
+        }
+    }
+
+    private func setDefaultArrowStyle(_ style: ArrowHeadStyle) {
+        do {
+            try store.update(\AppSettings.editor.defaultArrowHeadStyle, to: style)
         } catch {
             alerts.present(error)
         }
@@ -909,6 +920,7 @@ private struct AnnotationToolDefaultsSettingsSection: View {
     @Binding var selectedTool: AnnotationTool
     let onSetColor: (String, AnnotationTool) -> Void
     let onSetTextFont: (String?) -> Void
+    let onSetArrowStyle: (ArrowHeadStyle) -> Void
     let onSetFontSize: (Double) -> Void
     let onSetFontSizeUnit: (AnnotationMeasurementUnit) -> Void
     let onSetLineWidth: (Double) -> Void
@@ -920,6 +932,10 @@ private struct AnnotationToolDefaultsSettingsSection: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Tool Default Styles")
                 .font(.headline)
+
+            Text("These styles are saved and applied to new annotations.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             HStack(spacing: 0) {
                 AnnotationToolDefaultsSidebar(
@@ -938,6 +954,7 @@ private struct AnnotationToolDefaultsSettingsSection: View {
                         onSetColor(editor.defaultColorHex, selectedTool)
                     },
                     onSetTextFont: onSetTextFont,
+                    onSetArrowStyle: onSetArrowStyle,
                     onSetFontSize: onSetFontSize,
                     onSetFontSizeUnit: onSetFontSizeUnit,
                     onSetLineWidth: onSetLineWidth,
@@ -946,7 +963,7 @@ private struct AnnotationToolDefaultsSettingsSection: View {
                     rectangleCornerRadius: rectangleCornerRadius
                 )
             }
-            .frame(height: 158)
+            .frame(height: 210)
             .background(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .fill(Color(nsColor: .controlBackgroundColor))
@@ -987,7 +1004,7 @@ private struct ToolbarColorButton: View {
 }
 
 private struct AnnotationToolDefaultsSidebar: View {
-    private static let tools: [AnnotationTool] = [.text, .rectangle, .ellipse]
+    private static let tools: [AnnotationTool] = [.text, .arrow, .rectangle, .ellipse]
 
     let editor: EditorSettings
     @Binding var selectedTool: AnnotationTool
@@ -1014,6 +1031,8 @@ private struct AnnotationToolDefaultsSidebar: View {
         switch tool {
         case .text:
             return AnnotationFontCatalog.displayName(for: editor.defaultTextFontName)
+        case .arrow:
+            return editor.defaultArrowHeadStyle.title
         case .rectangle:
             let width = formattedMeasurement(editor.defaultLineWidth)
             let radius = formattedMeasurement(editor.defaultRectangleCornerRadius)
@@ -1074,6 +1093,9 @@ private struct AnnotationToolDefaultRow: View {
         case .text:
             Text(verbatim: "T")
                 .font(.system(size: 27, weight: .light, design: .serif))
+        case .arrow:
+            Image(systemName: "arrow.up.right")
+                .font(.title2)
         case .rectangle:
             Image(systemName: "rectangle")
                 .font(.title2)
@@ -1098,6 +1120,7 @@ private struct AnnotationToolDefaultsDetail: View {
     let onSetColor: (String) -> Void
     let onUseGeneralColor: () -> Void
     let onSetTextFont: (String?) -> Void
+    let onSetArrowStyle: (ArrowHeadStyle) -> Void
     let onSetFontSize: (Double) -> Void
     let onSetFontSizeUnit: (AnnotationMeasurementUnit) -> Void
     let onSetLineWidth: (Double) -> Void
@@ -1107,7 +1130,7 @@ private struct AnnotationToolDefaultsDetail: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            EditorDetailRow(title: "Color") {
+            EditorDetailRow(title: selectedTool == .arrow ? "General color" : "Color") {
                 AnnotationColorMenu(
                     colors: editor.availableColorHexes,
                     selection: editor.defaultColorHex(for: selectedTool),
@@ -1115,11 +1138,13 @@ private struct AnnotationToolDefaultsDetail: View {
                 )
                 .accessibilityIdentifier(colorAccessibilityIdentifier)
 
-                Button(action: onUseGeneralColor) {
-                    Label("Use General", systemImage: "link")
+                if selectedTool != .arrow {
+                    Button(action: onUseGeneralColor) {
+                        Label("Use General", systemImage: "link")
+                    }
+                    .disabled(editor.defaultColorHex(for: selectedTool) == editor.defaultColorHex)
+                    .help("Use the current general annotation color for this tool")
                 }
-                .disabled(editor.defaultColorHex(for: selectedTool) == editor.defaultColorHex)
-                .help("Use the current general annotation color for this tool")
             }
 
             Divider()
@@ -1134,6 +1159,15 @@ private struct AnnotationToolDefaultsDetail: View {
                     onSetFont: onSetTextFont,
                     onSetFontSize: onSetFontSize,
                     onSetFontSizeUnit: onSetFontSizeUnit
+                )
+            case .arrow:
+                ArrowToolDefaultDetail(
+                    style: editor.defaultArrowHeadStyle,
+                    lineWidth: editor.defaultLineWidth,
+                    lineWidthUnit: editor.defaultLineWidthUnit,
+                    onSetStyle: onSetArrowStyle,
+                    onSetLineWidth: onSetLineWidth,
+                    onSetLineWidthUnit: onSetLineWidthUnit
                 )
             case .rectangle:
                 ShapeToolDefaultDetail(
@@ -1164,6 +1198,7 @@ private struct AnnotationToolDefaultsDetail: View {
     private var colorAccessibilityIdentifier: String {
         switch selectedTool {
         case .text: return "settings.editor.defaultTextColor"
+        case .arrow: return "settings.editor.defaultArrowColor"
         case .rectangle: return "settings.editor.defaultRectangleColor"
         case .ellipse: return "settings.editor.defaultEllipseColor"
         default:
@@ -1183,7 +1218,7 @@ private struct TextToolDefaultDetail: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            EditorDetailRow(title: "Font") {
+            EditorDetailRow(title: "Default font") {
                 AnnotationFontPickerButton(
                     selection: fontName,
                     onSelect: onSetFont
@@ -1234,36 +1269,12 @@ private struct ShapeToolDefaultDetail: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            EditorDetailRow(title: "Line width") {
-                Capsule()
-                    .fill(.primary)
-                    .frame(width: 54, height: linePreviewWidth)
-                    .accessibilityHidden(true)
-
-                Stepper(
-                    value: Binding(get: { lineWidth }, set: onSetLineWidth),
-                    in: EditorMeasurementLimits.displayedLineWidthRange(
-                        unit: lineWidthUnit,
-                        backingScale: displayScale
-                    ),
-                    step: EditorMeasurementLimits.displayedStep(
-                        unit: lineWidthUnit,
-                        backingScale: displayScale
-                    )
-                ) {
-                    Text(lineWidth, format: .number.precision(.fractionLength(0...1)))
-                        .monospacedDigit()
-                        .frame(minWidth: 28, alignment: .trailing)
-                }
-                .accessibilityIdentifier("settings.editor.defaultLineWidth")
-
-                AnnotationMeasurementUnitPicker(
-                    title: "Line width unit",
-                    selection: lineWidthUnit,
-                    onSelect: onSetLineWidthUnit,
-                    accessibilityIdentifier: "settings.editor.defaultLineWidthUnit"
-                )
-            }
+            LineWidthToolDefaultRow(
+                lineWidth: lineWidth,
+                unit: lineWidthUnit,
+                onSetWidth: onSetLineWidth,
+                onSetUnit: onSetLineWidthUnit
+            )
 
             Divider()
                 .padding(.leading, 18)
@@ -1300,14 +1311,6 @@ private struct ShapeToolDefaultDetail: View {
         }
     }
 
-    private var linePreviewWidth: CGFloat {
-        let logicalWidth = lineWidthUnit.logicalPoints(
-            fromDisplayedValue: lineWidth,
-            backingScale: displayScale
-        )
-        return max(1, min(8, logicalWidth))
-    }
-
     private var cornerRadiusPreviewValue: CGFloat {
         guard let rectangleCornerRadius else { return 0 }
         let logicalRadius = rectangleCornerRadiusUnit.logicalPoints(
@@ -1315,6 +1318,89 @@ private struct ShapeToolDefaultDetail: View {
             backingScale: displayScale
         )
         return min(8, logicalRadius)
+    }
+}
+
+private struct ArrowToolDefaultDetail: View {
+    let style: ArrowHeadStyle
+    let lineWidth: Double
+    let lineWidthUnit: AnnotationMeasurementUnit
+    let onSetStyle: (ArrowHeadStyle) -> Void
+    let onSetLineWidth: (Double) -> Void
+    let onSetLineWidthUnit: (AnnotationMeasurementUnit) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            EditorDetailRow(title: "Default arrow style") {
+                Picker("Arrow Style", selection: Binding(get: { style }, set: onSetStyle)) {
+                    ForEach(ArrowHeadStyle.allCases, id: \.self) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .accessibilityIdentifier("settings.editor.defaultArrowStyle")
+            }
+
+            Divider()
+                .padding(.leading, 18)
+
+            LineWidthToolDefaultRow(
+                lineWidth: lineWidth,
+                unit: lineWidthUnit,
+                onSetWidth: onSetLineWidth,
+                onSetUnit: onSetLineWidthUnit
+            )
+        }
+    }
+}
+
+private struct LineWidthToolDefaultRow: View {
+    let lineWidth: Double
+    let unit: AnnotationMeasurementUnit
+    let onSetWidth: (Double) -> Void
+    let onSetUnit: (AnnotationMeasurementUnit) -> Void
+    @Environment(\.displayScale) private var displayScale
+
+    var body: some View {
+        EditorDetailRow(title: "Line width") {
+            Capsule()
+                .fill(.primary)
+                .frame(width: 54, height: linePreviewWidth)
+                .accessibilityHidden(true)
+
+            Stepper(
+                value: Binding(get: { lineWidth }, set: onSetWidth),
+                in: EditorMeasurementLimits.displayedLineWidthRange(
+                    unit: unit,
+                    backingScale: displayScale
+                ),
+                step: EditorMeasurementLimits.displayedStep(
+                    unit: unit,
+                    backingScale: displayScale
+                )
+            ) {
+                Text(lineWidth, format: .number.precision(.fractionLength(0...1)))
+                    .monospacedDigit()
+                    .frame(minWidth: 28, alignment: .trailing)
+            }
+            .accessibilityIdentifier("settings.editor.defaultLineWidth")
+
+            AnnotationMeasurementUnitPicker(
+                title: "Line width unit",
+                selection: unit,
+                onSelect: onSetUnit,
+                accessibilityIdentifier: "settings.editor.defaultLineWidthUnit"
+            )
+        }
+    }
+
+    private var linePreviewWidth: CGFloat {
+        let logicalWidth = unit.logicalPoints(
+            fromDisplayedValue: lineWidth,
+            backingScale: displayScale
+        )
+        return max(1, min(8, logicalWidth))
     }
 }
 
@@ -1445,9 +1531,10 @@ private struct AnnotationColorMenu: View {
     }
 }
 
-private struct AnnotationFontPickerButton: View {
+struct AnnotationFontPickerButton: View {
     let selection: String?
     let onSelect: (String?) -> Void
+    var accessibilityID = "settings.editor.defaultTextFont"
     @State private var isPresented = false
 
     var body: some View {
@@ -1465,7 +1552,7 @@ private struct AnnotationFontPickerButton: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .accessibilityIdentifier("settings.editor.defaultTextFont")
+        .accessibilityIdentifier(accessibilityID)
         .accessibilityValue(AnnotationFontCatalog.displayName(for: selection))
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             AnnotationFontSearchPopover(
@@ -1609,6 +1696,13 @@ private struct AnnotationEffectPreviewContent: View {
                     lineWidth: previewLineWidth
                 )
                 .frame(width: 160, height: 42)
+        case .arrow:
+            ArrowDefaultStylePreview(
+                style: editor.defaultArrowHeadStyle,
+                colorHex: editor.defaultColorHex,
+                lineWidth: previewLineWidth
+            )
+            .frame(width: 160, height: 48)
         case .ellipse:
             Ellipse()
                 .stroke(
@@ -1632,6 +1726,51 @@ private struct AnnotationEffectPreviewContent: View {
                 )
             )
         )
+    }
+}
+
+private struct ArrowDefaultStylePreview: View {
+    let style: ArrowHeadStyle
+    let colorHex: String
+    let lineWidth: CGFloat
+
+    var body: some View {
+        Canvas { context, size in
+            context.withCGContext { cgContext in
+                guard let color = AnnotationColorPalette.color(fromHex: colorHex),
+                      let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
+                else {
+                    preconditionFailure("An arrow default preview requires its validated sRGB color.")
+                }
+                let item = AnnotationItem(
+                    id: UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)),
+                    kind: .arrow,
+                    zIndex: 0,
+                    geometry: .line(
+                        start: CGPoint(x: 14, y: size.height / 2),
+                        end: CGPoint(x: size.width - 14, y: size.height / 2)
+                    ),
+                    style: AnnotationStyle(
+                        strokeColor: color,
+                        lineWidth: lineWidth,
+                        arrowHeadStyle: style
+                    )
+                )
+                cgContext.translateBy(x: 0, y: size.height)
+                cgContext.scaleBy(x: 1, y: -1)
+                do {
+                    try AnnotationVectorRenderer().draw(
+                        item: item,
+                        in: cgContext,
+                        colorSpace: colorSpace,
+                        canvasBounds: CGRect(origin: .zero, size: size)
+                    )
+                } catch {
+                    preconditionFailure("A static arrow default preview failed to render: \(error)")
+                }
+            }
+        }
+        .accessibilityLabel(Text(style.title))
     }
 }
 
@@ -1942,7 +2081,7 @@ private struct PaletteColorReplacementSheet: View {
     }
 }
 
-private struct AnnotationFontOption: Identifiable {
+struct AnnotationFontOption: Identifiable {
     let title: String
     let fontName: String?
 
@@ -1950,7 +2089,9 @@ private struct AnnotationFontOption: Identifiable {
 }
 
 @MainActor
-private enum AnnotationFontCatalog {
+enum AnnotationFontCatalog {
+    static let handwrittenTitle = String(localized: "Handwritten (Excalifont)", comment: "Bundled handwriting font with Chinese support")
+
     static let options: [AnnotationFontOption] = {
         let manager = NSFontManager.shared
         let installed = manager.availableFontFamilies.compactMap { family -> AnnotationFontOption? in
@@ -1960,12 +2101,18 @@ private enum AnnotationFontCatalog {
                 weight: 5,
                 size: 18
             ) else { return nil }
+            guard font.fontName != AnnotationFonts.handwrittenFontName,
+                  font.fontName != AnnotationFonts.handwrittenFallbackFontName
+            else { return nil }
             return AnnotationFontOption(title: family, fontName: font.fontName)
         }
         .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         return [AnnotationFontOption(
             title: String(localized: "System Font", comment: "Default annotation font option"),
             fontName: nil
+        ), AnnotationFontOption(
+            title: handwrittenTitle,
+            fontName: AnnotationFonts.handwrittenFontName
         )] + installed
     }()
 
@@ -1977,11 +2124,20 @@ private enum AnnotationFontCatalog {
     static func search(_ query: String) -> [AnnotationFontOption] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return options }
-        return options.filter { $0.title.localizedCaseInsensitiveContains(trimmed) }
+        return options.filter {
+            $0.title.localizedCaseInsensitiveContains(trimmed)
+                || ($0.fontName?.localizedCaseInsensitiveContains(trimmed) ?? false)
+        }
     }
 
     static func font(for fontName: String?, size: CGFloat) -> Font {
         guard let fontName else { return .system(size: size) }
+        if fontName == AnnotationFonts.handwrittenFontName {
+            return Font(AnnotationTextLayout.font(style: AnnotationStyle(
+                fontSize: size,
+                fontName: fontName
+            )))
+        }
         return .custom(fontName, size: size)
     }
 }

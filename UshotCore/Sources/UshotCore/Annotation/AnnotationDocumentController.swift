@@ -258,6 +258,7 @@ public final class AnnotationDocumentController: ObservableObject {
         text: String,
         fontSize: CGFloat,
         wrapWidthStrategy: AnnotationTextWrapWidthStrategy,
+        fontSelection: AnnotationTextFontSelection? = nil,
         additionalMutation: (inout AnnotationItem) -> Void = { _ in }
     ) throws {
         guard let original = document.annotations.first(where: { $0.id == id }),
@@ -268,6 +269,7 @@ public final class AnnotationDocumentController: ObservableObject {
             text: text,
             fontSize: fontSize,
             wrapWidthStrategy: wrapWidthStrategy,
+            fontSelection: fontSelection,
             additionalMutation: additionalMutation
         )
         guard updated != original else { return }
@@ -291,6 +293,7 @@ public final class AnnotationDocumentController: ObservableObject {
         text: String,
         fontSize: CGFloat,
         wrapWidthStrategy: AnnotationTextWrapWidthStrategy,
+        fontSelection: AnnotationTextFontSelection? = nil,
         additionalMutation: (inout AnnotationItem) -> Void = { _ in }
     ) throws -> Bool {
         guard transaction.itemID == id else {
@@ -316,6 +319,7 @@ public final class AnnotationDocumentController: ObservableObject {
             text: text,
             fontSize: fontSize,
             wrapWidthStrategy: wrapWidthStrategy,
+            fontSelection: fontSelection,
             additionalMutation: additionalMutation
         )
         guard updated != original else { return true }
@@ -338,13 +342,15 @@ public final class AnnotationDocumentController: ObservableObject {
         text: String,
         fontSize: CGFloat,
         wrapWidthStrategy: AnnotationTextWrapWidthStrategy,
+        fontSelection: AnnotationTextFontSelection?,
         additionalMutation: (inout AnnotationItem) -> Void
     ) throws -> AnnotationItem {
         var updated = try AnnotationTextLayout.reflowedTextItem(
             original,
             text: text,
             fontSize: fontSize,
-            wrapWidthStrategy: wrapWidthStrategy
+            wrapWidthStrategy: wrapWidthStrategy,
+            fontSelection: fontSelection
         )
         let layoutOwnedItem = updated
         additionalMutation(&updated)

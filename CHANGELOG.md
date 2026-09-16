@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-09-16
+
+### Added
+
+- Add handwritten text with bundled Excalifont and Xiaolai Chinese fallback, available offline in quick annotation tools, the Canvas editor and exports.
+- Add a hand-drawn arrow style with a nearly straight single stroke and a slender open head.
+- Add saved default font and arrow-style controls under Settings → Editor, with temporary tool choices retained within each screenshot.
+- Allow region and pinned screenshot toolbars to move using a high-contrast drag handle, preserving their position through tool changes, Pin and hide/show.
+
+### Fixed
+
+- Preserve handwritten arrow geometry between drawing, commit, copy and export, and refresh older cached previews when reopening history.
+- Allow precisely horizontal and vertical arrows to be created.
+- Apply text font changes with consistent layout and a single undo step.
+
 ## [0.1.14] - 2026-09-09
 
 ### Added

@@ -292,6 +292,20 @@ public enum AnnotationTextWrapWidthStrategy: Equatable, Sendable {
     case scaleWithFont
 }
 
+/// A semantic font change. An omitted selection leaves an item's current font
+/// unchanged; `.system` deliberately restores the nil-name system font.
+public enum AnnotationTextFontSelection: Equatable, Sendable {
+    case system
+    case named(String)
+
+    public var fontName: String? {
+        switch self {
+        case .system: nil
+        case .named(let name): name
+        }
+    }
+}
+
 public struct AnnotationTextLayoutResolution: Equatable, Sendable {
     public let rect: CGRect
     public let payload: AnnotationTextLayoutPayload
@@ -353,6 +367,12 @@ public enum AnnotationTextLayout {
             throw AnnotationTextLayoutValidationError.invalidFontSize(pointSize)
         }
         if let fontName = style.fontName {
+            if fontName == AnnotationFonts.handwrittenFontName {
+                return try AnnotationFonts.resolvedHandwrittenFont(size: pointSize)
+            }
+            if fontName == AnnotationFonts.handwrittenFallbackFontName {
+                return try AnnotationFonts.resolvedHandwrittenFallbackFont(size: pointSize)
+            }
             guard let font = NSFont(name: fontName, size: pointSize) else {
                 throw AnnotationTextRenderingError.fontUnavailable(fontName)
             }
@@ -1786,14 +1806,15 @@ public enum AnnotationTextLayout {
         return firstLineMidY + style.fontSize * baselineOffsetFromCenterFactor
     }
 
-    /// Atomically changes text and/or font size while preserving the first-line
+    /// Atomically changes text and typography while preserving the first-line
     /// baseline. A missing legacy payload remains absent for a semantic no-op;
     /// the first real layout mutation materializes an explicit legacy payload.
     public static func reflowedTextItem(
         _ item: AnnotationItem,
         text: String,
         fontSize: CGFloat,
-        wrapWidthStrategy: AnnotationTextWrapWidthStrategy = .preserve
+        wrapWidthStrategy: AnnotationTextWrapWidthStrategy = .preserve,
+        fontSelection: AnnotationTextFontSelection? = nil
     ) throws -> AnnotationItem {
         guard item.kind == .text, case .rect(let rect) = item.geometry else {
             throw AnnotationTextLayoutValidationError.malformedPersistedPlan(
@@ -1804,7 +1825,14 @@ public enum AnnotationTextLayout {
             throw AnnotationTextLayoutValidationError.invalidFontSize(fontSize)
         }
         let originalText = item.text ?? ""
-        if originalText == text && abs(item.style.fontSize - fontSize) < 0.000_001 {
+        let fontName = if let fontSelection {
+            fontSelection.fontName
+        } else {
+            item.style.fontName
+        }
+        if originalText == text,
+           abs(item.style.fontSize - fontSize) < 0.000_001,
+           item.style.fontName == fontName {
             return item
         }
 
@@ -1832,6 +1860,7 @@ public enum AnnotationTextLayout {
         var result = item
         result.text = text
         result.style.fontSize = fontSize
+        result.style.fontName = fontName
         let payload = try safeLayoutPayload(
             for: text,
             style: result.style,

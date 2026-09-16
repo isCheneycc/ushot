@@ -266,6 +266,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     private var mosaicedEffectPreview: (blockSize: CGFloat, image: CGImage)?
     private var cancellables: Set<AnyCancellable> = []
     private var startPoint: CGPoint?
+    private var provisionalAnnotationID = UUID()
     private var currentPoint: CGPoint?
     private var freehandPoints: [CGPoint] = []
     private var selectionInteraction: SelectionInteraction?
@@ -681,6 +682,69 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         }
 
         session.setStrokeColor(convertedColor)
+    }
+
+    func applyTextFont(_ fontName: String?) {
+        guard !isInteractionSuspended, !hasActivePointerInteraction else { return }
+        let selection = fontName.map(AnnotationTextFontSelection.named) ?? .system
+        do {
+            if var state = textEditingState {
+                guard state.style.fontName != fontName else { return }
+                let originalState = state
+                state.style.fontName = fontName
+                let font = try AnnotationTextLayout.resolvedFont(style: state.style)
+                textEditingState = state
+                guard updateTextEditorFrame(scrollsToInsertionPoint: true, admittedFont: font) else {
+                    textEditingState = originalState
+                    _ = updateTextEditorFrame(scrollsToInsertionPoint: true)
+                    return
+                }
+                session.adoptCurrentStyle(
+                    state.style,
+                    origin: state.itemID == nil ? .newTextDraft : .existingAnnotation
+                )
+                needsDisplay = true
+                return
+            }
+
+            let selectedIDs = session.controller.selectedItemIDs
+            let selectedText = session.controller.document.orderedAnnotations.filter {
+                selectedIDs.contains($0.id) && $0.kind == .text && !$0.isLocked
+            }
+            // Resolve every layout before publishing any font change, so a
+            // multi-selection cannot leave a partially restyled document.
+            let replacements = try selectedText.map { item in
+                try AnnotationTextLayout.reflowedTextItem(
+                    item,
+                    text: item.text ?? "",
+                    fontSize: item.style.fontSize,
+                    wrapWidthStrategy: .preserve,
+                    fontSelection: selection
+                )
+            }
+            if let representative = replacements.first {
+                let byID = Dictionary(uniqueKeysWithValues: replacements.map { ($0.id, $0) })
+                session.controller.perform(label: "Change text font") { document in
+                    for index in document.annotations.indices {
+                        if let replacement = byID[document.annotations[index].id] {
+                            document.annotations[index] = replacement
+                        }
+                    }
+                }
+                session.adoptCurrentStyle(representative.style, origin: .existingAnnotation)
+            } else {
+                var style = session.defaultStyle(for: .text)
+                style.fontName = fontName
+                _ = try AnnotationTextLayout.resolvedFont(style: style)
+                session.setTextFont(fontName)
+            }
+            AppLog.capture.notice(
+                "Changed annotation text font: selected=\(selectedText.count, privacy: .public), font=\(fontName ?? "system", privacy: .public)"
+            )
+        } catch {
+            AppLog.capture.error("Rejected annotation font change: \(error.localizedDescription, privacy: .public)")
+            session.onError?(error)
+        }
     }
 
     func applyEditorSettings(_ editor: EditorSettings) {
@@ -1347,6 +1411,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             return
         }
 
+        provisionalAnnotationID = UUID()
         startPoint = point
         currentPoint = point
         switch session.currentTool {
@@ -1696,6 +1761,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     private func commit(tool: AnnotationTool, start: CGPoint, end: CGPoint) {
+        defer { provisionalAnnotationID = UUID() }
         let rect = CGRect(
             x: min(start.x, end.x),
             y: min(start.y, end.y),
@@ -1745,8 +1811,13 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             style: AnnotationStyle,
             minimumRect: CGRect
         ) {
-            guard minimumRect.width >= 2, minimumRect.height >= 2 else { return }
+            if case .line(let start, let end) = geometry {
+                guard hypot(end.x - start.x, end.y - start.y) >= 2 else { return }
+            } else {
+                guard minimumRect.width >= 2, minimumRect.height >= 2 else { return }
+            }
             addNewAnnotation(AnnotationItem(
+                id: provisionalAnnotationID,
                 kind: kind,
                 zIndex: zIndex,
                 geometry: geometry,
@@ -5732,7 +5803,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 isLocked: false,
                 text: original.text,
                 textLayout: original.textLayout,
-                counterValue: original.counterValue
+                counterValue: original.counterValue,
+                handDrawnSeed: original.kind == .arrow
+                    ? original.handDrawnSeed ?? original.id
+                    : original.handDrawnSeed
             ))
         }
         session.controller.selectedItemIDs = pastedIDs
@@ -5949,6 +6023,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             )
         case .arrow:
             provisionalItem = AnnotationItem(
+                id: provisionalAnnotationID,
                 kind: .arrow,
                 zIndex: 0,
                 geometry: .line(start: startPoint, end: currentPoint),

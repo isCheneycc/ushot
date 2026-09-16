@@ -2,7 +2,7 @@ import Foundation
 import UniformTypeIdentifiers
 
 public struct AppSettings: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 12
+    public static let currentSchemaVersion = 13
 
     public var schemaVersion: Int
     public var general: GeneralSettings
@@ -56,7 +56,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         output = try container.decode(OutputSettings.self, forKey: .output)
         editor = try EditorSettings(
             from: container.superDecoder(forKey: .editor),
-            allowsLegacyColorPalette: schemaVersion <= 8
+            allowsLegacyColorPalette: schemaVersion <= 8,
+            allowsMissingArrowHeadStyle: schemaVersion <= 12
         )
         colorPicker = try ColorPickerSettings(
             from: container.superDecoder(forKey: .colorPicker),
@@ -370,6 +371,7 @@ public struct EditorSettings: Codable, Equatable, Sendable {
     public var defaultFontSize: Double
     public var defaultFontSizeUnit: AnnotationMeasurementUnit
     public var defaultTextFontName: String?
+    public var defaultArrowHeadStyle: ArrowHeadStyle
 
     public init(
         defaultColorHex: String = "#FF3B30",
@@ -383,7 +385,8 @@ public struct EditorSettings: Codable, Equatable, Sendable {
         defaultRectangleCornerRadiusUnit: AnnotationMeasurementUnit = .pixels,
         defaultFontSize: Double = 18,
         defaultFontSizeUnit: AnnotationMeasurementUnit = .pixels,
-        defaultTextFontName: String? = nil
+        defaultTextFontName: String? = nil,
+        defaultArrowHeadStyle: ArrowHeadStyle = .filled
     ) {
         self.defaultColorHex = defaultColorHex
         self.defaultTextColorHex = defaultTextColorHex ?? defaultColorHex
@@ -397,6 +400,7 @@ public struct EditorSettings: Codable, Equatable, Sendable {
         self.defaultFontSize = defaultFontSize
         self.defaultFontSizeUnit = defaultFontSizeUnit
         self.defaultTextFontName = defaultTextFontName
+        self.defaultArrowHeadStyle = defaultArrowHeadStyle
     }
 
     public var availableColorHexes: [String] {
@@ -623,15 +627,21 @@ public struct EditorSettings: Codable, Equatable, Sendable {
         case defaultFontSize
         case defaultFontSizeUnit
         case defaultTextFontName
+        case defaultArrowHeadStyle
     }
 
     public init(from decoder: Decoder) throws {
-        try self.init(from: decoder, allowsLegacyColorPalette: false)
+        try self.init(
+            from: decoder,
+            allowsLegacyColorPalette: false,
+            allowsMissingArrowHeadStyle: false
+        )
     }
 
     fileprivate init(
         from decoder: Decoder,
-        allowsLegacyColorPalette: Bool
+        allowsLegacyColorPalette: Bool,
+        allowsMissingArrowHeadStyle: Bool
     ) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = EditorSettings()
@@ -685,6 +695,14 @@ public struct EditorSettings: Codable, Equatable, Sendable {
         ) ?? defaults.defaultFontSizeUnit
         defaultTextFontName = try container.decodeIfPresent(String.self, forKey: .defaultTextFontName)
             ?? defaults.defaultTextFontName
+        if !container.contains(.defaultArrowHeadStyle), allowsMissingArrowHeadStyle {
+            defaultArrowHeadStyle = .filled
+        } else {
+            defaultArrowHeadStyle = try container.decode(
+                ArrowHeadStyle.self,
+                forKey: .defaultArrowHeadStyle
+            )
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -704,6 +722,7 @@ public struct EditorSettings: Codable, Equatable, Sendable {
         try container.encode(defaultFontSize, forKey: .defaultFontSize)
         try container.encode(defaultFontSizeUnit, forKey: .defaultFontSizeUnit)
         try container.encodeIfPresent(defaultTextFontName, forKey: .defaultTextFontName)
+        try container.encode(defaultArrowHeadStyle, forKey: .defaultArrowHeadStyle)
     }
 }
 

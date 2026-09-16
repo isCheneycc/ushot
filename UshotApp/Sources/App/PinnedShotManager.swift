@@ -721,6 +721,13 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         let panelOrigin: CGPoint
     }
 
+    private struct ToolbarMoveInteraction {
+        let startedAt: TimeInterval
+        let pointerOrigin: CGPoint
+        let panelOrigin: CGPoint
+        let previousOffset: CGPoint?
+    }
+
     private struct PinchZoomInteraction {
         let startedAt: TimeInterval
         let beginPanelFrame: CGRect
@@ -793,6 +800,10 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private var didReleaseRegionToolbar = false
     private var toolbarContextMenuItem: NSMenuItem?
     private var windowMoveInteraction: WindowMoveInteraction?
+    private var toolbarMoveInteraction: ToolbarMoveInteraction?
+    /// A manual placement belongs to this screenshot, including toolbar hide/show
+    /// and the region-to-pin transition. A fresh screenshot starts automatically.
+    private var toolbarOffsetFromImage: CGPoint?
     private var pinchZoomRecognizer: NSMagnificationGestureRecognizer?
     private var pinchZoomInteraction: PinchZoomInteraction?
     private var liveResizeInProgress = false
@@ -838,6 +849,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             || regionDraftTransitionInProgress
             || regionDraftGeometryUpdateInProgress
             || windowMoveInteraction != nil
+            || toolbarMoveInteraction != nil
             || pinchZoomInteraction != nil
             || liveResizeInProgress
             || persistenceInputSuspension != nil
@@ -851,7 +863,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         guard historyCloseTask == nil,
               !exportInProgress, activeSavePanel == nil, promiseDelegates.isEmpty,
               !regionDraftTransitionInProgress, !regionDraftGeometryUpdateInProgress,
-              windowMoveInteraction == nil, pinchZoomInteraction == nil,
+              windowMoveInteraction == nil, toolbarMoveInteraction == nil, pinchZoomInteraction == nil,
               !liveResizeInProgress, !imageView.hasActivePointerInteraction,
               NSEvent.pressedMouseButtons == 0
         else {
@@ -1270,7 +1282,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         guard closeReason == nil, persistenceInputSuspension == nil,
               !exportInProgress, activeSavePanel == nil, promiseDelegates.isEmpty,
               !regionDraftTransitionInProgress, !regionDraftGeometryUpdateInProgress,
-              windowMoveInteraction == nil, pinchZoomInteraction == nil,
+              windowMoveInteraction == nil, toolbarMoveInteraction == nil, pinchZoomInteraction == nil,
               !liveResizeInProgress, !imageView.hasActivePointerInteraction
         else {
             AppLog.history.notice("Rejected Canvas ownership while the pinned screenshot owns an interaction or output")
@@ -1375,6 +1387,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     }
 
     private func prepareToolbarForDetachment(reason: String) {
+        finishToolbarMove(reason: reason)
         resolveActiveLineWidthEdit(.cancel, reason: reason)
         toolbarController.prepareForReuse()
         precondition(
@@ -1840,6 +1853,15 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             height: max(44, ceil(toolbarFittingSize.height))
         ))
         toolbarPanel.onEscape = { [weak self] in self?.handleEscape() }
+        toolbarController.onToolbarMoveBegan = { [weak self] in
+            self?.beginToolbarMove() ?? false
+        }
+        toolbarController.onToolbarMoveChanged = { [weak self] in
+            self?.updateToolbarMove()
+        }
+        toolbarController.onToolbarMoveEnded = { [weak self] in
+            self?.finishToolbarMove(reason: "pointer-up")
+        }
         if presentationMode.showsToolbar && !presentationMode.isRegionDraft {
             imagePanel.addChildWindow(toolbarPanel, ordered: .above)
         }
@@ -2135,6 +2157,11 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             self.imageView.applyArrowHeadStyle(arrowStyle)
             AppLog.capture.notice("Pinned arrow style selected: \(arrowStyle.rawValue, privacy: .public)")
         }
+        toolbarController.onTextFontChange = { [weak self] fontName in
+            guard let self else { return }
+            self.resolveActiveLineWidthEdit(.commitOrReject, reason: "text-font-change")
+            self.imageView.applyTextFont(fontName)
+        }
 
         session.$currentTool
             .sink { [weak self] tool in
@@ -2335,6 +2362,10 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     }
 
     private func handleEscape() {
+        if toolbarMoveInteraction != nil {
+            finishToolbarMove(reason: "escape", cancelled: true)
+            return
+        }
         if imageView.isTextEditing {
             guard imageView.endTextEditingIfNeeded(reason: .escape) else {
                 return
@@ -2793,7 +2824,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             NSSound.beep()
             return nil
         }
-        guard windowMoveInteraction == nil else {
+        guard windowMoveInteraction == nil, toolbarMoveInteraction == nil else {
             AppLog.export.notice(
                 "Rejected screenshot output during an active window move: action=\(action.rawValue, privacy: .public)"
             )
@@ -3056,12 +3087,14 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     }
 
     private func disableAnnotationEditing(reason: String) {
+        finishToolbarMove(reason: "annotation-editing-disabled-\(reason)")
         finishPinnedWindowMove(reason: "annotation-editing-disabled-\(reason)")
         resolveActiveLineWidthEdit(.cancel, reason: reason)
         imageView.setAnnotationEditingEnabled(false)
     }
 
     private func suspendAnnotationEditingForCanvasEditor(reason: String) {
+        finishToolbarMove(reason: "annotation-editing-suspended-\(reason)")
         finishPinnedWindowMove(reason: "annotation-editing-suspended-\(reason)")
         resolveActiveLineWidthEdit(.cancel, reason: reason)
         imageView.suspendAnnotationEditingForExternalOwner(reason: reason)
@@ -3147,6 +3180,18 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     }
 
     private func repositionToolbar() {
+        guard toolbarMoveInteraction == nil else { return }
+        if let offset = toolbarOffsetFromImage {
+            let anchor = regionToolbarAnchorFrame.origin
+            let proposedOrigin = CGPoint(x: anchor.x + offset.x, y: anchor.y + offset.y)
+            let proposedFrame = CGRect(origin: proposedOrigin, size: toolbarPanel.frame.size)
+            let screen = NSScreen.screens.first {
+                $0.frame.contains(CGPoint(x: proposedFrame.midX, y: proposedFrame.midY))
+            } ?? imagePanel.screen ?? NSScreen.main
+            guard let screen else { return }
+            toolbarPanel.setFrameOrigin(clampedToolbarOrigin(proposedOrigin, within: screen.visibleFrame))
+            return
+        }
         guard let screen = imagePanel.screen ?? NSScreen.main else { return }
         let visible = screen.visibleFrame
         let toolbarSize = toolbarPanel.frame.size
@@ -3163,6 +3208,73 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         toolbarPanel.setFrameOrigin(origin)
         AppLog.capture.debug(
             "Positioned pinned toolbar: x=\(origin.x, privacy: .public), y=\(origin.y, privacy: .public), screen=\(screen.localizedName, privacy: .public), reservedBelow=\(self.toolbarController.preferredStylePopoverSpaceBelow, privacy: .public)"
+        )
+    }
+
+    private func beginToolbarMove() -> Bool {
+        guard presentationMode.showsToolbar, !canvasEditorPresented,
+              closeReason == nil, historyCloseTask == nil,
+              persistenceInputSuspension == nil, !exportInProgress,
+              activeSavePanel == nil, !regionDraftTransitionInProgress,
+              !regionDraftGeometryUpdateInProgress, !liveResizeInProgress,
+              windowMoveInteraction == nil, toolbarMoveInteraction == nil,
+              pinchZoomInteraction == nil, !imageView.hasActivePointerInteraction,
+              admitPinnedPointerInput(action: "move-toolbar")
+        else { return false }
+        resolveActiveLineWidthEdit(.commitOrReject, reason: "toolbar-move")
+        guard resolveActiveTextEditing(reason: "toolbar-move") else { return false }
+        if let entrance = activeEntranceAnimation {
+            finishEntranceAnimationImmediately(imageTargetAlpha: entrance.imageTargetAlpha, reason: "toolbar-move")
+        }
+        toolbarController.dismissStylePopover()
+        toolbarMoveInteraction = ToolbarMoveInteraction(
+            startedAt: ProcessInfo.processInfo.systemUptime,
+            pointerOrigin: NSEvent.mouseLocation,
+            panelOrigin: toolbarPanel.frame.origin,
+            previousOffset: toolbarOffsetFromImage
+        )
+        AppLog.capture.notice("Screenshot toolbar move began: id=\(self.identifier.uuidString, privacy: .public)")
+        return true
+    }
+
+    private func updateToolbarMove() {
+        guard let interaction = toolbarMoveInteraction else { return }
+        let pointer = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(pointer) })
+            ?? toolbarPanel.screen ?? imagePanel.screen ?? NSScreen.main
+        else { return }
+        let proposedOrigin = CGPoint(
+            x: interaction.panelOrigin.x + pointer.x - interaction.pointerOrigin.x,
+            y: interaction.panelOrigin.y + pointer.y - interaction.pointerOrigin.y
+        )
+        let origin = clampedToolbarOrigin(proposedOrigin, within: screen.visibleFrame)
+        toolbarPanel.setFrameOrigin(origin)
+        let anchor = regionToolbarAnchorFrame.origin
+        toolbarOffsetFromImage = CGPoint(x: origin.x - anchor.x, y: origin.y - anchor.y)
+    }
+
+    private func finishToolbarMove(reason: String, cancelled: Bool = false) {
+        guard let interaction = toolbarMoveInteraction else { return }
+        toolbarMoveInteraction = nil
+        toolbarController.endToolbarDragging()
+        if cancelled {
+            toolbarOffsetFromImage = interaction.previousOffset
+            toolbarPanel.setFrameOrigin(interaction.panelOrigin)
+        }
+        AppLog.capture.notice(
+            "Screenshot toolbar move ended: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason, privacy: .public), cancelled=\(cancelled, privacy: .public), durationMs=\((ProcessInfo.processInfo.systemUptime - interaction.startedAt) * 1_000, privacy: .public)"
+        )
+    }
+
+    private func clampedToolbarOrigin(_ origin: CGPoint, within visible: CGRect) -> CGPoint {
+        let size = toolbarPanel.frame.size
+        let minimumX = visible.minX + 8
+        let maximumX = visible.maxX - 8 - size.width
+        let minimumY = visible.minY + 8
+        let maximumY = visible.maxY - 8 - size.height
+        return CGPoint(
+            x: maximumX >= minimumX ? min(max(origin.x, minimumX), maximumX) : visible.midX - size.width / 2,
+            y: maximumY >= minimumY ? min(max(origin.y, minimumY), maximumY) : visible.midY - size.height / 2
         )
     }
 
@@ -3851,6 +3963,66 @@ private final class PinnedShotToolbarPanel: NSPanel {
 }
 
 @MainActor
+private final class PinnedToolbarDragHandle: NSControl {
+    var onDragBegan: (() -> Bool)?
+    var onDragChanged: (() -> Void)?
+    var onDragEnded: (() -> Void)?
+    private var isDragging = false
+
+    override var isEnabled: Bool {
+        didSet {
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isEnabled {
+            addCursorRect(bounds, cursor: isDragging ? .closedHand : .openHand)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        (isEnabled ? NSColor.labelColor : NSColor.disabledControlTextColor).setFill()
+        for x in [bounds.midX - 2.5, bounds.midX + 2.5] {
+            for y in [bounds.midY - 5, bounds.midY, bounds.midY + 5] {
+                NSBezierPath(ovalIn: CGRect(x: x - 1, y: y - 1, width: 2, height: 2)).fill()
+            }
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled, onDragBegan?() == true else { return }
+        isDragging = true
+        NSCursor.closedHand.set()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging else { return }
+        onDragChanged?()
+        NSCursor.closedHand.set()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isDragging else { return }
+        onDragChanged?()
+        endDragging()
+        onDragEnded?()
+    }
+
+    func endDragging() {
+        guard isDragging else { return }
+        isDragging = false
+        window?.invalidateCursorRects(for: self)
+        NSCursor.openHand.set()
+    }
+}
+
+@MainActor
 private final class PinnedShotToolbarController: NSViewController, NSTextFieldDelegate {
     var onPin: (() -> Void)?
     var onCopy: (() -> Void)?
@@ -3872,6 +4044,10 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
     var onLineWidthUnitChange: ((AnnotationLineWidthUnit) -> Void)?
     var onShapeFillModeChange: ((ShapeFillMode) -> Void)?
     var onArrowStyleChange: ((ArrowHeadStyle) -> Void)?
+    var onTextFontChange: ((String?) -> Void)?
+    var onToolbarMoveBegan: (() -> Bool)?
+    var onToolbarMoveChanged: (() -> Void)?
+    var onToolbarMoveEnded: (() -> Void)?
 
     var preferredStylePopoverSpaceBelow: CGFloat {
         PinnedToolStylePopoverController.maximumPreferredPopoverHeight + 20
@@ -3880,6 +4056,7 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
     private let hiddenButton = NSButton()
     private let clickThroughButton = NSButton()
     private let confirmationButton = NSButton()
+    private let dragHandle = PinnedToolbarDragHandle()
     private let annotationColorButton = NSPopUpButton(frame: .zero, pullsDown: false)
     private let opacitySlider = NSSlider()
     private let lineWidthField = NSTextField()
@@ -3895,6 +4072,7 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
     private var lineWidthUnit: AnnotationLineWidthUnit
     private var shapeFillMode: ShapeFillMode
     private var arrowHeadStyle: ArrowHeadStyle
+    private var textFontName: String?
     private var stylePopover: NSPopover?
     private var colorActionGeneration: UInt = 0
     private var undoButton: NSButton?
@@ -4001,6 +4179,7 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
         currentColorHex = initialColorHex
         shapeFillMode = initialStyle.shapeFillMode
         arrowHeadStyle = initialStyle.arrowHeadStyle
+        textFontName = initialStyle.fontName
         self.showsPinAction = showsPinAction
         super.init(nibName: nil, bundle: nil)
     }
@@ -4034,6 +4213,19 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
             stack.topAnchor.constraint(equalTo: material.topAnchor),
             stack.bottomAnchor.constraint(equalTo: material.bottomAnchor)
         ])
+
+        let dragHelp = NSLocalizedString("Drag to move toolbar", comment: "Screenshot toolbar drag handle")
+        dragHandle.toolTip = dragHelp
+        dragHandle.setAccessibilityElement(true)
+        dragHandle.setAccessibilityRole(.handle)
+        dragHandle.setAccessibilityLabel(dragHelp)
+        dragHandle.setAccessibilityIdentifier("pinned.toolbar.dragHandle")
+        dragHandle.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        dragHandle.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        dragHandle.onDragBegan = { [weak self] in self?.onToolbarMoveBegan?() ?? false }
+        dragHandle.onDragChanged = { [weak self] in self?.onToolbarMoveChanged?() }
+        dragHandle.onDragEnded = { [weak self] in self?.onToolbarMoveEnded?() }
+        stack.addArrangedSubview(dragHandle)
 
         for (index, tool) in toolOrder.enumerated() {
             let toolButton = button(
@@ -4241,6 +4433,7 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
         committedLineWidth = style.lineWidth
         shapeFillMode = style.shapeFillMode
         arrowHeadStyle = style.arrowHeadStyle
+        textFontName = style.fontName
 
         _ = view
         stylePopover?.close()
@@ -4265,11 +4458,21 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
 
     func prepareForReuse() {
         colorActionGeneration &+= 1
+        endToolbarDragging()
         cancelActiveLineWidthEditingForLifecycle(reason: "toolbar-reuse")
         stylePopover?.close()
         stylePopover = nil
         confirmationButton.isHidden = true
         setRegionActionsVisible(showsPinAction)
+    }
+
+    func dismissStylePopover() {
+        stylePopover?.close()
+        stylePopover = nil
+    }
+
+    func endToolbarDragging() {
+        dragHandle.endDragging()
     }
 
     func setRegionActionsVisible(_ visible: Bool) {
@@ -4338,6 +4541,7 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
     ) {
         shapeFillMode = style.shapeFillMode
         arrowHeadStyle = style.arrowHeadStyle
+        textFontName = style.fontName
         let semanticColor = style.strokeColor
         let hasValidSemanticColor = semanticColor.red.isFinite
             && semanticColor.green.isFinite
@@ -4659,6 +4863,8 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
             )
         case .arrow:
             optionsController = PinnedToolStylePopoverController(arrowHeadStyle: arrowHeadStyle)
+        case .text:
+            optionsController = PinnedToolStylePopoverController(textFontName: textFontName)
         default:
             stylePopover = nil
             return
@@ -4678,6 +4884,10 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
             self?.arrowHeadStyle = arrowStyle
             self?.onArrowStyleChange?(arrowStyle)
             popover?.performClose(nil)
+        }
+        optionsController.onTextFontChange = { [weak self, weak popover] fontName in
+            popover?.performClose(nil)
+            self?.onTextFontChange?(fontName)
         }
         // NSButton uses flipped coordinates, so maxY is its visual bottom edge.
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
@@ -4942,15 +5152,18 @@ private final class PinnedShotToolbarController: NSViewController, NSTextFieldDe
 @MainActor
 private final class PinnedToolStylePopoverController: NSViewController {
     static let maximumPreferredPopoverHeight: CGFloat = 48
+    private static let arrowOptions: [ArrowHeadStyle] = [.filled, .open, .tapered, .double, .handDrawn]
 
     var onShapeFillModeChange: ((ShapeFillMode) -> Void)?
     var onArrowStyleChange: ((ArrowHeadStyle) -> Void)?
+    var onTextFontChange: ((String?) -> Void)?
 
     let preferredPopoverSize: CGSize
 
     private enum Mode {
         case shape(selected: ShapeFillMode, shape: AnnotationTool)
         case arrow(selected: ArrowHeadStyle)
+        case text(selected: String?)
     }
 
     private let mode: Mode
@@ -4965,8 +5178,30 @@ private final class PinnedToolStylePopoverController: NSViewController {
 
     init(arrowHeadStyle: ArrowHeadStyle) {
         mode = .arrow(selected: arrowHeadStyle)
-        preferredPopoverSize = CGSize(width: 354, height: 48)
+        preferredPopoverSize = CGSize(width: CGFloat(Self.arrowOptions.count) * 118 + 4, height: 48)
         super.init(nibName: nil, bundle: nil)
+    }
+
+    init(textFontName: String?) {
+        mode = .text(selected: textFontName)
+        let hasCustomFont = textFontName != nil && textFontName != AnnotationFonts.handwrittenFontName
+        preferredPopoverSize = CGSize(width: hasCustomFont ? 400 : 280, height: 48)
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    private var textFontOptions: [AnnotationFontOption] {
+        var options = [
+            AnnotationFontOption(title: String(localized: "System Font"), fontName: nil),
+            AnnotationFontOption(title: String(localized: "Handwritten"), fontName: AnnotationFonts.handwrittenFontName)
+        ]
+        if case .text(let selected) = mode,
+           let selected, selected != AnnotationFonts.handwrittenFontName {
+            options.append(AnnotationFontOption(
+                title: AnnotationFontCatalog.displayName(for: selected),
+                fontName: selected
+            ))
+        }
+        return options
     }
 
     @available(*, unavailable)
@@ -5009,21 +5244,33 @@ private final class PinnedToolStylePopoverController: NSViewController {
                 stack.addArrangedSubview(button)
             }
         case .arrow(let selected):
-            let options: [(title: String, style: ArrowHeadStyle)] = [
-                ("Solid Arrow", .filled),
-                ("Line Arrow", .open),
-                ("Tapered Arrow", .tapered)
-            ]
-            for (tag, option) in options.enumerated() {
-                let title = NSLocalizedString(option.title, comment: "Arrow style option")
+            for (tag, option) in Self.arrowOptions.enumerated() {
                 let button = optionButton(
-                    title: title,
-                    image: arrowPreview(style: option.style),
-                    selected: option.style == selected,
+                    title: option.title,
+                    image: arrowPreview(style: option),
+                    selected: option == selected,
                     action: #selector(selectArrowStyle(_:)),
-                    identifier: "pinned.style.arrow.\(option.style.rawValue)",
+                    identifier: "pinned.style.arrow.\(option.rawValue)",
                     tag: tag
                 )
+                stack.addArrangedSubview(button)
+            }
+        case .text(let selected):
+            for (tag, option) in textFontOptions.enumerated() {
+                let button = optionButton(
+                    title: option.title,
+                    image: nil,
+                    selected: option.fontName == selected,
+                    action: #selector(selectTextFont(_:)),
+                    identifier: "pinned.style.text.\(option.id)",
+                    tag: tag
+                )
+                if option.fontName == AnnotationFonts.handwrittenFontName {
+                    button.font = AnnotationTextLayout.font(style: AnnotationStyle(
+                        fontSize: 13,
+                        fontName: option.fontName
+                    ))
+                }
                 stack.addArrangedSubview(button)
             }
         }
@@ -5032,16 +5279,17 @@ private final class PinnedToolStylePopoverController: NSViewController {
 
     private func optionButton(
         title: String,
-        image: NSImage,
+        image: NSImage?,
         selected: Bool,
         action: Selector,
         identifier: String,
         tag: Int
     ) -> NSButton {
-        let button = NSButton(title: title, image: image, target: self, action: action)
+        let button = NSButton(title: title, target: self, action: action)
+        button.image = image
         button.tag = tag
         button.bezelStyle = .texturedRounded
-        button.imagePosition = .imageLeading
+        button.imagePosition = image == nil ? .noImage : .imageLeading
         button.imageScaling = .scaleProportionallyDown
         button.setButtonType(.toggle)
         button.state = selected ? .on : .off
@@ -5074,6 +5322,7 @@ private final class PinnedToolStylePopoverController: NSViewController {
             arrowHeadStyle: arrowHeadStyle
         )
         return previewImage(item: AnnotationItem(
+            id: UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)),
             kind: .arrow,
             zIndex: 0,
             geometry: .line(start: CGPoint(x: 3, y: 3), end: CGPoint(x: 35, y: 15)),
@@ -5113,11 +5362,19 @@ private final class PinnedToolStylePopoverController: NSViewController {
     }
 
     @objc private func selectArrowStyle(_ sender: NSButton) {
-        let options = [ArrowHeadStyle.filled, .open, .tapered]
+        let options = Self.arrowOptions
         guard options.indices.contains(sender.tag) else {
             preconditionFailure("Unknown arrow style option tag \(sender.tag).")
         }
         onArrowStyleChange?(options[sender.tag])
+    }
+
+    @objc private func selectTextFont(_ sender: NSButton) {
+        let options = textFontOptions
+        guard options.indices.contains(sender.tag) else {
+            preconditionFailure("Unknown text font option tag \(sender.tag).")
+        }
+        onTextFontChange?(options[sender.tag].fontName)
     }
 }
 

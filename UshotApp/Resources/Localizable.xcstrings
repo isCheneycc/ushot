@@ -1,6 +1,17 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Default font" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "默认字体" } } } },
+    "Default arrow style" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "默认箭头样式" } } } },
+    "General color" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "通用颜色" } } } },
+    "These styles are saved and applied to new annotations." : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "这些样式会保存，并用于新建标注。" } } } },
+    "Drag to move toolbar" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "拖动以移动工具栏" } } } },
+    "Handwritten" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "手写体" } } } },
+    "Handwritten (Excalifont)" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "手写体（Excalifont）" } } } },
+    "Hand-drawn Arrow" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "手绘箭头" } } } },
+    "Double Arrow" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "双向箭头" } } } },
+    "Arrow Style" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "箭头样式" } } } },
+    "Tool Style" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "工具样式" } } } },
     "Close the open editor dialog before closing the editor or quitting Ushot." : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请先关闭编辑器中的对话框，再关闭编辑器或退出 Ushot。" } } } },
     "Unable to Quit Ushot" : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法退出 Ushot" } } } },
     "Ushot cannot change language before its lifecycle coordinator is ready." : { "localizations" : { "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ushot 尚未准备好，暂时无法更改语言。" } } } },

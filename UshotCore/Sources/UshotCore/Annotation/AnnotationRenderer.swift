@@ -222,6 +222,7 @@ public struct AnnotationVectorRenderer: Sendable {
                 from: start.applying(geometryTransform),
                 to: end.applying(geometryTransform),
                 style: item.style,
+                seed: item.handDrawnSeed ?? item.id,
                 context: context,
                 colorSpace: colorSpace
             )
@@ -319,6 +320,7 @@ public struct AnnotationVectorRenderer: Sendable {
         from start: CGPoint,
         to end: CGPoint,
         style: AnnotationStyle,
+        seed: UUID,
         context: CGContext,
         colorSpace: CGColorSpace
     ) {
@@ -330,6 +332,18 @@ public struct AnnotationVectorRenderer: Sendable {
         let fillColor = style.strokeColor.cgColor(convertedTo: colorSpace)
 
         switch style.arrowHeadStyle {
+        case .handDrawn:
+            guard let handDrawn = HandDrawnArrowGeometry(
+                start: start,
+                tip: end,
+                lineWidth: style.lineWidth,
+                seed: seed
+            ) else { return }
+            for stroke in handDrawn.strokes {
+                context.addPath(stroke.path)
+                context.setLineWidth(stroke.lineWidth)
+                context.strokePath()
+            }
         case .open:
             drawLine(from: geometry.start, to: geometry.tip, context: context)
             context.beginPath()

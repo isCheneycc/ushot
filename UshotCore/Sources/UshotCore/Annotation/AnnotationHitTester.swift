@@ -79,6 +79,13 @@ public struct AnnotationHitTester: AnnotationHitTesting {
         let strokeTolerance = fillTolerance + lineWidth / 2
 
         switch item.style.arrowHeadStyle {
+        case .handDrawn:
+            return HandDrawnArrowGeometry(
+                start: geometry.start,
+                tip: geometry.tip,
+                lineWidth: item.style.lineWidth,
+                seed: item.handDrawnSeed ?? item.id
+            )?.contains(point, tolerance: fillTolerance) ?? false
         case .open:
             return containsStrokedSegment(
                 point,
