@@ -255,6 +255,7 @@ final class RegionSelectionCoordinator {
     private var isSpacePressed = false
     private var draftCropTask: Task<CapturedImage, Error>?
     private var draftPresentationTask: Task<Void, Never>?
+    private var focusRestoration: CaptureFocusRestoration?
     private var isPreparingDraft = false {
         didSet {
             invalidateViews()
@@ -306,13 +307,15 @@ final class RegionSelectionCoordinator {
 
     func select(
         from preparation: RegionCapturePreparation,
-        recognizesInterfaceElements: Bool = true
+        recognizesInterfaceElements: Bool = true,
+        focusRestoration: CaptureFocusRestoration? = nil
     ) async throws -> CGRect {
         guard continuation == nil else {
             throw ScreenshotAppError.captureFailed(description: "Region selection is already active.")
         }
         guard !preparation.displays.isEmpty else { throw ScreenshotAppError.noDisplayAvailable }
         self.preparation = preparation
+        self.focusRestoration = focusRestoration
         self.recognizesInterfaceElements = recognizesInterfaceElements
         self.selection = nil
         self.mouseLocation = NSEvent.mouseLocation
@@ -490,6 +493,7 @@ final class RegionSelectionCoordinator {
                 self.hidesOverlaySelectionChrome = false
                 self.pinnedShotManager.presentRegionDraft(
                     capturedImage,
+                    focusRestoration: self.focusRestoration,
                     onPin: { [weak self] in self?.completeSelection(using: .pin) },
                     onCopy: { [weak self] in self?.completeSelection(using: .copy) },
                     onSave: { [weak self] in self?.completeSelection(using: .save) },
@@ -1260,6 +1264,7 @@ final class RegionSelectionCoordinator {
         views.removeAll()
         continuation = nil
         preparation = nil
+        focusRestoration = nil
         selection = nil
         snapCandidate = nil
         snapCandidateKind = nil

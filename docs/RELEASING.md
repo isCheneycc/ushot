@@ -94,6 +94,8 @@ The user enters the password only at OpenSSL's hidden `/dev/tty` prompt. Do not 
 
 ## Local stable build and installation
 
+Local `local-signed` builds support Xcode 26 and 27 with their macOS 26.x or 27.x SDK. The deployment target stays macOS 14. Public and Developer ID distribution still require SDK 26.x; CI and protected release builds remain pinned to Xcode 26.3 on macOS 15. After upgrading Xcode, complete its first-launch component installation before building.
+
 Create an Apple Development certificate in Xcode → Settings → Accounts → Manage Certificates. Copy `Config/Local.xcconfig.example` to the ignored `Config/Local.xcconfig` and set the correct Team ID.
 
 ```bash

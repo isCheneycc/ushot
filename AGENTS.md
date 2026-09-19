@@ -10,6 +10,7 @@
 - Update this file and the product documentation when the technical stack or product direction changes.
 - Ask before creating a branch for a large refactor or experimental change.
 - After every completed change that affects app code or resources, build the stable locally signed Release app, replace `/Applications/Ushot.app`, relaunch it, and verify that the installed binary matches the new artifact before handing the task back. Do not leave the user running an older installed app after reporting completion. This local development install is distinct from the intentional ad-hoc public artifact.
+- Local signed builds accept macOS SDK 26.x or 27.x; public distribution and CI retain SDK 26.x with Xcode 26.3. See [local build and installation](docs/RELEASING.md#local-stable-build-and-installation) for the supported toolchains.
 
 ## Product identity and licensing contract
 

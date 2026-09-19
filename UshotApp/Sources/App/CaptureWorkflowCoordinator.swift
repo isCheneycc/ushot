@@ -3,7 +3,7 @@ import UshotCore
 
 @MainActor
 final class CaptureWorkflowCoordinator {
-    var onCaptured: ((CaptureResult) -> Void)?
+    var onCaptured: ((CaptureResult, CaptureFocusRestoration) -> Void)?
     var onPermissionRequired: (() -> Void)?
     var onError: ((Error) -> Void)?
     private(set) var isSessionActive = false
@@ -43,11 +43,12 @@ final class CaptureWorkflowCoordinator {
             NSSound.beep()
             return
         }
+        let focusRestoration = CaptureFocusRestoration()
         isSessionActive = true
-        Task { await run(mode: mode) }
+        Task { await run(mode: mode, focusRestoration: focusRestoration) }
     }
 
-    private func run(mode: CaptureMode) async {
+    private func run(mode: CaptureMode, focusRestoration: CaptureFocusRestoration) async {
         precondition(isSessionActive, "A capture task must own admission before it is enqueued.")
         defer { isSessionActive = false }
 
@@ -110,7 +111,8 @@ final class CaptureWorkflowCoordinator {
                 try await stateMachine.contentPrepared(requiresSelection: true)
                 _ = try await regionSelector.select(
                     from: preparation,
-                    recognizesInterfaceElements: captureSettings.recognizesInterfaceElements
+                    recognizesInterfaceElements: captureSettings.recognizesInterfaceElements,
+                    focusRestoration: focusRestoration
                 )
                 try await stateMachine.selectionCompleted()
                 try await stateMachine.imageCaptured()
@@ -119,13 +121,15 @@ final class CaptureWorkflowCoordinator {
             }
 
             try await stateMachine.imageCaptured()
-            onCaptured?(result)
+            onCaptured?(result, focusRestoration)
             await stateMachine.finish()
         } catch ScreenshotAppError.captureCancelled {
             await stateMachine.cancel()
+            focusRestoration.restore(reason: "selection-cancelled")
         } catch {
             await stateMachine.fail(error)
             onError?(error)
+            focusRestoration.restore(reason: "capture-error-dismissed")
         }
     }
 
@@ -137,6 +141,71 @@ final class CaptureWorkflowCoordinator {
         case .captureSelectedDisplay: return .selectedDisplay
         case .captureAllDisplays: return .allDisplays
         case .colorPicker, .screenRuler: return nil
+        }
+    }
+}
+
+/// One capture owns the app that was active before any overlay or editor was
+/// shown. Its presentation retains this handoff until the screenshot closes.
+@MainActor
+final class CaptureFocusRestoration {
+    private let application: NSRunningApplication?
+    private weak var window: NSWindow?
+    private var didFinish = false
+
+    init() {
+        application = NSWorkspace.shared.frontmostApplication
+        if application?.processIdentifier == NSRunningApplication.current.processIdentifier {
+            window = NSApplication.shared.keyWindow
+        }
+    }
+
+    func discard(reason: String) {
+        guard !didFinish else { return }
+        didFinish = true
+        AppLog.capture.notice(
+            "Discarded capture focus restoration: reason=\(reason, privacy: .public)"
+        )
+    }
+
+    func restore(reason: String) {
+        guard !didFinish else { return }
+        didFinish = true
+        guard let application, !application.isTerminated else {
+            AppLog.capture.notice(
+                "Skipped capture focus restoration: reason=\(reason, privacy: .public), target=unavailable"
+            )
+            return
+        }
+        let current = NSRunningApplication.current
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        guard frontmostPID == current.processIdentifier
+                || frontmostPID == application.processIdentifier
+        else {
+            AppLog.capture.notice(
+                "Skipped capture focus restoration after another app became active: reason=\(reason, privacy: .public)"
+            )
+            return
+        }
+        if application.processIdentifier == current.processIdentifier {
+            if let window, window.isVisible {
+                window.makeKeyAndOrderFront(nil)
+            }
+            return
+        }
+        guard frontmostPID != application.processIdentifier || NSApplication.shared.isActive else {
+            return
+        }
+        NSApplication.shared.yieldActivation(to: application)
+        let accepted = application.activate(from: current, options: [])
+        if accepted {
+            AppLog.capture.notice(
+                "Requested capture focus restoration: reason=\(reason, privacy: .public), targetPID=\(application.processIdentifier, privacy: .public)"
+            )
+        } else {
+            AppLog.capture.error(
+                "Capture focus restoration was rejected: reason=\(reason, privacy: .public), targetPID=\(application.processIdentifier, privacy: .public)"
+            )
         }
     }
 }

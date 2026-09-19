@@ -102,7 +102,7 @@ final class PinnedShotManager {
         )
     }
 
-    func present(_ result: CaptureResult) {
+    func present(_ result: CaptureResult, focusRestoration: CaptureFocusRestoration? = nil) {
         precondition(
             regionDraftController == nil,
             "A non-region capture cannot be presented while region confirmation is active."
@@ -122,6 +122,8 @@ final class PinnedShotManager {
         guard captureSettings.presentsPinnedShot else {
             if captureSettings.automaticallyOpensCanvasEditor {
                 presentCanvasEditor(for: session, reason: "automatic-capture-action")
+            } else {
+                focusRestoration?.restore(reason: "capture-without-presentation")
             }
             return
         }
@@ -138,6 +140,7 @@ final class PinnedShotManager {
             settingsStore: settingsStore,
             outputSettings: settingsStore.settings.output,
             presentationMode: .pinned(showsToolbar: showsToolbar),
+            focusRestoration: focusRestoration,
             updateSensitiveActivityTracker: updateSensitiveActivityTracker,
             admitAppWork: admitAppWork
         )
@@ -167,6 +170,7 @@ final class PinnedShotManager {
 
     func presentRegionDraft(
         _ capturedImage: CapturedImage,
+        focusRestoration: CaptureFocusRestoration? = nil,
         onPin: @escaping () -> Void,
         onCopy: @escaping () -> Void,
         onSave: @escaping () -> Void,
@@ -226,6 +230,7 @@ final class PinnedShotManager {
             settingsStore: settingsStore,
             outputSettings: settingsStore.settings.output,
             presentationMode: .regionDraft,
+            focusRestoration: focusRestoration,
             preparedToolbarController: preparedToolbarController,
             updateSensitiveActivityTracker: updateSensitiveActivityTracker,
             admitAppWork: admitAppWork
@@ -771,6 +776,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private var regionDraftChromeView: RegionDraftChromeView?
     private let toolbarController: PinnedShotToolbarController
     private let ownsReusableRegionToolbar: Bool
+    private let focusRestoration: CaptureFocusRestoration?
     private let settingsStore: SettingsStore
     private let outputSettings: OutputSettings
     private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
@@ -925,6 +931,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         settingsStore: SettingsStore,
         outputSettings: OutputSettings,
         presentationMode: PinnedShotPresentationMode,
+        focusRestoration: CaptureFocusRestoration? = nil,
         preparedToolbarController: PinnedShotToolbarController? = nil,
         updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
         admitAppWork: @escaping @MainActor () throws -> Void = {},
@@ -948,6 +955,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             pressedMouseButtonsProvider: pressedMouseButtonsProvider
         )
         self.presentationMode = presentationMode
+        self.focusRestoration = focusRestoration
         self.ownsReusableRegionToolbar = presentationMode.isRegionDraft
         // The decision must match the fixed image content, not live settings:
         // a window capture keeps its baked shadow for this panel's lifetime.
@@ -1434,6 +1442,10 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
 
     private func completeClose(reason: PinnedShotCloseReason) {
         guard closeReason == nil else { return }
+        let keyWindow = NSApplication.shared.keyWindow
+        let shouldRestoreFocus = reason != .applicationTermination
+            && !canvasEditorPresented
+            && (keyWindow == nil || keyWindow === imagePanel || keyWindow === toolbarPanel)
         abandonEntranceAnimation(reason: "close-\(reason.rawValue)")
         closeReason = reason
         disableAnnotationEditing(reason: "close-\(reason.rawValue)")
@@ -1441,6 +1453,13 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             "Closing pinned screenshot: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason.rawValue, privacy: .public)"
         )
         imagePanel.close()
+        if shouldRestoreFocus {
+            focusRestoration?.restore(reason: reason.rawValue)
+        } else {
+            // Region cancellation also resumes the selection coordinator.
+            // Consume this handoff so that callback cannot steal focus later.
+            focusRestoration?.discard(reason: "close-with-another-owner-\(reason.rawValue)")
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

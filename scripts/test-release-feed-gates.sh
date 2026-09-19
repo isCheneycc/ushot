@@ -2052,6 +2052,39 @@ expect_success \
   "SDK 26 app builds execute on old-system runners and stay separated from release control and signing jobs" \
   assert_sdk_runner_boundaries
 
+# Exercise the builder's admission function without compiling or launching an app.
+BUILD_SDK_VALIDATOR="$TEST_ROOT/build-sdk-validator.sh"
+awk '
+  /^validate_build_sdk\(\)/ { in_function = 1 }
+  in_function { print }
+  in_function && /^}/ { exit }
+' "$SCRIPT_DIR/build-release.sh" > "$BUILD_SDK_VALIDATOR"
+[[ -s "$BUILD_SDK_VALIDATOR" ]] || fail "release builder must expose SDK admission"
+source "$BUILD_SDK_VALIDATOR"
+expect_success "local signed builds retain SDK 26 support" \
+  validate_build_sdk local-signed 26.5
+expect_success "local signed builds accept SDK 27" \
+  validate_build_sdk local-signed 27.0
+expect_success "public distribution retains SDK 26 support" \
+  validate_build_sdk public-adhoc 26.2
+expect_success "Developer ID distribution retains SDK 26 support" \
+  validate_build_sdk developer-id 26.2
+expect_failure_containing "local builds reject SDKs below the supported baseline" \
+  "Local signed builds require macOS SDK 26 or 27" \
+  validate_build_sdk local-signed 25.2
+expect_failure_containing "local builds reject unreviewed future SDKs" \
+  "Local signed builds require macOS SDK 26 or 27" \
+  validate_build_sdk local-signed 28.0
+expect_failure_containing "public distribution rejects SDK 27" \
+  "Distribution builds require macOS SDK 26" \
+  validate_build_sdk public-adhoc 27.0
+expect_failure_containing "Developer ID distribution rejects SDK 27" \
+  "Distribution builds require macOS SDK 26" \
+  validate_build_sdk developer-id 27.0
+expect_failure_containing "unknown build modes cannot gain SDK admission" \
+  "Unsupported build mode" \
+  validate_build_sdk unknown 26.2
+
 run_future_with_seed() {
   printf '%s' "$TEST_PRIVATE_KEY_SEED" | \
     env MOCK_GENERATE_ARGUMENTS="$MOCK_GENERATE_ARGUMENTS" \

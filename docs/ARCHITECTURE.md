@@ -27,6 +27,8 @@ Independent Debug regression scenarios live in `QuickAnnotationCanvasRegression`
 
 ## History and termination ownership
 
+Capture admission records the previously active application before showing any Ushot surface. One `CaptureFocusRestoration` follows the selection into its screenshot presentation and is consumed after that image and its toolbar close (including successful Copy/Save and cancellation). Selection cancellation before presentation restores directly. Pin keeps the handoff with the retained image; an open Canvas editor, another active Ushot window, application termination or a newly active external app prevents restoration from taking focus away from ongoing work. Activation requests use the macOS cooperative handoff and log rejection without retrying against the user's later focus choice.
+
 `AnnotationSessionRegistry` reserves History opens by document UUID before loading or creating a recorder. Repeated opens share the same in-flight task and live editing session, including sessions already owned by a pinned screenshot. Canvas windows are keyed by document UUID; a pinned session enters Canvas through the pinned manager's exclusive ownership boundary.
 
 Every recorder retains the store's write authorization from the start of its session. Successful deletion revokes that document's authorization, and successful Clear revokes the complete prior history generation, including captures whose initial save has not run. Partial Clear failures revoke only records actually removed. Delayed renders, debounce timers and queued saves cannot renew an old authorization or recreate deleted history.

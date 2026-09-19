@@ -2254,9 +2254,12 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             frameView = created
         }
 
-        let fieldFrame = viewRect(
+        var fieldFrame = viewRect(
             fromDocumentRect: selectionGeometry.transformedBounds(for: item)
         ).standardized
+        fieldFrame.size.height = InlineAnnotationTextEditorFrameView.interactiveFieldHeight(
+            for: fieldFrame.height
+        )
         precondition(
             fieldFrame.width.isFinite && fieldFrame.height.isFinite
                 && fieldFrame.width > 0 && fieldFrame.height > 0,
@@ -3927,14 +3930,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 state: $0
             )
         } ?? completeHeightInDocument
-        // The border is interaction chrome, not persisted text geometry. Give
-        // it a whole view-point ceiling so small fallback-glyph extent changes
-        // do not make the field visibly breathe while IME composition swaps
-        // fonts. TextKit's canonical bounds and every line origin remain exact.
-        let stableInteractiveHeight = ceil(completeHeightInView)
-        return max(
-            InlineAnnotationTextEditorFrameView.minimumInteractiveFieldHeight,
-            stableInteractiveHeight
+        // Keep the same fractional extent as committed/selected text. Rounding
+        // only the live field adds height whenever an annotation is re-edited.
+        return InlineAnnotationTextEditorFrameView.interactiveFieldHeight(
+            for: completeHeightInView
         )
     }
 
@@ -6753,6 +6752,10 @@ private final class InlineAnnotationTextEditorFrameView: NSView {
     static let chromeOutset: CGFloat = 10
     static let minimumInteractiveFieldWidth: CGFloat = 48
     static let minimumInteractiveFieldHeight = chromeOutset * 2
+
+    static func interactiveFieldHeight(for contentHeight: CGFloat) -> CGFloat {
+        max(minimumInteractiveFieldHeight, contentHeight)
+    }
 
     var onResizeBegan: ((InlineAnnotationTextResizeHandle, NSEvent) -> Void)?
     var onResizeChanged: ((InlineAnnotationTextResizeHandle, NSEvent) -> Void)?
