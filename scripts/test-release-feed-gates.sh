@@ -1442,6 +1442,23 @@ validate_fixture() {
 }
 
 expect_success "validator accepts an isolated feed item without a major-upgrade marker" validate_fixture "$VALID_APPCAST"
+
+validate_macos15_fixture() {
+  "$VALIDATE_SCRIPT" --appcast "$1" --archive "$ARCHIVE_PATH" \
+    --release-notes "$NOTES_PATH" --version "0.1.16" --build-number "17" --tag "v0.1.16"
+}
+MACOS15_APPCAST="$TEST_ROOT/macos15-appcast.xml"
+sed -e 's/0\.1\.4/0.1.16/g' -e 's#<sparkle:version>5</sparkle:version>#<sparkle:version>17</sparkle:version>#' \
+  "$VALID_APPCAST" > "$MACOS15_APPCAST"
+expect_failure_containing "new releases reject a missing minimum system" \
+  "must require macOS 15.0" validate_macos15_fixture "$MACOS15_APPCAST"
+sed 's#<sparkle:version>17</sparkle:version>#<sparkle:version>17</sparkle:version><sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>#' \
+  "$MACOS15_APPCAST" > "$TEST_ROOT/macos15-valid.xml"
+expect_success "new releases accept macOS 15 minimum" validate_macos15_fixture "$TEST_ROOT/macos15-valid.xml"
+sed 's#<sparkle:minimumSystemVersion>15.0#<sparkle:minimumSystemVersion>14.0#' \
+  "$TEST_ROOT/macos15-valid.xml" > "$TEST_ROOT/macos15-wrong.xml"
+expect_failure_containing "new releases reject macOS 14 minimum" \
+  "must require macOS 15.0" validate_macos15_fixture "$TEST_ROOT/macos15-wrong.xml"
 expect_failure_containing \
   "validator rejects sparkle:minimumAutoupdateVersion" \
   "must not be a major upgrade" \
@@ -2022,7 +2039,7 @@ assert_sdk_runner_boundaries() {
   [[ "$(workflow_job_runner "$CI_WORKFLOW" release-metadata)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$CI_WORKFLOW" unit-tests)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$CI_WORKFLOW" public-build-gate)" == "macos-15" ]]
-  [[ "$(workflow_job_runner "$CI_WORKFLOW" macos-14-launch-smoke)" == "macos-14" ]]
+  [[ "$(workflow_job_runner "$CI_WORKFLOW" macos-15-launch-smoke)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" build-artifacts)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" preflight)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" build-authenticated-appcast-validator)" == "macos-15" ]]
@@ -2033,7 +2050,7 @@ assert_sdk_runner_boundaries() {
   workflow_job_selects_xcode_26_3 "$CI_WORKFLOW" public-build-gate
   workflow_job_selects_xcode_26_3 "$RELEASE_WORKFLOW" build-artifacts
 
-  compatibility_job="$(workflow_job_body "$CI_WORKFLOW" macos-14-launch-smoke)"
+  compatibility_job="$(workflow_job_body "$CI_WORKFLOW" macos-15-launch-smoke)"
   [[ -n "$compatibility_job" ]]
   grep -Fq 'needs: public-build-gate' <<< "$compatibility_job"
   grep -Fq 'compatibility_artifact_id' <<< "$compatibility_job"
@@ -2051,6 +2068,39 @@ assert_sdk_runner_boundaries() {
 expect_success \
   "SDK 26 app builds execute on old-system runners and stay separated from release control and signing jobs" \
   assert_sdk_runner_boundaries
+
+# Exercise the builder's admission function without compiling or launching an app.
+BUILD_SDK_VALIDATOR="$TEST_ROOT/build-sdk-validator.sh"
+awk '
+  /^validate_build_sdk\(\)/ { in_function = 1 }
+  in_function { print }
+  in_function && /^}/ { exit }
+' "$SCRIPT_DIR/build-release.sh" > "$BUILD_SDK_VALIDATOR"
+[[ -s "$BUILD_SDK_VALIDATOR" ]] || fail "release builder must expose SDK admission"
+source "$BUILD_SDK_VALIDATOR"
+expect_success "local signed builds retain SDK 26 support" \
+  validate_build_sdk local-signed 26.5
+expect_success "local signed builds accept SDK 27" \
+  validate_build_sdk local-signed 27.0
+expect_success "public distribution retains SDK 26 support" \
+  validate_build_sdk public-adhoc 26.2
+expect_success "Developer ID distribution retains SDK 26 support" \
+  validate_build_sdk developer-id 26.2
+expect_failure_containing "local builds reject SDKs below the supported baseline" \
+  "Local signed builds require macOS SDK 26 or 27" \
+  validate_build_sdk local-signed 25.2
+expect_failure_containing "local builds reject unreviewed future SDKs" \
+  "Local signed builds require macOS SDK 26 or 27" \
+  validate_build_sdk local-signed 28.0
+expect_failure_containing "public distribution rejects SDK 27" \
+  "Distribution builds require macOS SDK 26" \
+  validate_build_sdk public-adhoc 27.0
+expect_failure_containing "Developer ID distribution rejects SDK 27" \
+  "Distribution builds require macOS SDK 26" \
+  validate_build_sdk developer-id 27.0
+expect_failure_containing "unknown build modes cannot gain SDK admission" \
+  "Unsupported build mode" \
+  validate_build_sdk unknown 26.2
 
 run_future_with_seed() {
   printf '%s' "$TEST_PRIVATE_KEY_SEED" | \

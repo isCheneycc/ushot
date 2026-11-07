@@ -6,7 +6,7 @@ By intentionally submitting a contribution for inclusion in this repository, you
 
 ## Development setup
 
-Use an Apple Silicon Mac with macOS 14+ and a full Xcode installation. Select Xcode before building:
+Use an Apple Silicon Mac with macOS 15+ and a full Xcode installation. Select Xcode before building:
 
 ```bash
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer

@@ -13,6 +13,22 @@ CONFIGURATION="Release"
 BUILD_ROOT="${BUILD_ROOT:-$PROJECT_ROOT/build/release}"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
+validate_build_sdk() {
+  local mode="$1"
+  local sdk_version="$2"
+
+  case "$mode:$sdk_version" in
+    local-signed:26.*|local-signed:27.*|public-adhoc:26.*|developer-id:26.*) ;;
+    local-signed:*)
+      release_die "Local signed builds require macOS SDK 26 or 27; selected SDK is $sdk_version."
+      ;;
+    public-adhoc:*|developer-id:*)
+      release_die "Distribution builds require macOS SDK 26; selected SDK is $sdk_version."
+      ;;
+    *) release_die "Unsupported build mode: $mode" ;;
+  esac
+}
+
 launch_services_contains_exact_path() {
   local app_path="$1"
   local launch_services_dump
@@ -117,9 +133,8 @@ if ! xcodebuild -version >/dev/null 2>&1; then
 fi
 SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)" \
   || release_die "Could not resolve the selected macOS SDK version."
-[[ "$SDK_VERSION" == 26.* ]] \
-  || release_die "Ushot app compilation requires a macOS 26 SDK; selected SDK is $SDK_VERSION."
-release_log "Using macOS SDK $SDK_VERSION for the macOS 14 deployment target."
+validate_build_sdk "$MODE" "$SDK_VERSION"
+release_log "Using macOS SDK $SDK_VERSION for the macOS 15 deployment target."
 
 MODE_ROOT="$BUILD_ROOT/$MODE"
 DERIVED_DATA="$MODE_ROOT/DerivedData"

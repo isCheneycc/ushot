@@ -887,18 +887,18 @@ private struct ColorPickerCardState {
 private final class ColorPickerOverlayView: NSView {
     private weak var coordinator: ColorPickerCoordinator?
     private let cardView: ColorPickerCardView
-    private let frozenImage: NSImage?
+    private let frozenImage: CapturedImage?
     private var trackingAreaReference: NSTrackingArea?
 
     init(coordinator: ColorPickerCoordinator, frozenImage: CapturedImage?) {
         self.coordinator = coordinator
-        self.frozenImage = frozenImage.map {
-            NSImage(cgImage: $0.image, size: $0.logicalSize)
-        }
+        self.frozenImage = frozenImage
         cardView = ColorPickerCardView(
             frame: CGRect(origin: .zero, size: ColorPickerCardView.cardSize)
         )
         super.init(frame: .zero)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
         cardView.isHidden = true
         addSubview(cardView)
         setAccessibilityElement(true)
@@ -918,12 +918,14 @@ private final class ColorPickerOverlayView: NSView {
     override var acceptsFirstResponder: Bool { true }
     override var needsPanelToBecomeKey: Bool { true }
     override var isOpaque: Bool { frozenImage != nil }
+    override var wantsUpdateLayer: Bool { true }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard let frozenImage else { return }
-        NSGraphicsContext.current?.imageInterpolation = .none
-        frozenImage.draw(in: bounds, from: .zero, operation: .copy, fraction: 1)
+    override func updateLayer() {
+        layer?.contents = frozenImage?.image
+        layer?.contentsScale = frozenImage?.scale ?? window?.backingScaleFactor ?? 1
+        layer?.contentsGravity = .resize
+        layer?.minificationFilter = .nearest
+        layer?.magnificationFilter = .nearest
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {

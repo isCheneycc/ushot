@@ -110,8 +110,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 settingsStore: environment.settingsStore,
                 pinnedShotManager: pinnedShotManager
             )
-            captureWorkflow.onCaptured = { [weak self] result in
-                self?.pinnedShotManager?.present(result)
+            captureWorkflow.onCaptured = { [weak self] result, focusRestoration in
+                self?.pinnedShotManager?.present(result, focusRestoration: focusRestoration)
             }
             captureWorkflow.onPermissionRequired = { [weak self] in
                 self?.showSettings(selecting: .capture)

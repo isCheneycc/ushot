@@ -66,7 +66,39 @@ public struct RegionCaptureProcessor: Sendable {
         }
 
         if crops.count == 1, crops[0].descriptor.frame == effectiveRegion {
-            return crops[0].capturedImage
+            let captured = crops[0].capturedImage
+            let source = captured.image
+            guard let colorSpace = source.colorSpace ?? captured.colorSpace else {
+                throw ScreenshotAppError.captureFailed(description: "The selected region has no bitmap color space.")
+            }
+            // ScreenCaptureKit subimages retain their entire source IOSurface.
+            // Only the final single-display crop needs independent storage;
+            // the multi-display compositor already creates its own bitmap.
+            guard let context = CGContext(
+                data: nil,
+                width: source.width,
+                height: source.height,
+                bitsPerComponent: source.bitsPerComponent,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: source.bitmapInfo.rawValue
+            ) else {
+                throw ScreenshotAppError.captureFailed(description: "The selected region bitmap could not be created.")
+            }
+            context.setBlendMode(.copy)
+            context.interpolationQuality = .none
+            context.draw(source, in: CGRect(x: 0, y: 0, width: source.width, height: source.height))
+            guard let image = context.makeImage() else {
+                throw ScreenshotAppError.captureFailed(description: "The selected region bitmap could not be finalized.")
+            }
+            return CapturedImage(
+                image: image,
+                colorSpace: image.colorSpace,
+                pixelSize: captured.pixelSize,
+                logicalSize: captured.logicalSize,
+                scale: captured.scale,
+                sourceMetadata: captured.sourceMetadata
+            )
         }
 
         let composite = try MultiDisplayCompositor().compose(crops, canvasBounds: effectiveRegion).composite

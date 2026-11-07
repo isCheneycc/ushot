@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-11-07
+
+### Changed
+
+- Require macOS 15 or later and validate public-build startup on macOS 15 after retirement of the macOS 14 CI image.
+
+### Fixed
+
+- Keep text annotation borders at a consistent height when committing and reopening text, including handwritten fonts and fractional zoom.
+- Restore focus to the application used before capture after copying, saving or cancelling, while respecting later application switches and open Canvas editors.
+- Reduce region capture memory by separating frozen backgrounds from interactive redraws and copying final single-display crops into independent pixel storage.
+- Defer full-image composition during transparent region confirmation and bound each session to one running bitmap render with only the latest pending inputs.
+- Export current annotations during external drag and keep delayed file promises bound to the same resolved image.
+
 ## [0.1.15] - 2026-09-16
 
 ### Added

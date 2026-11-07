@@ -22,7 +22,7 @@ Every release command enforces the applicable invariants below. The appcast, pro
 - Bundle identifier: `io.github.ischeneycc.ushot`
 - Architecture: `arm64`
 - App-compiling CI and release jobs run on the `macos-15` arm64 image with the installed Xcode 26.3 toolchain selected explicitly, so the compiler sees the macOS 26 ScreenCaptureKit screenshot API while tests execute on a supported older OS; control, approval, signing, validation and publication jobs retain their narrower existing toolchain boundaries
-- The deployment target remains macOS 14. ScreenCaptureKit is weak-linked, 0.1.7-or-later asset validation requires `SCScreenshotConfiguration` and `SCScreenshotOutput` to remain weak imports, and CI launches the exact public-build app artifact to prove macOS 14 launch compatibility; runtime availability routing keeps macOS 14/15 on the separately validated legacy capture path
+- The deployment target is macOS 15 from 0.1.16 onward. ScreenCaptureKit is weak-linked, 0.1.7-or-later asset validation requires `SCScreenshotConfiguration` and `SCScreenshotOutput` to remain weak imports, and CI launches the exact public-build app artifact to prove macOS 15 launch compatibility; runtime availability routing keeps macOS 15 on the separately validated legacy capture path
 - Stable tag: `v<MARKETING_VERSION>`
 - Build: positive integer matching `CURRENT_PROJECT_VERSION`
 - Workflow run ref, requested tag, local tag, remote tag and `GITHUB_SHA` all resolve to the same commit, and the local/remote tag object SHA also matches for annotated tags
@@ -93,6 +93,8 @@ scripts/run-sparkle-key-recovery-drill.sh \
 The user enters the password only at OpenSSL's hidden `/dev/tty` prompt. Do not ask the user to send or paste it into chat, a command, an environment variable or a log. Record only the nonsecret `version`, `build`, backup/archive/appcast hashes and `result=PASS` lines. The helper verifies the selected exact assets, recovered public-key identity, disposable appcast/archive signatures and tamper rejection without a plaintext key file; this is not client-update evidence, and the separate protected run remains the source of publication evidence.
 
 ## Local stable build and installation
+
+Local `local-signed` builds support Xcode 26 and 27 with their macOS 26.x or 27.x SDK. The deployment target is macOS 15 from 0.1.16 onward. Public and Developer ID distribution still require SDK 26.x; CI and protected release builds remain pinned to Xcode 26.3 on macOS 15. After upgrading Xcode, complete its first-launch component installation before building.
 
 Create an Apple Development certificate in Xcode → Settings → Accounts → Manage Certificates. Copy `Config/Local.xcconfig.example` to the ignored `Config/Local.xcconfig` and set the correct Team ID.
 
@@ -386,7 +388,7 @@ Do not recommend `xattr -cr`: it removes all extended attributes, not just quara
 
 ## Mandatory release verification
 
-Automation proves artifact identity, versions, hashes and publication ordering. Before announcing a direct-download preview, use a clean macOS 14+ account and verify:
+Automation proves artifact identity, versions, hashes and publication ordering. Before announcing a direct-download preview, use a clean macOS 15+ account and verify:
 
 - initial DMG install and the documented quarantine command;
 - Screen Recording grant and denial behavior;

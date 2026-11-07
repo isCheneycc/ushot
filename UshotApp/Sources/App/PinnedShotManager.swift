@@ -102,7 +102,7 @@ final class PinnedShotManager {
         )
     }
 
-    func present(_ result: CaptureResult) {
+    func present(_ result: CaptureResult, focusRestoration: CaptureFocusRestoration? = nil) {
         precondition(
             regionDraftController == nil,
             "A non-region capture cannot be presented while region confirmation is active."
@@ -122,6 +122,8 @@ final class PinnedShotManager {
         guard captureSettings.presentsPinnedShot else {
             if captureSettings.automaticallyOpensCanvasEditor {
                 presentCanvasEditor(for: session, reason: "automatic-capture-action")
+            } else {
+                focusRestoration?.restore(reason: "capture-without-presentation")
             }
             return
         }
@@ -138,6 +140,7 @@ final class PinnedShotManager {
             settingsStore: settingsStore,
             outputSettings: settingsStore.settings.output,
             presentationMode: .pinned(showsToolbar: showsToolbar),
+            focusRestoration: focusRestoration,
             updateSensitiveActivityTracker: updateSensitiveActivityTracker,
             admitAppWork: admitAppWork
         )
@@ -167,6 +170,7 @@ final class PinnedShotManager {
 
     func presentRegionDraft(
         _ capturedImage: CapturedImage,
+        focusRestoration: CaptureFocusRestoration? = nil,
         onPin: @escaping () -> Void,
         onCopy: @escaping () -> Void,
         onSave: @escaping () -> Void,
@@ -200,7 +204,8 @@ final class PinnedShotManager {
             document: regionDocument,
             editorSettings: settingsStore.settings.editor,
             updateSensitiveActivityTracker: updateSensitiveActivityTracker,
-            configuredRegionCornerRadius: configuredCornerRadius
+            configuredRegionCornerRadius: configuredCornerRadius,
+            previewRenderingMode: .regionDraft
         )
         AppLog.capture.notice(
             "Presenting transparent region confirmation surface: id=\(identifier.uuidString, privacy: .public), logical=\(capturedImage.logicalSize.width, privacy: .public)x\(capturedImage.logicalSize.height, privacy: .public), cachedPixels=\(capturedImage.image.width, privacy: .public)x\(capturedImage.image.height, privacy: .public), cornerRadius=\(cornerRadius, privacy: .public), configuredCornerRadius=\(configuredCornerRadius, privacy: .public), cornerRadiusUnit=\(self.settingsStore.settings.capture.regionCornerRadiusUnit.rawValue, privacy: .public), outputCommitted=false"
@@ -226,6 +231,7 @@ final class PinnedShotManager {
             settingsStore: settingsStore,
             outputSettings: settingsStore.settings.output,
             presentationMode: .regionDraft,
+            focusRestoration: focusRestoration,
             preparedToolbarController: preparedToolbarController,
             updateSensitiveActivityTracker: updateSensitiveActivityTracker,
             admitAppWork: admitAppWork
@@ -704,6 +710,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private enum ExportAction: String {
         case copy
         case save
+        case externalDrag = "external-drag"
     }
 
     private struct ExportTransaction {
@@ -713,6 +720,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         let desktopFrame: CGRect
         let imageIgnoredMouseEvents: Bool
         let resizeWasEnabled: Bool?
+        let externalDragGestureID: UUID?
     }
 
     private struct WindowMoveInteraction {
@@ -763,6 +771,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     /// panel's own system shadow on top; see `wantsImagePanelShadow`.
     private let imageIncludesBakedWindowShadow: Bool
     private let session: AnnotationEditingSession
+    private let exporter: any ImageExporting
     private let payload: PinnedShotPayload
     private let imagePanel: PinnedShotPanel
     private let toolbarPanel: PinnedShotToolbarPanel
@@ -771,6 +780,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
     private var regionDraftChromeView: RegionDraftChromeView?
     private let toolbarController: PinnedShotToolbarController
     private let ownsReusableRegionToolbar: Bool
+    private let focusRestoration: CaptureFocusRestoration?
     private let settingsStore: SettingsStore
     private let outputSettings: OutputSettings
     private let updateSensitiveActivityTracker: UpdateSensitiveActivityTracker
@@ -925,6 +935,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         settingsStore: SettingsStore,
         outputSettings: OutputSettings,
         presentationMode: PinnedShotPresentationMode,
+        focusRestoration: CaptureFocusRestoration? = nil,
         preparedToolbarController: PinnedShotToolbarController? = nil,
         updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
         admitAppWork: @escaping @MainActor () throws -> Void = {},
@@ -938,6 +949,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         )
         self.identifier = identifier
         self.session = session
+        self.exporter = exporter
         self.capturedImage = session.baseImage
         self.payload = PinnedShotPayload(capturedImage: session.previewImage, exporter: exporter)
         self.settingsStore = settingsStore
@@ -948,6 +960,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             pressedMouseButtonsProvider: pressedMouseButtonsProvider
         )
         self.presentationMode = presentationMode
+        self.focusRestoration = focusRestoration
         self.ownsReusableRegionToolbar = presentationMode.isRegionDraft
         // The decision must match the fixed image content, not live settings:
         // a window capture keeps its baked shadow for this panel's lifetime.
@@ -1434,6 +1447,10 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
 
     private func completeClose(reason: PinnedShotCloseReason) {
         guard closeReason == nil else { return }
+        let keyWindow = NSApplication.shared.keyWindow
+        let shouldRestoreFocus = reason != .applicationTermination
+            && !canvasEditorPresented
+            && (keyWindow == nil || keyWindow === imagePanel || keyWindow === toolbarPanel)
         abandonEntranceAnimation(reason: "close-\(reason.rawValue)")
         closeReason = reason
         disableAnnotationEditing(reason: "close-\(reason.rawValue)")
@@ -1441,6 +1458,13 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             "Closing pinned screenshot: id=\(self.identifier.uuidString, privacy: .public), reason=\(reason.rawValue, privacy: .public)"
         )
         imagePanel.close()
+        if shouldRestoreFocus {
+            focusRestoration?.restore(reason: reason.rawValue)
+        } else {
+            // Region cancellation also resumes the selection coordinator.
+            // Consume this handoff so that callback cannot steal focus later.
+            focusRestoration?.discard(reason: "close-with-another-owner-\(reason.rawValue)")
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -1769,8 +1793,14 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             }
             self.finishPinnedWindowMove(reason: reason)
         }
-        imageView.onExternalDrag = { [weak self] event in
-            self?.beginExternalDrag(event: event)
+        imageView.onExternalDrag = { [weak self] event, gestureID in
+            self?.beginExternalDrag(event: event, gestureID: gestureID)
+        }
+        imageView.onExternalDragGestureEnded = { [weak self] gestureID in
+            guard let self,
+                  self.activeExportTransaction?.externalDragGestureID == gestureID
+            else { return }
+            self.cancelActiveExport(reason: "external-drag-gesture-ended")
         }
         imageView.onEditingContextWillChange = { [weak self] reason in
             self?.resolveActiveLineWidthEdit(.commitOrReject, reason: reason)
@@ -2412,6 +2442,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
                 let currentImage = try await self.session.resolvedPreviewImage()
                 self.payload.update(capturedImage: currentImage)
                 let pinnedFrame = self.capturedImage.sourceMetadata.desktopFrame.standardized
+                self.session.finishRegionDraft()
                 self.retainsAfterCopy = true
                 self.presentationMode = .pinned(showsToolbar: false)
                 self.imagePanel.styleMask.insert(.resizable)
@@ -2789,7 +2820,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
         onError?(error)
     }
 
-    private func beginExport(action: ExportAction) -> ExportTransaction? {
+    private func beginExport(action: ExportAction, externalDragGestureID: UUID? = nil) -> ExportTransaction? {
         guard activeExportTransaction == nil else {
             AppLog.export.notice(
                 "Rejected overlapping screenshot output: requested=\(action.rawValue, privacy: .public), active=\(self.activeExportTransaction?.action.rawValue ?? "unknown", privacy: .public)"
@@ -2831,24 +2862,39 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             NSSound.beep()
             return nil
         }
-        let attempt = pointerIdleOutputGate.performIfIdle { () -> ExportTransaction in
+        let makeTransaction = { () -> ExportTransaction in
             let transaction = ExportTransaction(
                 identifier: UUID(),
                 action: action,
-                beganAsRegionDraft: presentationMode.isRegionDraft,
-                desktopFrame: capturedImage.sourceMetadata.desktopFrame.standardized,
-                imageIgnoredMouseEvents: imagePanel.ignoresMouseEvents,
-                resizeWasEnabled: regionDraftChromeView?.isResizeEnabled
+                beganAsRegionDraft: self.presentationMode.isRegionDraft,
+                desktopFrame: self.capturedImage.sourceMetadata.desktopFrame.standardized,
+                imageIgnoredMouseEvents: self.imagePanel.ignoresMouseEvents,
+                resizeWasEnabled: self.regionDraftChromeView?.isResizeEnabled,
+                externalDragGestureID: externalDragGestureID
             )
-            activeExportTransaction = transaction
-            imagePanel.ignoresMouseEvents = true
-            regionDraftChromeView?.isResizeEnabled = false
-            toolbarController.setExporting(true)
+            self.activeExportTransaction = transaction
+            if externalDragGestureID == nil {
+                self.imagePanel.ignoresMouseEvents = true
+            } else {
+                // Keep receiving mouse-up while rendering the drag payload so
+                // releasing and pressing again cannot revive the old gesture.
+                self.imageView.setInteractionSuspended(true)
+            }
+            self.regionDraftChromeView?.isResizeEnabled = false
+            self.toolbarController.setExporting(true)
             AppLog.export.notice(
                 "Began screenshot output transaction: id=\(transaction.identifier.uuidString, privacy: .public), action=\(action.rawValue, privacy: .public), regionConfirmation=\(transaction.beganAsRegionDraft, privacy: .public), inputFrozen=true"
             )
             return transaction
         }
+        if let externalDragGestureID {
+            guard action == .externalDrag,
+                  !imageView.hasActivePointerInteraction,
+                  imageView.ownsExternalDragGesture(externalDragGestureID)
+            else { return nil }
+            return makeTransaction()
+        }
+        let attempt = pointerIdleOutputGate.performIfIdle(makeTransaction)
         switch attempt {
         case .admitted(let transaction):
             return transaction
@@ -2927,6 +2973,9 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
 
     private func restoreInput(after transaction: ExportTransaction) {
         imagePanel.ignoresMouseEvents = transaction.imageIgnoredMouseEvents
+        if transaction.externalDragGestureID != nil {
+            imageView.setInteractionSuspended(false)
+        }
         if let resizeWasEnabled = transaction.resizeWasEnabled {
             regionDraftChromeView?.isResizeEnabled = resizeWasEnabled
         }
@@ -3284,7 +3333,7 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             : imagePanel.frame
     }
 
-    private func beginExternalDrag(event: NSEvent) {
+    private func beginExternalDrag(event: NSEvent, gestureID: UUID) {
         guard admitUpdateSensitiveAction("external-drag") else { return }
 
         guard promiseDelegates.isEmpty else {
@@ -3296,6 +3345,52 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             onError?(error)
             return
         }
+
+        guard let transaction = beginExport(action: .externalDrag, externalDragGestureID: gestureID) else { return }
+        let tracker = updateSensitiveActivityTracker
+        let lease = tracker.begin(operation: "external-drag-preparation")
+        activeExportTask = Task { @MainActor [weak self] in
+            defer { tracker.finish(lease) }
+            guard let self else { return }
+            var failure: Error?
+            defer {
+                let finished = self.finishExport(transaction: transaction)
+                if finished, let failure { self.reportOutputFailure(failure, action: "External drag") }
+            }
+            do {
+                let image = try await self.session.resolvedPreviewImage()
+                try Task.checkCancellation()
+                guard self.validateActiveExport(transaction, stage: "drag-rendered"),
+                      self.imageView.ownsExternalDragGesture(gestureID)
+                else { return }
+                // A file promise can outlive the source window and later edits.
+                // Its image, encoded representations and drag preview must all
+                // belong to this one resolved generation.
+                let frozenPayload = PinnedShotPayload(capturedImage: image, exporter: self.exporter)
+                let representations = try await Task.detached(priority: .userInitiated) {
+                    (try frozenPayload.pngData(), NSBitmapImageRep(cgImage: image.image).tiffRepresentation)
+                }.value
+                try Task.checkCancellation()
+                guard self.validateActiveExport(transaction, stage: "drag-encoded"),
+                      self.imageView.ownsExternalDragGesture(gestureID),
+                      event.windowNumber == self.imagePanel.windowNumber
+                else { return }
+                self.imageView.finishExternalDragGesture(gestureID)
+                self.startExternalDrag(
+                    event: event,
+                    payload: frozenPayload,
+                    png: representations.0,
+                    tiff: representations.1,
+                    image: image
+                )
+            } catch {
+                if error is CancellationError || Task.isCancelled { return }
+                failure = error
+            }
+        }
+    }
+
+    private func startExternalDrag(event: NSEvent, payload: PinnedShotPayload, png: Data, tiff: Data?, image: CapturedImage) {
 
         let lifecycleID = UUID()
         let lease = updateSensitiveActivityTracker.begin(
@@ -3329,31 +3424,27 @@ private final class PinnedShotPanelController: NSObject, NSWindowDelegate, NSDra
             "Began external drag lifecycle: id=\(self.identifier.uuidString, privacy: .public), lifecycle=\(lifecycleID.uuidString, privacy: .public)"
         )
 
-        do {
-            let item = NSPasteboardItem()
-            item.setData(try payload.pngData(), forType: .png)
-            if let tiffData = NSBitmapImageRep(cgImage: payload.currentImage().image).tiffRepresentation {
-                item.setData(tiffData, forType: .tiff)
-            }
-            let imageDraggingItem = NSDraggingItem(pasteboardWriter: item)
-            imageDraggingItem.setDraggingFrame(imageView.bounds, contents: imageView.draggingImage)
-
-            let provider = NSFilePromiseProvider(
-                fileType: UTType.png.identifier,
-                delegate: promiseDelegate
-            )
-            let promiseItem = NSDraggingItem(pasteboardWriter: provider)
-            promiseItem.setDraggingFrame(imageView.bounds, contents: imageView.draggingImage)
-            let draggingSession = imageView.beginDraggingSession(
-                with: [imageDraggingItem, promiseItem],
-                event: event,
-                source: self
-            )
-            promiseDelegate.bind(to: draggingSession)
-        } catch {
-            promiseDelegate.dragSetupDidFail(error)
-            onError?(error)
+        let item = NSPasteboardItem()
+        item.setData(png, forType: .png)
+        if let tiff {
+            item.setData(tiff, forType: .tiff)
         }
+        let draggingImage = NSImage(cgImage: image.image, size: image.logicalSize)
+        let imageDraggingItem = NSDraggingItem(pasteboardWriter: item)
+        imageDraggingItem.setDraggingFrame(imageView.bounds, contents: draggingImage)
+
+        let provider = NSFilePromiseProvider(
+            fileType: UTType.png.identifier,
+            delegate: promiseDelegate
+        )
+        let promiseItem = NSDraggingItem(pasteboardWriter: provider)
+        promiseItem.setDraggingFrame(imageView.bounds, contents: draggingImage)
+        let draggingSession = imageView.beginDraggingSession(
+            with: [imageDraggingItem, promiseItem],
+            event: event,
+            source: self
+        )
+        promiseDelegate.bind(to: draggingSession)
     }
 
     private func admitUpdateSensitiveAction(_ action: String) -> Bool {

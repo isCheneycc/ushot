@@ -404,6 +404,10 @@ ZIP_APP="$ZIP_EXTRACT_ROOT/$USHOT_APP_BUNDLE"
   || release_die "Sparkle ZIP did not extract one real $USHOT_APP_BUNDLE directory."
 validate_bundle_symlinks "$ZIP_APP"
 release_validate_app_identity "$ZIP_APP" "$VERSION" "$BUILD_NUMBER"
+if release_version_is_strictly_greater "$VERSION" "0.1.15"; then
+  [[ "$(release_plist_value "$ZIP_APP/Contents/Info.plist" LSMinimumSystemVersion)" == "15.0" ]] \
+    || release_die "Ushot 0.1.16 and later must declare macOS 15.0 as the minimum system."
+fi
 release_verify_signature_mode "$ZIP_APP" "$MODE"
 
 release_log "Validating and extracting the dSYM ZIP."
@@ -467,6 +471,10 @@ DMG_APP="$DMG_MOUNT_ROOT/$USHOT_APP_BUNDLE"
   || release_die "DMG does not contain one real $USHOT_APP_BUNDLE directory."
 validate_bundle_symlinks "$DMG_APP"
 release_validate_app_identity "$DMG_APP" "$VERSION" "$BUILD_NUMBER"
+if release_version_is_strictly_greater "$VERSION" "0.1.15"; then
+  [[ "$(release_plist_value "$DMG_APP/Contents/Info.plist" LSMinimumSystemVersion)" == "15.0" ]] \
+    || release_die "The DMG application must declare macOS 15.0 as the minimum system."
+fi
 release_verify_signature_mode "$DMG_APP" "$MODE"
 release_verify_dsym "$DMG_APP" "$EXTRACTED_DSYM"
 compare_bundle_trees "$ZIP_APP" "$DMG_APP"

@@ -239,7 +239,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     var onWindowDragBegan: ((NSEvent) -> Void)?
     var onWindowDragChanged: ((NSEvent) -> Void)?
     var onWindowDragEnded: ((String) -> Void)?
-    var onExternalDrag: ((NSEvent) -> Void)?
+    var onExternalDrag: ((NSEvent, UUID) -> Void)?
+    var onExternalDragGestureEnded: ((UUID) -> Void)?
     var onCopyFinalImage: (() -> Void)?
     var onRegionSelectionDoubleClickCopy: (() -> Void)?
     var onPreviewChange: ((CapturedImage) -> Void)?
@@ -261,7 +262,6 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     private var drawsBaseImage: Bool
     private var baseImage: NSImage
     private var previewImage: NSImage
-    private var authoritativeImage: NSImage
     private var blurredEffectPreview: (radius: CGFloat, image: CGImage)?
     private var mosaicedEffectPreview: (blockSize: CGFloat, image: CGImage)?
     private var cancellables: Set<AnyCancellable> = []
@@ -315,6 +315,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     private var textResizeFixedCornerError: CGFloat = 0
     private var isAnnotationEditingEnabled = true
     private var isInteractionSuspended = false
+    private var externalDragGestureID: UUID?
+    private var externalDragWasRequested = false
     private var isReadOnlyWindowDragArmed = false
     private var isWindowDragInProgress = false
     private var pendingRegionBodyMoveMouseDown: NSEvent?
@@ -330,7 +332,6 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     private var lastRegionDraftPreviewAnchorError: CGFloat = 0
     private var lastRegionDraftPreviewGridError: CGFloat = 0
 
-    var draggingImage: NSImage { authoritativeImage }
     var isTextEditing: Bool { textEditor != nil }
     var hasActiveLineWidthEditing: Bool { lineWidthEditingState != nil }
     var hasActivePointerInteraction: Bool {
@@ -346,6 +347,21 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         window?.invalidateCursorRects(for: self)
     }
 
+    func ownsExternalDragGesture(_ identifier: UUID) -> Bool {
+        externalDragGestureID == identifier && NSEvent.pressedMouseButtons & 1 != 0 && window != nil
+    }
+
+    func finishExternalDragGesture(_ identifier: UUID) {
+        guard externalDragGestureID == identifier else { return }
+        externalDragGestureID = nil
+    }
+
+    private func endExternalDragGesture() {
+        guard let identifier = externalDragGestureID else { return }
+        externalDragGestureID = nil
+        onExternalDragGestureEnded?(identifier)
+    }
+
     init(
         session: AnnotationEditingSession,
         drawsBaseImage: Bool = true,
@@ -356,10 +372,6 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         self.selectsNewAnnotationsAfterCommit = selectsNewAnnotationsAfterCommit
         baseImage = NSImage(cgImage: session.baseImage.image, size: session.baseImage.logicalSize)
         previewImage = NSImage(cgImage: session.previewImage.image, size: session.previewImage.logicalSize)
-        authoritativeImage = NSImage(
-            cgImage: session.authoritativePreviewImage.image,
-            size: session.authoritativePreviewImage.logicalSize
-        )
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = true
@@ -390,7 +402,6 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
         session.$authoritativePreviewImage
             .sink { [weak self] captured in
                 guard let self else { return }
-                self.authoritativeImage = NSImage(cgImage: captured.image, size: captured.logicalSize)
                 self.onPreviewChange?(captured)
             }
             .store(in: &cancellables)
@@ -480,6 +491,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             for: NSApplication.didResignActiveNotification
         )
         .sink { [weak self] _ in
+            self?.endExternalDragGesture()
             self?.cancelTextResize(reason: "application-resigned-active")
             self?.cancelSelectedTextResize(reason: "application-resigned-active")
             self?.cancelSelectionInteraction(reason: "application-resigned-active")
@@ -493,6 +505,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                   let notificationWindow = notification.object as? NSWindow,
                   notificationWindow === self.window
             else { return }
+            self.endExternalDragGesture()
             self.cancelTextResize(reason: "window-resigned-key")
             self.cancelSelectedTextResize(reason: "window-resigned-key")
             self.cancelSelectionInteraction(reason: "window-resigned-key")
@@ -506,6 +519,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                   let notificationWindow = notification.object as? NSWindow,
                   notificationWindow === self.window
             else { return }
+            self.endExternalDragGesture()
             self.cancelTextResize(reason: "window-will-close")
             self.cancelSelectedTextResize(reason: "window-will-close")
             self.cancelSelectionInteraction(reason: "window-will-close")
@@ -1343,6 +1357,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        endExternalDragGesture()
         guard !isInteractionSuspended else { return }
         let viewPoint = convert(event.locationInWindow, from: nil)
         if let editor = textEditor, let frameView = textEditorFrameView {
@@ -1376,6 +1391,8 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             )
         }
         window?.makeFirstResponder(self)
+        externalDragGestureID = UUID()
+        externalDragWasRequested = false
         if armRegionDoubleClickCopyIfNeeded(from: event) {
             return
         }
@@ -1464,7 +1481,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             return
         }
         if event.modifierFlags.contains(.option) {
-            onExternalDrag?(event)
+            if let externalDragGestureID, !externalDragWasRequested {
+                externalDragWasRequested = true
+                onExternalDrag?(event, externalDragGestureID)
+            }
             return
         }
         guard isAnnotationEditingEnabled else {
@@ -1493,6 +1513,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        endExternalDragGesture()
         guard !isInteractionSuspended else { return }
         guard isAnnotationEditingEnabled else {
             finishWindowDragIfNeeded(reason: "pointer-up-read-only")
@@ -1602,6 +1623,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow !== window { endExternalDragGesture() }
         if textResizeInteraction != nil, newWindow !== window {
             cancelTextResize(reason: "canvas-moving-between-windows")
         }
@@ -2254,9 +2276,12 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
             frameView = created
         }
 
-        let fieldFrame = viewRect(
+        var fieldFrame = viewRect(
             fromDocumentRect: selectionGeometry.transformedBounds(for: item)
         ).standardized
+        fieldFrame.size.height = InlineAnnotationTextEditorFrameView.interactiveFieldHeight(
+            for: fieldFrame.height
+        )
         precondition(
             fieldFrame.width.isFinite && fieldFrame.height.isFinite
                 && fieldFrame.width > 0 && fieldFrame.height > 0,
@@ -3927,14 +3952,10 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
                 state: $0
             )
         } ?? completeHeightInDocument
-        // The border is interaction chrome, not persisted text geometry. Give
-        // it a whole view-point ceiling so small fallback-glyph extent changes
-        // do not make the field visibly breathe while IME composition swaps
-        // fonts. TextKit's canonical bounds and every line origin remain exact.
-        let stableInteractiveHeight = ceil(completeHeightInView)
-        return max(
-            InlineAnnotationTextEditorFrameView.minimumInteractiveFieldHeight,
-            stableInteractiveHeight
+        // Keep the same fractional extent as committed/selected text. Rounding
+        // only the live field adds height whenever an annotation is re-edited.
+        return InlineAnnotationTextEditorFrameView.interactiveFieldHeight(
+            for: completeHeightInView
         )
     }
 
@@ -6264,18 +6285,7 @@ final class QuickAnnotationCanvasView: NSView, NSTextViewDelegate {
     }
 
     private var supportsDirectInteractiveComposition: Bool {
-        let document = session.controller.document
-        guard document.crop.rect == nil,
-              document.rotation.quarterTurnsClockwise == 0
-        else { return false }
-        // Corner radius alone is presentation/export clipping (layer mask +
-        // AnnotationRenderer). It must not force the opaque preview-image path:
-        // region confirmation keeps drawsBaseImage=false so the frozen overlay
-        // remains the live pixel source while the panel moves or resizes.
-        // Shadows still require the full effects composite.
-        guard document.canvasEffects.shadow == nil else { return false }
-        guard case .transparent = document.background else { return false }
-        return true
+        session.supportsDirectInteractiveComposition
     }
 
     private func cursor(for handle: AnnotationSelectionHandle) -> NSCursor {
@@ -6753,6 +6763,10 @@ private final class InlineAnnotationTextEditorFrameView: NSView {
     static let chromeOutset: CGFloat = 10
     static let minimumInteractiveFieldWidth: CGFloat = 48
     static let minimumInteractiveFieldHeight = chromeOutset * 2
+
+    static func interactiveFieldHeight(for contentHeight: CGFloat) -> CGFloat {
+        max(minimumInteractiveFieldHeight, contentHeight)
+    }
 
     var onResizeBegan: ((InlineAnnotationTextResizeHandle, NSEvent) -> Void)?
     var onResizeChanged: ((InlineAnnotationTextResizeHandle, NSEvent) -> Void)?

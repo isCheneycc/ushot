@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import QuartzCore
 import UshotCore
 
 enum RegionSelectionResizeHandle: CaseIterable, Equatable {
@@ -255,6 +256,7 @@ final class RegionSelectionCoordinator {
     private var isSpacePressed = false
     private var draftCropTask: Task<CapturedImage, Error>?
     private var draftPresentationTask: Task<Void, Never>?
+    private var focusRestoration: CaptureFocusRestoration?
     private var isPreparingDraft = false {
         didSet {
             invalidateViews()
@@ -306,13 +308,15 @@ final class RegionSelectionCoordinator {
 
     func select(
         from preparation: RegionCapturePreparation,
-        recognizesInterfaceElements: Bool = true
+        recognizesInterfaceElements: Bool = true,
+        focusRestoration: CaptureFocusRestoration? = nil
     ) async throws -> CGRect {
         guard continuation == nil else {
             throw ScreenshotAppError.captureFailed(description: "Region selection is already active.")
         }
         guard !preparation.displays.isEmpty else { throw ScreenshotAppError.noDisplayAvailable }
         self.preparation = preparation
+        self.focusRestoration = focusRestoration
         self.recognizesInterfaceElements = recognizesInterfaceElements
         self.selection = nil
         self.mouseLocation = NSEvent.mouseLocation
@@ -490,6 +494,7 @@ final class RegionSelectionCoordinator {
                 self.hidesOverlaySelectionChrome = false
                 self.pinnedShotManager.presentRegionDraft(
                     capturedImage,
+                    focusRestoration: self.focusRestoration,
                     onPin: { [weak self] in self?.completeSelection(using: .pin) },
                     onCopy: { [weak self] in self?.completeSelection(using: .copy) },
                     onSave: { [weak self] in self?.completeSelection(using: .save) },
@@ -1260,6 +1265,7 @@ final class RegionSelectionCoordinator {
         views.removeAll()
         continuation = nil
         preparation = nil
+        focusRestoration = nil
         selection = nil
         snapCandidate = nil
         snapCandidateKind = nil
@@ -1335,7 +1341,7 @@ final class RegionSelectionCoordinator {
     }
 
     private func invalidateViews() {
-        views.forEach { $0.needsDisplay = true }
+        views.forEach { $0.refreshPresentation() }
     }
 
     private func constrained(_ rect: CGRect, to bounds: CGRect) -> CGRect {
@@ -1595,19 +1601,38 @@ private final class RegionSelectionOverlayView: NSView {
         let snapCandidateLevelCount: Int?
     }
 
+    private enum Detail {
+        case magnifier(metrics: MagnifierMetrics, lens: CGRect, info: CGRect)
+        case size(text: NSAttributedString, background: CGRect)
+    }
+
     private let capture: DisplayCapture
-    private let frozenImage: NSImage
+    private let maskLayer = CAShapeLayer()
+    private let borderLayer = CAShapeLayer()
+    private let handlesLayer = CAShapeLayer()
+    private let detailView = RegionOverlayDetailView()
+    private var detail: Detail?
     private weak var coordinator: RegionSelectionCoordinator?
     private var trackingAreaReference: NSTrackingArea?
 
     init(capture: DisplayCapture, coordinator: RegionSelectionCoordinator) {
         self.capture = capture
-        frozenImage = NSImage(
-            cgImage: capture.capturedImage.image,
-            size: capture.descriptor.frame.size
-        )
         self.coordinator = coordinator
         super.init(frame: .zero)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        layer?.masksToBounds = true
+        maskLayer.fillRule = .evenOdd
+        borderLayer.fillColor = nil
+        borderLayer.lineWidth = 2
+        handlesLayer.lineWidth = 1
+        for shape in [maskLayer, borderLayer, handlesLayer] {
+            shape.contentsScale = capture.descriptor.scale
+            layer?.addSublayer(shape)
+        }
+        detailView.overlay = self
+        detailView.isHidden = true
+        addSubview(detailView)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel(NSLocalizedString("Capture region selection", comment: "Region selection overlay"))
@@ -1617,6 +1642,27 @@ private final class RegionSelectionOverlayView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     override var acceptsFirstResponder: Bool { true }
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        // The frozen pixels are shared with the compositor once. Pointer and
+        // selection updates change vector chrome, never a full-screen bitmap.
+        layer?.contents = capture.capturedImage.image
+        layer?.contentsScale = capture.descriptor.scale
+        layer?.contentsGravity = .resize
+        layer?.minificationFilter = .nearest
+        layer?.magnificationFilter = .nearest
+    }
+
+    override func layout() {
+        super.layout()
+        refreshPresentation()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        refreshPresentation()
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -1643,7 +1689,7 @@ private final class RegionSelectionOverlayView: NSView {
     override func keyDown(with event: NSEvent) { coordinator?.keyDown(with: event) }
     override func keyUp(with event: NSEvent) { coordinator?.keyUp(with: event) }
 
-    override func draw(_ dirtyRect: NSRect) {
+    func refreshPresentation() {
         guard let window, let coordinator else { return }
         let state = coordinator.drawState(for: window.frame)
         let magnifierMetrics = state.mouseLocation.flatMap { mouse in
@@ -1664,9 +1710,22 @@ private final class RegionSelectionOverlayView: NSView {
         setAccessibilityValue(
             "selectionChrome=\(state.showsSelectionChrome ? "visible" : "hidden"); confirmationSurface=\(state.showsConfirmationSurface ? "visible" : "hidden"); overlayInput=\(state.acceptsPointerInput ? "enabled" : "ignored"); snap=\(state.snapCandidateKind ?? "none"); snapLevel=\(state.snapCandidateLevel.map(String.init) ?? "none")/\(state.snapCandidateLevelCount.map(String.init) ?? "none"); snapStabilityFallbacks=\(state.snapStabilityFallbacks); magnifier=\(magnifierMetrics == nil ? "hidden" : "visible"); magnifierInteraction=\(state.magnifierInteraction); magnifierPixel=\(magnifierMetrics.map { "\($0.pixelX),\($0.pixelY)" } ?? "none"); magnifierSelection=\(magnifierSelection); magnifierTarget=\(magnifierMetrics?.snapCandidateKind ?? "none"); magnifierGrid=1px; magnifierCenter=crosshair"
         )
-        drawFrozenImage()
-        NSColor.black.withAlphaComponent(0.34).setFill()
-        bounds.fill()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
+        for shape in [maskLayer, borderLayer, handlesLayer] {
+            shape.frame = bounds
+        }
+        maskLayer.fillColor = NSColor.black.withAlphaComponent(0.34).cgColor
+        borderLayer.strokeColor = NSColor.systemBlue.cgColor
+        handlesLayer.fillColor = NSColor.white.cgColor
+        handlesLayer.strokeColor = NSColor.systemBlue.cgColor
+        let mask = CGMutablePath()
+        mask.addRect(bounds)
+        borderLayer.path = nil
+        handlesLayer.path = nil
+        detail = nil
 
         if let selection = state.selection {
             let localSelection = selection.offsetBy(dx: -state.panelFrame.minX, dy: -state.panelFrame.minY)
@@ -1677,17 +1736,13 @@ private final class RegionSelectionOverlayView: NSView {
                 for: selection.size,
                 configured: configuredRadius
             )
-            NSGraphicsContext.saveGraphicsState()
-            NSBezierPath(
-                roundedRect: localSelection,
-                xRadius: cornerRadius,
-                yRadius: cornerRadius
-            ).addClip()
-            drawFrozenImage()
-            NSGraphicsContext.restoreGraphicsState()
+            mask.addRoundedRect(
+                in: localSelection,
+                cornerWidth: cornerRadius,
+                cornerHeight: cornerRadius
+            )
 
             if state.showsSelectionChrome {
-                NSColor.systemBlue.setStroke()
                 // Selection is whole-point after live canonicalization; only
                 // inset for the stroke—do not re-integral or the frame grows.
                 let borderRect = localSelection.insetBy(dx: 0.5, dy: 0.5)
@@ -1695,17 +1750,21 @@ private final class RegionSelectionOverlayView: NSView {
                     for: borderRect.size,
                     configured: configuredRadius
                 )
-                let border = NSBezierPath(
+                borderLayer.path = CGPath(
                     roundedRect: borderRect,
-                    xRadius: borderRadius,
-                    yRadius: borderRadius
+                    cornerWidth: borderRadius,
+                    cornerHeight: borderRadius,
+                    transform: nil
                 )
-                border.lineWidth = 2
-                border.stroke()
-                drawHandles(state.handles, panelFrame: state.panelFrame)
+                let handles = CGMutablePath()
+                for point in state.handles where state.panelFrame.insetBy(dx: -6, dy: -6).contains(point) {
+                    let local = CGPoint(x: point.x - state.panelFrame.minX, y: point.y - state.panelFrame.minY)
+                    handles.addEllipse(in: CGRect(x: local.x - 4, y: local.y - 4, width: 8, height: 8))
+                }
+                handlesLayer.path = handles
             }
             if magnifierMetrics == nil {
-                drawSize(
+                prepareSize(
                     selection: selection,
                     selectionPixelSize: state.selectionPixelSize,
                     localRect: localSelection
@@ -1715,30 +1774,41 @@ private final class RegionSelectionOverlayView: NSView {
         if let mouse = state.mouseLocation,
            let magnifierMetrics
         {
-            drawMagnifier(
+            prepareMagnifier(
                 at: mouse,
                 panelFrame: state.panelFrame,
                 metrics: magnifierMetrics
             )
         }
-    }
-
-    private func drawFrozenImage() {
-        frozenImage.draw(in: bounds, from: .zero, operation: .copy, fraction: 1)
-    }
-
-    private func drawHandles(_ handles: [CGPoint], panelFrame: CGRect) {
-        for point in handles where panelFrame.insetBy(dx: -6, dy: -6).contains(point) {
-            let local = CGPoint(x: point.x - panelFrame.minX, y: point.y - panelFrame.minY)
-            let rect = CGRect(x: local.x - 4, y: local.y - 4, width: 8, height: 8)
-            NSColor.white.setFill()
-            NSBezierPath(ovalIn: rect).fill()
-            NSColor.systemBlue.setStroke()
-            NSBezierPath(ovalIn: rect).stroke()
+        maskLayer.path = mask
+        detailView.isHidden = detail == nil
+        if detail != nil {
+            detailView.needsDisplay = true
         }
     }
 
-    private func drawSize(
+    fileprivate func drawDetail() {
+        switch detail {
+        case .magnifier(let metrics, let lens, let info):
+            drawMagnifier(metrics: metrics, destination: lens, infoRect: info)
+        case .size(let text, let background):
+            NSColor.black.withAlphaComponent(0.75).setFill()
+            NSBezierPath(roundedRect: background, xRadius: 5, yRadius: 5).fill()
+            text.draw(at: CGPoint(x: background.minX + 6, y: background.minY + 4))
+        case nil:
+            break
+        }
+    }
+
+    private func setDetailFrame(_ frame: CGRect) {
+        // Keep drawing in the overlay's coordinate system while allocating a
+        // backing store only for the small HUD, including its shadow.
+        let frame = frame.integral
+        detailView.frame = frame
+        detailView.bounds = frame
+    }
+
+    private func prepareSize(
         selection: CGRect,
         selectionPixelSize: CGSize?,
         localRect: CGRect
@@ -1750,18 +1820,19 @@ private final class RegionSelectionOverlayView: NSView {
         let pointHeight = Int(selection.height.rounded())
         let pixelWidth = Int(selectionPixelSize.width)
         let pixelHeight = Int(selectionPixelSize.height)
-        let text = "\(pointWidth) × \(pointHeight) pt · \(pixelWidth) × \(pixelHeight) px"
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: AppKitDrawingFonts.regionSelectionSize,
-            .foregroundColor: NSColor.white
-        ]
-        let size = text.size(withAttributes: attributes)
+        let text = NSAttributedString(
+            string: "\(pointWidth) × \(pointHeight) pt · \(pixelWidth) × \(pixelHeight) px",
+            attributes: [
+                .font: AppKitDrawingFonts.regionSelectionSize,
+                .foregroundColor: NSColor.white
+            ]
+        )
+        let size = text.size()
         var origin = CGPoint(x: max(8, localRect.minX), y: min(bounds.maxY - size.height - 12, localRect.maxY + 8))
         if origin.y < 8 { origin.y = 8 }
         let background = CGRect(x: origin.x - 6, y: origin.y - 4, width: size.width + 12, height: size.height + 8)
-        NSColor.black.withAlphaComponent(0.75).setFill()
-        NSBezierPath(roundedRect: background, xRadius: 5, yRadius: 5).fill()
-        text.draw(at: origin, withAttributes: attributes)
+        detail = .size(text: text, background: background)
+        setDetailFrame(background)
     }
 
     private func magnifierMetrics(
@@ -1791,24 +1862,11 @@ private final class RegionSelectionOverlayView: NSView {
         )
     }
 
-    private func drawMagnifier(
+    private func prepareMagnifier(
         at globalPoint: CGPoint,
         panelFrame: CGRect,
         metrics: MagnifierMetrics
     ) {
-        let scale = capture.descriptor.scale
-        let sampleSize = max(5, Int(11 * scale))
-        var crop = CGRect(
-            x: CGFloat(metrics.pixelX - sampleSize / 2),
-            y: CGFloat(metrics.pixelY - sampleSize / 2),
-            width: CGFloat(sampleSize),
-            height: CGFloat(sampleSize)
-        )
-        crop.origin.x = min(max(0, crop.origin.x), CGFloat(capture.capturedImage.image.width) - crop.width)
-        crop.origin.y = min(max(0, crop.origin.y), CGFloat(capture.capturedImage.image.height) - crop.height)
-        let sampledCrop = crop.integral
-        guard let sampled = capture.capturedImage.image.cropping(to: sampledCrop) else { return }
-
         let local = CGPoint(x: globalPoint.x - panelFrame.minX, y: globalPoint.y - panelFrame.minY)
         let lensSize = CGSize(width: 110, height: 110)
         let infoWidth: CGFloat = 144
@@ -1851,6 +1909,24 @@ private final class RegionSelectionOverlayView: NSView {
             width: lensSize.width,
             height: lensSize.height
         )
+
+        detail = .magnifier(metrics: metrics, lens: destination, info: infoRect)
+        setDetailFrame(stack.insetBy(dx: -10, dy: -10))
+    }
+
+    private func drawMagnifier(metrics: MagnifierMetrics, destination: CGRect, infoRect: CGRect) {
+        let scale = capture.descriptor.scale
+        let sampleSize = max(5, Int(11 * scale))
+        var crop = CGRect(
+            x: CGFloat(metrics.pixelX - sampleSize / 2),
+            y: CGFloat(metrics.pixelY - sampleSize / 2),
+            width: CGFloat(sampleSize),
+            height: CGFloat(sampleSize)
+        )
+        crop.origin.x = min(max(0, crop.origin.x), CGFloat(capture.capturedImage.image.width) - crop.width)
+        crop.origin.y = min(max(0, crop.origin.y), CGFloat(capture.capturedImage.image.height) - crop.height)
+        let sampledCrop = crop.integral
+        guard let sampled = capture.capturedImage.image.cropping(to: sampledCrop) else { return }
 
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
@@ -2043,6 +2119,16 @@ private final class RegionSelectionOverlayView: NSView {
             y: window.frame.minY + event.locationInWindow.y
         )
     }
+}
+
+private final class RegionOverlayDetailView: NSView {
+    weak var overlay: RegionSelectionOverlayView?
+
+    override func draw(_ dirtyRect: NSRect) {
+        overlay?.drawDetail()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 @MainActor
