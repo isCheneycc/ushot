@@ -1442,6 +1442,23 @@ validate_fixture() {
 }
 
 expect_success "validator accepts an isolated feed item without a major-upgrade marker" validate_fixture "$VALID_APPCAST"
+
+validate_macos15_fixture() {
+  "$VALIDATE_SCRIPT" --appcast "$1" --archive "$ARCHIVE_PATH" \
+    --release-notes "$NOTES_PATH" --version "0.1.16" --build-number "17" --tag "v0.1.16"
+}
+MACOS15_APPCAST="$TEST_ROOT/macos15-appcast.xml"
+sed -e 's/0\.1\.4/0.1.16/g' -e 's#<sparkle:version>5</sparkle:version>#<sparkle:version>17</sparkle:version>#' \
+  "$VALID_APPCAST" > "$MACOS15_APPCAST"
+expect_failure_containing "new releases reject a missing minimum system" \
+  "must require macOS 15.0" validate_macos15_fixture "$MACOS15_APPCAST"
+sed 's#<sparkle:version>17</sparkle:version>#<sparkle:version>17</sparkle:version><sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>#' \
+  "$MACOS15_APPCAST" > "$TEST_ROOT/macos15-valid.xml"
+expect_success "new releases accept macOS 15 minimum" validate_macos15_fixture "$TEST_ROOT/macos15-valid.xml"
+sed 's#<sparkle:minimumSystemVersion>15.0#<sparkle:minimumSystemVersion>14.0#' \
+  "$TEST_ROOT/macos15-valid.xml" > "$TEST_ROOT/macos15-wrong.xml"
+expect_failure_containing "new releases reject macOS 14 minimum" \
+  "must require macOS 15.0" validate_macos15_fixture "$TEST_ROOT/macos15-wrong.xml"
 expect_failure_containing \
   "validator rejects sparkle:minimumAutoupdateVersion" \
   "must not be a major upgrade" \
@@ -2022,7 +2039,7 @@ assert_sdk_runner_boundaries() {
   [[ "$(workflow_job_runner "$CI_WORKFLOW" release-metadata)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$CI_WORKFLOW" unit-tests)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$CI_WORKFLOW" public-build-gate)" == "macos-15" ]]
-  [[ "$(workflow_job_runner "$CI_WORKFLOW" macos-14-launch-smoke)" == "macos-14" ]]
+  [[ "$(workflow_job_runner "$CI_WORKFLOW" macos-15-launch-smoke)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" build-artifacts)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" preflight)" == "macos-15" ]]
   [[ "$(workflow_job_runner "$RELEASE_WORKFLOW" build-authenticated-appcast-validator)" == "macos-15" ]]
@@ -2033,7 +2050,7 @@ assert_sdk_runner_boundaries() {
   workflow_job_selects_xcode_26_3 "$CI_WORKFLOW" public-build-gate
   workflow_job_selects_xcode_26_3 "$RELEASE_WORKFLOW" build-artifacts
 
-  compatibility_job="$(workflow_job_body "$CI_WORKFLOW" macos-14-launch-smoke)"
+  compatibility_job="$(workflow_job_body "$CI_WORKFLOW" macos-15-launch-smoke)"
   [[ -n "$compatibility_job" ]]
   grep -Fq 'needs: public-build-gate' <<< "$compatibility_job"
   grep -Fq 'compatibility_artifact_id' <<< "$compatibility_job"

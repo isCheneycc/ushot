@@ -91,6 +91,12 @@ for ((index = 1; index <= ITEM_COUNT; index++)); do
   ITEM_ENCLOSURE_URL="$(xmllint --xpath "string($ITEM_XPATH/*[local-name()='enclosure' and namespace-uri()='']/@url)" "$APPCAST_PATH")"
   ITEM_INSTALLATION_TYPE="$(xmllint --xpath "string($ITEM_XPATH/*[local-name()='enclosure' and namespace-uri()='']/@*[local-name()='installationType' and namespace-uri()='$USHOT_SPARKLE_XML_NAMESPACE'])" "$APPCAST_PATH")"
   release_validate_version "$ITEM_VERSION"
+  if release_version_is_strictly_greater "$ITEM_VERSION" "0.1.15"; then
+    MINIMUM_SYSTEM_XPATH="$ITEM_XPATH/*[local-name()='minimumSystemVersion' and namespace-uri()='$USHOT_SPARKLE_XML_NAMESPACE']"
+    [[ "$(xmllint --xpath "count($MINIMUM_SYSTEM_XPATH)" "$APPCAST_PATH")" == "1" \
+        && "$(xmllint --xpath "string($MINIMUM_SYSTEM_XPATH)" "$APPCAST_PATH")" == "15.0" ]] \
+      || release_die "Ushot 0.1.16 and later appcast items must require macOS 15.0."
+  fi
   release_validate_build_number "$ITEM_BUILD"
   [[ "$ITEM_ENCLOSURE_URL" == "https://github.com/$USHOT_GITHUB_REPOSITORY/releases/download/v$ITEM_VERSION/$USHOT_PRODUCT_NAME-$ITEM_VERSION-$USHOT_ARCHITECTURE.zip" ]] \
     || release_die "Appcast item $index has a noncanonical enclosure URL: $ITEM_ENCLOSURE_URL"

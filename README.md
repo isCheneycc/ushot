@@ -14,7 +14,7 @@
   <a href="#release-status-and-installation">Release status</a>
 </p>
 
-Ushot is a native screenshot and annotation utility for Apple silicon Macs running macOS 14 or later. Capture a region, window, or display; mark it up while keeping annotations editable; then copy, save, or keep it pinned across Spaces and full-screen apps.
+Ushot is a native screenshot and annotation utility for Apple silicon Macs running macOS 15 or later. Capture a region, window, or display; mark it up while keeping annotations editable; then copy, save, or keep it pinned across Spaces and full-screen apps.
 
 Screenshot pixels, annotations, clipboard exports, color samples, history, and encoded files are processed locally. Ushot has no account, telemetry, analytics, advertising SDK, crash-report upload, or system-profile submission.
 
@@ -44,7 +44,7 @@ Implementation detail and current validation evidence live in [STATUS.md](STATUS
 
 You need:
 
-- An Apple silicon Mac running macOS 14 or later.
+- An Apple silicon Mac running macOS 15 or later.
 - A full Xcode installation. Command Line Tools alone can run the SwiftPM checks, but cannot build the `.app` with `xcodebuild`.
 
 Open the project and run the `ScreenshotApp` scheme:

@@ -134,7 +134,7 @@ fi
 SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)" \
   || release_die "Could not resolve the selected macOS SDK version."
 validate_build_sdk "$MODE" "$SDK_VERSION"
-release_log "Using macOS SDK $SDK_VERSION for the macOS 14 deployment target."
+release_log "Using macOS SDK $SDK_VERSION for the macOS 15 deployment target."
 
 MODE_ROOT="$BUILD_ROOT/$MODE"
 DERIVED_DATA="$MODE_ROOT/DerivedData"

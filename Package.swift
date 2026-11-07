@@ -5,7 +5,7 @@ import PackageDescription
 // The macOS 26 SDK declares two ScreenCaptureKit classes without attaching
 // availability to their Objective-C interface declarations. Keep every
 // SwiftPM-linked host weak so package tests and command-line products can still
-// launch on the package's supported macOS 14/15 deployment targets.
+// launch on the package's supported macOS 15 deployment targets.
 let screenCaptureKitWeakLinkerSettings: [LinkerSetting] = [
     .unsafeFlags(
         ["-Xlinker", "-weak_framework", "-Xlinker", "ScreenCaptureKit"],
@@ -16,7 +16,7 @@ let screenCaptureKitWeakLinkerSettings: [LinkerSetting] = [
 let package = Package(
     name: "ScreenshotApp",
     defaultLocalization: "en",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     products: [
         .library(name: "UshotCore", targets: ["UshotCore"]),
         .executable(name: "UshotApp", targets: ["UshotApp"]),

@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.1.16] - 2026-11-07
 
+### Changed
+
+- Require macOS 15 or later and validate public-build startup on macOS 15 after retirement of the macOS 14 CI image.
+
 ### Fixed
 
 - Keep text annotation borders at a consistent height when committing and reopening text, including handwritten fonts and fractional zoom.
