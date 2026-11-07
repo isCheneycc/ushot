@@ -4,6 +4,23 @@ import UshotCore
 
 @MainActor
 final class AnnotationEditingSession: ObservableObject {
+    enum PreviewRenderingMode {
+        case continuous
+        case regionDraft
+    }
+
+    private struct RenderRequest {
+        enum Kind { case authoritative, interactive }
+
+        let kind: Kind
+        let generation: Int
+        let baseGeneration: Int
+        let baseImage: CapturedImage
+        let document: AnnotationDocument
+        let logicalDocument: AnnotationDocument
+        let excludedAnnotationIDs: Set<UUID>
+    }
+
     struct HistoryPreviewSnapshot {
         let document: AnnotationDocument
         let previewImage: CapturedImage
@@ -55,7 +72,14 @@ final class AnnotationEditingSession: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var authoritativeRenderGeneration = 0
     private var interactiveRenderGeneration = 0
-    private var authoritativeRenderTask: Task<CapturedImage, Error>?
+    private var baseGeneration = 0
+    private var renderedBaseGeneration = 0
+    private var previewRenderingMode: PreviewRenderingMode
+    private var renderPipelineTask: Task<Void, Never>?
+    private var activeRender: RenderRequest?
+    private var pendingAuthoritativeRender: RenderRequest?
+    private var pendingInteractiveRender: RenderRequest?
+    private var authoritativeRenderFailure: (generation: Int, error: Error)?
     private var authoritativeRenderedDocument: AnnotationDocument?
     private var historyRecorder: HistorySessionRecorder?
     private var previewExcludedAnnotationIDs: Set<UUID> = []
@@ -73,12 +97,14 @@ final class AnnotationEditingSession: ObservableObject {
         editorSettings: EditorSettings,
         updateSensitiveActivityTracker: UpdateSensitiveActivityTracker,
         renderer: any AnnotationRendering = AnnotationRenderer(),
-        configuredRegionCornerRadius: CGFloat? = nil
+        configuredRegionCornerRadius: CGFloat? = nil,
+        previewRenderingMode: PreviewRenderingMode = .continuous
     ) {
         baseImage = capturedImage
         self.previewImage = previewImage ?? capturedImage
         self.authoritativePreviewImage = previewImage ?? capturedImage
         self.renderer = renderer
+        self.previewRenderingMode = previewRenderingMode
         self.updateSensitiveActivityTracker = updateSensitiveActivityTracker
         self.editorSettings = editorSettings
         self.storedConfiguredRegionCornerRadius = configuredRegionCornerRadius
@@ -139,60 +165,84 @@ final class AnnotationEditingSession: ObservableObject {
 
     private func scheduleRender(document sourceDocument: AnnotationDocument) {
         authoritativeRenderGeneration += 1
-        let generation = authoritativeRenderGeneration
-        let updateSensitiveActivityTracker = updateSensitiveActivityTracker
-        let lease = updateSensitiveActivityTracker.begin(
-            operation: "authoritative-annotation-render"
-        )
-        let renderTask = makeRenderTask(document: sourceDocument)
-        // Every output waiter shares this publication boundary. Receiving the
-        // same pixels must not publish another history snapshot or debounce.
-        authoritativeRenderTask = Task { [weak self, renderTask] in
-            defer { updateSensitiveActivityTracker.finish(lease) }
-            do {
-                let rendered = try await renderTask.value
-                guard let self,
-                      generation == self.authoritativeRenderGeneration,
-                      sourceDocument == self.controller.document
-                else { return rendered }
-                self.acceptSuccessfulAuthoritativeRender(
-                    rendered,
-                    document: sourceDocument
-                )
-                AppLog.export.debug(
-                    "Rendered authoritative annotation generation \(generation, privacy: .public): annotations=\(sourceDocument.annotations.count, privacy: .public), pixels=\(rendered.image.width, privacy: .public)x\(rendered.image.height, privacy: .public), scale=\(rendered.scale, privacy: .public)x"
-                )
-                return rendered
-            } catch {
-                if let self, generation == self.authoritativeRenderGeneration {
-                    self.reportRenderFailure(error, key: "authoritative-\(generation)")
-                }
-                throw error
+        authoritativeRenderFailure = nil
+        pendingAuthoritativeRender = nil
+        if defersPreviewRendering(for: sourceDocument) {
+            if !hasAuthoritativePreview(for: sourceDocument) {
+                authoritativeRenderedDocument = nil
+                historyPreviewSnapshot = nil
+                authoritativePreviewImage = baseImage
+                previewImage = baseImage
+                renderedPreviewDocument = nil
+                renderedPreviewExcludedAnnotationIDs = []
             }
+        } else {
+            requestAuthoritativeRender(document: sourceDocument)
         }
         scheduleInteractivePreview(document: sourceDocument)
     }
 
+    var supportsDirectInteractiveComposition: Bool {
+        Self.supportsDirectInteractiveComposition(document: controller.document)
+    }
+
+    private static func supportsDirectInteractiveComposition(document: AnnotationDocument) -> Bool {
+        guard document.crop.rect == nil,
+              document.rotation.quarterTurnsClockwise == 0,
+              document.canvasEffects.shadow == nil,
+              case .transparent = document.background
+        else { return false }
+        return true
+    }
+
+    private func defersPreviewRendering(for document: AnnotationDocument) -> Bool {
+        previewRenderingMode == .regionDraft && Self.supportsDirectInteractiveComposition(document: document)
+    }
+
+    func finishRegionDraft() {
+        previewRenderingMode = .continuous
+        scheduleRender(document: controller.document)
+    }
+
+    private func hasAuthoritativePreview(for document: AnnotationDocument) -> Bool {
+        authoritativeRenderedDocument == document && renderedBaseGeneration == baseGeneration
+    }
+
+    private func requestAuthoritativeRender(document: AnnotationDocument) {
+        guard !hasAuthoritativePreview(for: document) else { return }
+        if let activeRender,
+           activeRender.kind == .authoritative,
+           isCurrent(activeRender) { return }
+        if let pendingAuthoritativeRender, isCurrent(pendingAuthoritativeRender) { return }
+        authoritativeRenderFailure = nil
+        pendingAuthoritativeRender = RenderRequest(
+            kind: .authoritative,
+            generation: authoritativeRenderGeneration,
+            baseGeneration: baseGeneration,
+            baseImage: baseImage,
+            document: document,
+            logicalDocument: document,
+            excludedAnnotationIDs: []
+        )
+        startRenderPipelineIfNeeded()
+    }
+
     func resolvedPreviewImage() async throws -> CapturedImage {
         while true {
+            try Task.checkCancellation()
             let document = controller.document
-            if authoritativeRenderedDocument == document {
+            if hasAuthoritativePreview(for: document) {
                 return authoritativePreviewImage
             }
-            let generation = authoritativeRenderGeneration
-            guard let task = authoritativeRenderTask else {
-                scheduleRender(document: document)
-                continue
+            requestAuthoritativeRender(document: document)
+            guard let task = renderPipelineTask else {
+                preconditionFailure("An unresolved annotation output requires an active render pipeline.")
             }
-            do {
-                let rendered = try await task.value
-                guard generation == authoritativeRenderGeneration,
-                      document == controller.document
-                else { continue }
-                return rendered
-            } catch {
-                guard generation == authoritativeRenderGeneration else { continue }
-                throw error
+            await task.value
+            try Task.checkCancellation()
+            if let failure = authoritativeRenderFailure,
+               failure.generation == authoritativeRenderGeneration {
+                throw failure.error
             }
         }
     }
@@ -401,6 +451,7 @@ final class AnnotationEditingSession: ObservableObject {
 
     func attachHistoryRecorder(_ recorder: HistorySessionRecorder) {
         precondition(historyRecorder == nil, "An annotation session must have one history persistence owner.")
+        precondition(previewRenderingMode == .continuous, "Only a committed screenshot may record annotation history.")
         historyRecorder = recorder
     }
 
@@ -444,10 +495,12 @@ final class AnnotationEditingSession: ObservableObject {
         )
 
         let previousImage = baseImage
+        baseGeneration += 1
         authoritativeRenderGeneration += 1
         interactiveRenderGeneration += 1
-        authoritativeRenderTask?.cancel()
-        authoritativeRenderTask = nil
+        pendingAuthoritativeRender = nil
+        pendingInteractiveRender = nil
+        authoritativeRenderFailure = nil
         authoritativeRenderedDocument = nil
         historyPreviewSnapshot = nil
         previewExcludedAnnotationIDs = []
@@ -483,6 +536,9 @@ final class AnnotationEditingSession: ObservableObject {
                 "Rebased annotation session onto resized region: oldLogical=\(previousImage.logicalSize.debugDescription, privacy: .public), newLogical=\(capturedImage.logicalSize.debugDescription, privacy: .public), translation=\(translation.debugDescription, privacy: .public), annotations=\(self.controller.document.annotations.count, privacy: .public)"
             )
         }
+        // A same-size move can leave the entire document equal while changing
+        // its pixels; base replacement must invalidate rendering on its own.
+        scheduleRender(document: controller.document)
     }
 
     private func acceptSuccessfulAuthoritativeRender(
@@ -490,6 +546,7 @@ final class AnnotationEditingSession: ObservableObject {
         document: AnnotationDocument
     ) {
         authoritativeRenderedDocument = document
+        renderedBaseGeneration = baseGeneration
         authoritativePreviewImage = rendered
         let persistenceDocument = document.recordingCurrentCachedPreviewRenderRevision()
         historyPreviewSnapshot = HistoryPreviewSnapshot(
@@ -510,11 +567,12 @@ final class AnnotationEditingSession: ObservableObject {
 
     private func scheduleInteractivePreview(document: AnnotationDocument) {
         interactiveRenderGeneration += 1
-        let generation = interactiveRenderGeneration
+        pendingInteractiveRender = nil
         let excludedAnnotationIDs = previewExcludedAnnotationIDs
 
+        guard !defersPreviewRendering(for: document) else { return }
         guard !excludedAnnotationIDs.isEmpty else {
-            if authoritativeRenderedDocument == document {
+            if hasAuthoritativePreview(for: document) {
                 previewImage = authoritativePreviewImage
                 renderedPreviewExcludedAnnotationIDs = []
                 renderedPreviewDocument = document
@@ -528,52 +586,113 @@ final class AnnotationEditingSession: ObservableObject {
         {
             previewDocument.annotations[index].isVisible = false
         }
-        let task = makeRenderTask(document: previewDocument, logicalDocument: document)
-        Task { [weak self, task] in
-            do {
-                let preview = try await task.value
-                guard let self,
-                      generation == self.interactiveRenderGeneration,
-                      document == self.controller.document,
-                      excludedAnnotationIDs == self.previewExcludedAnnotationIDs
-                else { return }
-                self.previewImage = preview
-                self.renderedPreviewExcludedAnnotationIDs = excludedAnnotationIDs
-                self.renderedPreviewDocument = document
-                AppLog.export.debug(
-                    "Rendered interaction background generation \(generation, privacy: .public): excluded=\(excludedAnnotationIDs.count, privacy: .public), annotations=\(document.annotations.count, privacy: .public)"
-                )
-            } catch {
-                guard let self, generation == self.interactiveRenderGeneration else { return }
-                self.reportRenderFailure(error, key: "interactive-\(generation)")
+        pendingInteractiveRender = RenderRequest(
+            kind: .interactive,
+            generation: interactiveRenderGeneration,
+            baseGeneration: baseGeneration,
+            baseImage: baseImage,
+            document: previewDocument,
+            logicalDocument: document,
+            excludedAnnotationIDs: excludedAnnotationIDs
+        )
+        startRenderPipelineIfNeeded()
+    }
+
+    private func startRenderPipelineIfNeeded() {
+        guard renderPipelineTask == nil,
+              pendingAuthoritativeRender != nil || pendingInteractiveRender != nil
+        else { return }
+        let renderer = renderer
+        let tracker = updateSensitiveActivityTracker
+        let lease = tracker.begin(operation: "annotation-render-pipeline")
+        renderPipelineTask = Task { [weak self] in
+            defer { tracker.finish(lease) }
+            // Only one bitmap is rendered at a time. Pending inputs are slots,
+            // not tasks, so superseded documents and base images release here.
+            while let request = self?.takeNextRender() {
+                let result = await Task.detached(priority: .userInitiated) {
+                    Result {
+                        try autoreleasepool {
+                            let rendered = try renderer.render(
+                                document: request.document,
+                                baseImage: request.baseImage.image,
+                                scale: request.baseImage.scale
+                            )
+                            let logicalSize = request.logicalDocument.outputLogicalSize
+                            return CapturedImage(
+                                image: rendered,
+                                colorSpace: rendered.colorSpace,
+                                pixelSize: CGSize(width: rendered.width, height: rendered.height),
+                                logicalSize: logicalSize,
+                                scale: logicalSize.width > 0 ? CGFloat(rendered.width) / logicalSize.width : request.baseImage.scale,
+                                sourceMetadata: request.baseImage.sourceMetadata
+                            )
+                        }
+                    }
+                }.value
+                self?.finishRender(request, result: result)
             }
+            self?.renderPipelineTask = nil
         }
     }
 
-    private func makeRenderTask(
-        document: AnnotationDocument,
-        logicalDocument: AnnotationDocument? = nil
-    ) -> Task<CapturedImage, Error> {
-        let baseImage = baseImage
-        let renderer = renderer
-        let logicalDocument = logicalDocument ?? document
-        return Task<CapturedImage, Error> {
-            let rendered = try await Task.detached(priority: .userInitiated) {
-                try renderer.render(
-                    document: document,
-                    baseImage: baseImage.image,
-                    scale: baseImage.scale
-                )
-            }.value
-            let logicalSize = logicalDocument.outputLogicalSize
-            return CapturedImage(
-                image: rendered,
-                colorSpace: rendered.colorSpace,
-                pixelSize: CGSize(width: rendered.width, height: rendered.height),
-                logicalSize: logicalSize,
-                scale: logicalSize.width > 0 ? CGFloat(rendered.width) / logicalSize.width : baseImage.scale,
-                sourceMetadata: baseImage.sourceMetadata
+    private func takeNextRender() -> RenderRequest? {
+        if let request = pendingAuthoritativeRender {
+            pendingAuthoritativeRender = nil
+            if isCurrent(request) {
+                activeRender = request
+                return request
+            }
+        }
+        if let request = pendingInteractiveRender {
+            pendingInteractiveRender = nil
+            if isCurrent(request) {
+                activeRender = request
+                return request
+            }
+        }
+        return nil
+    }
+
+    private func isCurrent(_ request: RenderRequest) -> Bool {
+        guard request.baseGeneration == baseGeneration,
+              request.logicalDocument == controller.document
+        else { return false }
+        switch request.kind {
+        case .authoritative:
+            return request.generation == authoritativeRenderGeneration
+        case .interactive:
+            return request.generation == interactiveRenderGeneration
+                && request.excludedAnnotationIDs == previewExcludedAnnotationIDs
+        }
+    }
+
+    private func finishRender(_ request: RenderRequest, result: Result<CapturedImage, Error>) {
+        activeRender = nil
+        guard isCurrent(request) else {
+            AppLog.export.debug("Discarded superseded annotation render: generation=\(request.generation, privacy: .public)")
+            return
+        }
+        switch result {
+        case .success(let image):
+            switch request.kind {
+            case .authoritative:
+                authoritativeRenderFailure = nil
+                acceptSuccessfulAuthoritativeRender(image, document: request.logicalDocument)
+            case .interactive:
+                previewImage = image
+                renderedPreviewExcludedAnnotationIDs = request.excludedAnnotationIDs
+                renderedPreviewDocument = request.logicalDocument
+            }
+            AppLog.export.debug(
+                "Rendered annotation generation \(request.generation, privacy: .public): authoritative=\(request.kind == .authoritative, privacy: .public), annotations=\(request.document.annotations.count, privacy: .public), pixels=\(image.image.width, privacy: .public)x\(image.image.height, privacy: .public)"
             )
+        case .failure(let error):
+            let kind = request.kind == .authoritative ? "authoritative" : "interactive"
+            if request.kind == .authoritative {
+                authoritativeRenderFailure = (request.generation, error)
+            }
+            reportRenderFailure(error, key: "\(kind)-\(request.generation)")
         }
     }
 
