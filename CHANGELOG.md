@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-11-27
+
+### Added
+
+- Snap exposed desktop areas directly to the full display in region mode, and climb from control and window to Display with Tab or Option-scroll (Shift-Tab returns).
+- Allow capturing the visible Ushot Settings window across region, window and display captures, while keeping overlays and toolbars excluded.
+
+### Changed
+
+- Restrict region smart snapping to the active application (or the previous application plus Ushot Settings when Ushot is frontmost), visible committed pinned screenshots and exposed desktop displays.
+- Resolve the resting pointer immediately when region capture starts so clicking or pressing Tab works without moving the mouse first.
+
+### Fixed
+
+- Prevent multi-display and floating-layer snap pass-through with a front-to-back Window Server occlusion stack, symmetric 1 pt Core Graphics and ScreenCaptureKit boundary protection, display-gap rejection, freeze-time stability envelopes and mouse-down target revalidation.
+- Preserve window shadows on floating panels and ordinary windows in region and display captures when Keep window shadow is enabled, and keep live color picking consistent with frozen screen pixels.
+- Exempt system menu-bar screen-capture indicators whose on-display bounds lie strictly inside a visible menu bar so an unchanged desktop does not trigger freeze-stability restrictions.
+- Harden Accessibility control ownership verification with tri-state attribute reads, popover container recognition, hit-test error classification and privacy-safe rejection diagnostics.
+
 ## [0.1.16] - 2026-11-07
 
 ### Changed
