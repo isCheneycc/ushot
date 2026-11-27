@@ -169,6 +169,22 @@ scripts/package-release.sh \
 
 ## Exact release assets
 
+The immutable published [v0.1.17](https://github.com/isCheneycc/ushot/releases/tag/v0.1.17) Release (id `460214193`, published `2026-11-27T05:49:12Z`) requires macOS 15 or later. Protected run [45936333646](https://github.com/isCheneycc/ushot/actions/runs/45936333646) attempt 1 completed all 11 jobs with `publish_update_feed=true`. PR [#36](https://github.com/isCheneycc/ushot/pull/36) and exact main CI [45935634833](https://github.com/isCheneycc/ushot/actions/runs/45935634833) preceded annotated tag object `613688643017e025fdde28df11854bf08b076fcf`, bound to protected-main commit `04d68dea24e16a4901025ead686e671898c9678c`.
+
+| Asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `SHA256SUMS.txt` | 379 | `39a54bef281310fb301f7f4b4242af60f80bca9fe8887e556a7a9830a83c7e94` |
+| `Ushot-0.1.17-arm64.dmg` | 20,369,884 | `7a9f70a8931fae7cf639f78f4c574df0b377319ed3e89cbb1c0b7ba8ac743701` |
+| `Ushot-0.1.17-arm64.dSYM.zip` | 6,317,451 | `802c67395b4606a020d70f17f2f436c751fe809d638acd9fbf6a2d6dc7857193` |
+| `Ushot-0.1.17-arm64.release-manifest.json` | 898 | `4d81f83ad17758ad0885209bac63d0b014c9a24db660302ae99bbfe7bcf10333` |
+| `Ushot-0.1.17-arm64.zip` | 18,915,737 | `4765d7546993871f7c5c86fa5a85e71043e24f89e15510aa66a222ab3c7786e9` |
+
+Workflow and independent anonymous asset validation passed. Independent public-key Ed25519 checks passed for the complete feed and public ZIP, followed by the app-identical raw-XML policy and exact minimum-system/release-note checks. The 10,993 live bytes match the preserved signed artifact and sole Pages file, SHA-256 `0ca91cc173267fb124972cf31e76fefc2e527f0113919653a3151763f2617585`. Identities are 0.1.17/18, 0.1.16/17, 0.1.15/16, 0.1.14/15, 0.1.13/14, 0.1.12/13 and 0.1.11/12. Items 0.1.17 and 0.1.16 require macOS 15.0; retained older items preserve macOS 14.0. The legacy endpoint remains HTTP 404.
+
+Authenticated-feed artifact `15175119270` has REST digest `sha256:e729720b3c816bcd54550c12e47d4a06dcf24a4fb53a3b155aeb18d9b1c2603f`; Pages artifact `15175925444` has REST digest `sha256:3474282fe119862149ab8af71c09979e994f580a61979d782f1139b51722c8ed`. Deployment `8102885960` reached success status `23283799778` at `2026-11-27T05:52:31Z`. All three environment allowlists admit only exact tag `v0.1.17`, with original required reviewers retained and the signing key remaining exclusively in `update-feed-signing`.
+
+The following entries preserve earlier publication evidence and environment state at their respective release dates.
+
 The immutable published [v0.1.16](https://github.com/isCheneycc/ushot/releases/tag/v0.1.16) Release (id `437399984`, published `2026-11-07T06:57:39Z`) requires macOS 15 or later. Protected run [42348589461](https://github.com/isCheneycc/ushot/actions/runs/42348589461) attempt 1 completed all 11 jobs with `publish_update_feed=true`. PR [#34](https://github.com/isCheneycc/ushot/pull/34) and exact main CI [42348184538](https://github.com/isCheneycc/ushot/actions/runs/42348184538) preceded annotated tag object `f167e0d8d94f8ba46e5c8b5d262bd914f8d1681f`, bound to protected-main commit `779d05ce083b97d8afbf0f977fd60a347202fbce`.
 
 | Asset | Bytes | SHA-256 |
@@ -182,9 +198,6 @@ The immutable published [v0.1.16](https://github.com/isCheneycc/ushot/releases/t
 Workflow and independent anonymous asset validation passed. Independent public-key Ed25519 checks passed for the complete feed and public ZIP, followed by the app-identical raw-XML policy and exact minimum-system/release-note checks. The 9,250 live bytes match the preserved signed artifact and sole Pages file, SHA-256 `ef19cdb3b35495142c7aec5a54a9498e6b96d8fbff256c6274e23aaf9e399c16`. Identities are 0.1.16/17, 0.1.15/16, 0.1.14/15, 0.1.13/14, 0.1.12/13 and 0.1.11/12. The newest item requires macOS 15.0; retained items preserve macOS 14.0. The legacy endpoint remains HTTP 404.
 
 Authenticated-feed artifact `13564912632` has REST digest `sha256:d218d2dadb62d217122bfb769656028df3bb25be6455406efa3b569e4675ec66`; Pages artifact `13564613642` has REST digest `sha256:081833b8d4c4146a6c44aafce42f15ff3c1bba4c7dc252be584cbadbd8e0f868`. Deployment `7617918074` reached success status `21639259889` at `2026-11-07T06:59:37Z`. All three environment allowlists admit only exact tag `v0.1.16`, with original required reviewers retained and the signing key remaining exclusively in `update-feed-signing`.
-
-The following entries preserve earlier publication evidence and environment state at their respective release dates.
-
 
 The immutable published [`v0.1.15`](https://github.com/isCheneycc/ushot/releases/tag/v0.1.15) GitHub Release (id `389717316`, published `2026-09-16T07:37:20Z`) contains exactly the following:
 
