@@ -108,7 +108,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 capturer: environment.capturer,
                 permissionChecker: environment.permissionChecker,
                 settingsStore: environment.settingsStore,
-                pinnedShotManager: pinnedShotManager
+                pinnedShotManager: pinnedShotManager,
+                ownInterfaceWindowIDs: { [weak self] in
+                    guard let windowID = self?.settingsWindowController?.captureWindowID else {
+                        return []
+                    }
+                    return [windowID]
+                }
             )
             captureWorkflow.onCaptured = { [weak self] result, focusRestoration in
                 self?.pinnedShotManager?.present(result, focusRestoration: focusRestoration)
@@ -858,6 +864,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             width: screen.frame.width * 0.52,
             height: screen.frame.height * 0.48
         ).integral
+        // The synthetic target is attributed to the host process so the
+        // production smart-snap scope admits it, while the real Accessibility
+        // resolver still refuses to query Ushot itself.
+        let syntheticProcessID = ProcessInfo.processInfo.processIdentifier
         let preparation = RegionCapturePreparation(
             displays: [DisplayCapture(
                 descriptor: descriptor,
@@ -868,8 +878,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 title: "UI Test Snap Window",
                 applicationName: "UI Test Host",
                 frame: syntheticWindowFrame,
-                layer: 0
+                layer: 0,
+                processID: syntheticProcessID
             )]
+        )
+        let syntheticSnapScope = SmartSnapScope(
+            applicationProcessIDs: [syntheticProcessID],
+            includesOwnInterfaceWindows: false,
+            origin: .frontmostApplication
         )
         let selector: RegionSelectionCoordinator
         if ProcessInfo.processInfo.arguments.contains("--uitest-region-selection-controls") {
@@ -887,7 +903,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ).integral
             selector = RegionSelectionCoordinator(
                 pinnedShotManager: pinnedShotManager,
-                elementResolutionHandler: { _, window, _ in
+                elementResolutionHandler: { _, window, _, _ in
                     // Model a comparatively slow browser accessibility tree so
                     // pointer events arrive while one lookup is still active.
                     Thread.sleep(forTimeInterval: 0.06)
@@ -908,7 +924,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.uiTestRegionSelectionTask = nil
             }
             do {
-                _ = try await selector.select(from: preparation)
+                _ = try await selector.select(from: preparation, snapScope: syntheticSnapScope)
             } catch ScreenshotAppError.captureCancelled {
                 AppLog.capture.notice("UI-test region selection cancelled")
             } catch {

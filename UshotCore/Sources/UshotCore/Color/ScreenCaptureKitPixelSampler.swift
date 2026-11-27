@@ -165,7 +165,11 @@ public final class ScreenCaptureKitPixelSampler: PixelSampling {
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.showsCursor = false
         configuration.captureResolution = .best
-        configuration.ignoreShadowsDisplay = true
+        // Sample the visible composite, shadows included, exactly like the
+        // frozen color-picker path; `ignoreShadowsSingleWindow` defaults to
+        // true and would otherwise strip shadows from display captures.
+        configuration.ignoreShadowsDisplay = false
+        configuration.ignoreShadowsSingleWindow = false
 
         let image: CGImage
         do {

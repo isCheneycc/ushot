@@ -16,6 +16,10 @@ public struct CaptureRequest: Sendable {
     public var excludesOwnApplication: Bool
     /// Committed image windows that remain capturable when the host app is excluded.
     public var includedOwnWindowIDs: Set<CGWindowID>
+    /// Ordinary Ushot interface windows (currently the visible Settings
+    /// window) that remain capturable when the host app is excluded. They are
+    /// never Accessibility-queried and do not receive pinned-image exceptions.
+    public var includedOwnInterfaceWindowIDs: Set<CGWindowID>
     public var targetDisplayID: CGDirectDisplayID?
     public var targetWindowID: CGWindowID?
     public var region: CGRect?
@@ -26,6 +30,7 @@ public struct CaptureRequest: Sendable {
         includesWindowShadow: Bool = true,
         excludesOwnApplication: Bool = true,
         includedOwnWindowIDs: Set<CGWindowID> = [],
+        includedOwnInterfaceWindowIDs: Set<CGWindowID> = [],
         targetDisplayID: CGDirectDisplayID? = nil,
         targetWindowID: CGWindowID? = nil,
         region: CGRect? = nil
@@ -35,6 +40,7 @@ public struct CaptureRequest: Sendable {
         self.includesWindowShadow = includesWindowShadow
         self.excludesOwnApplication = excludesOwnApplication
         self.includedOwnWindowIDs = includedOwnWindowIDs
+        self.includedOwnInterfaceWindowIDs = includedOwnInterfaceWindowIDs
         self.targetDisplayID = targetDisplayID
         self.targetWindowID = targetWindowID
         self.region = region
@@ -129,6 +135,9 @@ public struct WindowDescriptor: Identifiable, Equatable, Sendable {
     public let processID: pid_t?
     /// Set only for a host-owned image admitted by the current capture request.
     public let isPinnedImage: Bool
+    /// Set only for an ordinary host-owned interface window (Settings) admitted
+    /// by the current capture request.
+    public let isOwnInterfaceWindow: Bool
 
     public init(
         id: CGWindowID,
@@ -137,8 +146,13 @@ public struct WindowDescriptor: Identifiable, Equatable, Sendable {
         frame: CGRect,
         layer: Int,
         processID: pid_t? = nil,
-        isPinnedImage: Bool = false
+        isPinnedImage: Bool = false,
+        isOwnInterfaceWindow: Bool = false
     ) {
+        precondition(
+            !(isPinnedImage && isOwnInterfaceWindow),
+            "A host-owned window has exactly one capture admission role."
+        )
         self.id = id
         self.title = title
         self.applicationName = applicationName
@@ -146,6 +160,13 @@ public struct WindowDescriptor: Identifiable, Equatable, Sendable {
         self.layer = layer
         self.processID = processID
         self.isPinnedImage = isPinnedImage
+        self.isOwnInterfaceWindow = isOwnInterfaceWindow
+    }
+
+    /// Host-owned windows are window-level targets only: querying Ushot's own
+    /// Accessibility tree could resolve the live selection overlay instead.
+    public var isOwnApplicationWindow: Bool {
+        isPinnedImage || isOwnInterfaceWindow
     }
 }
 
@@ -181,14 +202,28 @@ public struct MultiDisplayCaptureResult: @unchecked Sendable {
 
 public struct RegionCapturePreparation: @unchecked Sendable {
     public let displays: [DisplayCapture]
+    /// Selectable windows in front-to-back order.
     public let windows: [WindowDescriptor]
+    /// The complete frozen front-to-back stack used for occlusion-aware smart
+    /// snapping, including surfaces that can block but never be selected.
+    public let windowStack: WindowStack
 
+    /// - Parameter windowStack: The frozen visible stack. When omitted, the
+    ///   caller supplies a complete synthetic desktop: every provided window
+    ///   becomes a selectable entry in the given order and the stack is
+    ///   available, so uncovered points are exposed desktop. Production region
+    ///   capture always passes the reconciled stack explicitly.
     public init(
         displays: [DisplayCapture],
-        windows: [WindowDescriptor] = []
+        windows: [WindowDescriptor] = [],
+        windowStack: WindowStack? = nil
     ) {
         self.displays = displays
         self.windows = windows
+        self.windowStack = windowStack ?? WindowStack(
+            entries: windows.map { WindowStackEntry.selectable($0) },
+            primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height
+        )
     }
 
     public var geometry: ScreenGeometry {
@@ -212,7 +247,12 @@ public enum CaptureResult: @unchecked Sendable {
 
 @MainActor
 public protocol ScreenCapturing: AnyObject {
-    func discoverTargets(includingOwnWindowIDs: Set<CGWindowID>) async throws -> CaptureTargets
+    /// Displays only; never depends on window-order discovery.
+    func discoverDisplays() async throws -> [DisplayDescriptor]
+    func discoverTargets(
+        includingOwnWindowIDs: Set<CGWindowID>,
+        includingOwnInterfaceWindowIDs: Set<CGWindowID>
+    ) async throws -> CaptureTargets
     func capture(_ request: CaptureRequest) async throws -> CaptureResult
     func prepareRegionCapture(_ request: CaptureRequest) async throws -> RegionCapturePreparation
     func cropRegion(
