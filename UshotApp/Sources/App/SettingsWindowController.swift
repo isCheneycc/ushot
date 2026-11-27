@@ -33,6 +33,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         fatalError("init(coder:) is not supported")
     }
 
+    /// The Settings window may appear in new captures while it is visibly on
+    /// screen. It is an ordinary window-level target, never AX-queried.
+    var captureWindowID: CGWindowID? {
+        guard let window,
+              window.isVisible,
+              !window.isMiniaturized,
+              window.windowNumber > 0
+        else { return nil }
+        return CGWindowID(window.windowNumber)
+    }
+
     func show(section: SettingsSection) {
         selectionModel.selection = section
         showWindow(nil)

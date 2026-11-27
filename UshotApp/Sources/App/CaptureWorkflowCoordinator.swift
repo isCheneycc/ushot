@@ -16,18 +16,25 @@ final class CaptureWorkflowCoordinator {
     private let displaySelector: DisplaySelectionCoordinator
     private let windowSelector: WindowSelectionCoordinator
     private let regionSelector: RegionSelectionCoordinator
+    private let activeApplicationTracker: ActiveApplicationTracker
+    /// Visible ordinary Ushot windows (Settings) that captures may include.
+    private let ownInterfaceWindowIDs: @MainActor () -> Set<CGWindowID>
 
     init(
         capturer: any ScreenCapturing,
         permissionChecker: any CapturePermissionChecking,
         settingsStore: SettingsStore,
         pinnedShotManager: PinnedShotManager,
+        ownInterfaceWindowIDs: @escaping @MainActor () -> Set<CGWindowID> = { [] },
+        activeApplicationTracker: ActiveApplicationTracker? = nil,
         stateMachine: CaptureStateMachine = CaptureStateMachine()
     ) {
         self.capturer = capturer
         self.permissionChecker = permissionChecker
         self.settingsStore = settingsStore
         self.pinnedShotManager = pinnedShotManager
+        self.ownInterfaceWindowIDs = ownInterfaceWindowIDs
+        self.activeApplicationTracker = activeApplicationTracker ?? ActiveApplicationTracker()
         self.stateMachine = stateMachine
         self.displaySelector = DisplaySelectionCoordinator()
         self.windowSelector = WindowSelectionCoordinator()
@@ -44,11 +51,20 @@ final class CaptureWorkflowCoordinator {
             return
         }
         let focusRestoration = CaptureFocusRestoration()
+        // Sample the smart-snap scope synchronously with the focus handoff so
+        // it describes the app that was active when the user asked to capture.
+        let snapScope = activeApplicationTracker.smartSnapScope(
+            frontmostProcessID: focusRestoration.frontmostProcessID
+        )
         isSessionActive = true
-        Task { await run(mode: mode, focusRestoration: focusRestoration) }
+        Task { await run(mode: mode, focusRestoration: focusRestoration, snapScope: snapScope) }
     }
 
-    private func run(mode: CaptureMode, focusRestoration: CaptureFocusRestoration) async {
+    private func run(
+        mode: CaptureMode,
+        focusRestoration: CaptureFocusRestoration,
+        snapScope: SmartSnapScope
+    ) async {
         precondition(isSessionActive, "A capture task must own admission before it is enqueued.")
         defer { isSessionActive = false }
 
@@ -80,10 +96,11 @@ final class CaptureWorkflowCoordinator {
                 showsCursor: captureSettings.capturesCursor,
                 includesWindowShadow: captureSettings.includesWindowShadow,
                 excludesOwnApplication: true,
-                includedOwnWindowIDs: pinnedShotManager.captureWindowIDs
+                includedOwnWindowIDs: pinnedShotManager.captureWindowIDs,
+                includedOwnInterfaceWindowIDs: ownInterfaceWindowIDs()
             )
             AppLog.capture.notice(
-                "Capture sources prepared: includedPinnedImages=\(request.includedOwnWindowIDs.count, privacy: .public)"
+                "Capture sources prepared: includedPinnedImages=\(request.includedOwnWindowIDs.count, privacy: .public), includedInterfaceWindows=\(request.includedOwnInterfaceWindowIDs.count, privacy: .public)"
             )
             let result: CaptureResult
 
@@ -93,14 +110,17 @@ final class CaptureWorkflowCoordinator {
                 result = try await capturer.capture(request)
 
             case .selectedDisplay:
-                let targets = try await capturer.discoverTargets(includingOwnWindowIDs: request.includedOwnWindowIDs)
+                let displays = try await capturer.discoverDisplays()
                 try await stateMachine.contentPrepared(requiresSelection: true)
-                request.targetDisplayID = try await displaySelector.select(from: targets.displays)
+                request.targetDisplayID = try await displaySelector.select(from: displays)
                 try await stateMachine.selectionCompleted()
                 result = try await capturer.capture(request)
 
             case .window:
-                let targets = try await capturer.discoverTargets(includingOwnWindowIDs: request.includedOwnWindowIDs)
+                let targets = try await capturer.discoverTargets(
+                    includingOwnWindowIDs: request.includedOwnWindowIDs,
+                    includingOwnInterfaceWindowIDs: request.includedOwnInterfaceWindowIDs
+                )
                 try await stateMachine.contentPrepared(requiresSelection: true)
                 request.targetWindowID = try await windowSelector.select(from: targets.windows)
                 try await stateMachine.selectionCompleted()
@@ -112,6 +132,7 @@ final class CaptureWorkflowCoordinator {
                 _ = try await regionSelector.select(
                     from: preparation,
                     recognizesInterfaceElements: captureSettings.recognizesInterfaceElements,
+                    snapScope: snapScope,
                     focusRestoration: focusRestoration
                 )
                 try await stateMachine.selectionCompleted()
@@ -158,6 +179,11 @@ final class CaptureFocusRestoration {
         if application?.processIdentifier == NSRunningApplication.current.processIdentifier {
             window = NSApplication.shared.keyWindow
         }
+    }
+
+    /// The application that was frontmost when this capture was requested.
+    var frontmostProcessID: pid_t? {
+        application?.processIdentifier
     }
 
     func discard(reason: String) {
@@ -207,5 +233,66 @@ final class CaptureFocusRestoration {
                 "Capture focus restoration was rejected: reason=\(reason, privacy: .public), targetPID=\(application.processIdentifier, privacy: .public)"
             )
         }
+    }
+}
+
+/// Remembers the most recent frontmost application other than Ushot.
+///
+/// Presenting a pinned image activates Ushot, so a capture started right after
+/// Pin would otherwise find Ushot frontmost and lose the app the user was
+/// working in. Smart snapping then covers that previous app plus Ushot's own
+/// admitted windows.
+@MainActor
+final class ActiveApplicationTracker {
+    private let ownProcessID: pid_t
+    private var previousApplication: NSRunningApplication?
+    private let notificationCenter: NotificationCenter
+    nonisolated(unsafe) private var observer: NSObjectProtocol?
+
+    init(workspace: NSWorkspace = .shared) {
+        notificationCenter = workspace.notificationCenter
+        let ownProcessID = NSRunningApplication.current.processIdentifier
+        self.ownProcessID = ownProcessID
+        if let frontmost = workspace.frontmostApplication,
+           frontmost.processIdentifier != ownProcessID
+        {
+            previousApplication = frontmost
+        }
+        observer = workspace.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication
+            MainActor.assumeIsolated {
+                guard let self,
+                      let application,
+                      application.processIdentifier != self.ownProcessID
+                else { return }
+                self.previousApplication = application
+            }
+        }
+    }
+
+    deinit {
+        if let observer {
+            notificationCenter.removeObserver(observer)
+        }
+    }
+
+    func smartSnapScope(frontmostProcessID: pid_t?) -> SmartSnapScope {
+        let previousProcessID = previousApplication.flatMap { application in
+            application.isTerminated ? nil : application.processIdentifier
+        }
+        let scope = SmartSnapScope.resolve(
+            frontmostProcessID: frontmostProcessID,
+            ownProcessID: ownProcessID,
+            previousApplicationProcessID: previousProcessID
+        )
+        AppLog.capture.notice(
+            "Smart snap scope resolved: origin=\(scope.origin.rawValue, privacy: .public), applications=\(scope.applicationProcessIDs.count, privacy: .public), ownInterfaceWindows=\(scope.includesOwnInterfaceWindows, privacy: .public)"
+        )
+        return scope
     }
 }

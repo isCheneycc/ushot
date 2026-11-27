@@ -14,16 +14,42 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         self.processIdentifier = processIdentifier
     }
 
-    public func discoverTargets(includingOwnWindowIDs: Set<CGWindowID> = []) async throws -> CaptureTargets {
+    public func discoverDisplays() async throws -> [DisplayDescriptor] {
+        let content = try await loadShareableContent()
+        return try makeTargets(
+            content: content,
+            transformer: desktopTransformer(),
+            currentDisplayID: currentMouseDisplayID()
+        ).displays
+    }
+
+    public func discoverTargets(
+        includingOwnWindowIDs: Set<CGWindowID> = [],
+        includingOwnInterfaceWindowIDs: Set<CGWindowID> = []
+    ) async throws -> CaptureTargets {
         let content = try await loadShareableContent()
         let transformer = desktopTransformer()
         let currentDisplayID = currentMouseDisplayID()
-        return try makeTargets(
+        let targets = try makeTargets(
             content: content,
             transformer: transformer,
             currentDisplayID: currentDisplayID,
-            includedOwnWindowIDs: includingOwnWindowIDs
+            includedOwnWindowIDs: includingOwnWindowIDs,
+            includedOwnInterfaceWindowIDs: includingOwnInterfaceWindowIDs
         )
+        guard let stack = makeWindowStack(
+            content: content,
+            transformer: transformer,
+            selectableWindows: targets.windows,
+            admittedOwnWindowIDs: includingOwnWindowIDs.union(includingOwnInterfaceWindowIDs)
+        ) else {
+            throw ScreenshotAppError.captureFailed(
+                description: "The on-screen window order could not be read."
+            )
+        }
+        // Window capture keeps its cross-application selection behavior; only
+        // the ordering authority changes to the documented front-to-back list.
+        return CaptureTargets(displays: targets.displays, windows: stack.selectableWindows)
     }
 
     public func capture(_ request: CaptureRequest) async throws -> CaptureResult {
@@ -53,11 +79,23 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
             content: content,
             transformer: transformer,
             currentDisplayID: currentMouseDisplayID(),
-            includedOwnWindowIDs: request.includedOwnWindowIDs
+            includedOwnWindowIDs: request.includedOwnWindowIDs,
+            includedOwnInterfaceWindowIDs: request.includedOwnInterfaceWindowIDs
         )
         guard !targets.displays.isEmpty else {
             throw ScreenshotAppError.noDisplayAvailable
         }
+        // Read the Window Server order immediately after the shareable
+        // content so both describe the same moment as closely as possible,
+        // then again after every display is frozen (see below).
+        let admittedOwnWindowIDs = request.includedOwnWindowIDs
+            .union(request.includedOwnInterfaceWindowIDs)
+        let stackBeforeFreeze = makeWindowStack(
+            content: content,
+            transformer: transformer,
+            selectableWindows: targets.windows,
+            admittedOwnWindowIDs: admittedOwnWindowIDs
+        )
 
         var captures: [DisplayCapture] = []
         captures.reserveCapacity(targets.displays.count)
@@ -73,12 +111,37 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
             )
             captures.append(DisplayCapture(descriptor: descriptor, capturedImage: image))
         }
+        // Displays are frozen one after another. A banner or panel that
+        // appeared, vanished or moved meanwhile can be in some frozen pixels
+        // but not in the first snapshot, so snapping is refused wherever the
+        // two snapshots disagree. A fresh transformer exposes a primary
+        // display change. Manual selection keeps working in every case.
+        let stackAfterFreeze = makeWindowStack(
+            content: content,
+            transformer: desktopTransformer(),
+            selectableWindows: targets.windows,
+            admittedOwnWindowIDs: admittedOwnWindowIDs
+        )
+        let (windowStack, stability, comparison) = WindowStackStability.reconcile(
+            before: stackBeforeFreeze,
+            after: stackAfterFreeze,
+            primaryDisplayHeight: transformer.primaryDisplayHeight
+        )
+        if stability != .stable {
+            let changes = comparison?.changes ?? WindowStackStability.ChangeCounts()
+            // Region geometry only: never titles, owners or pixels.
+            let sampledRegions = WindowStackStability.diagnosticSummary(of: windowStack.unstableRegions)
+            AppLog.capture.notice(
+                "Smart snapping restricted after freezing displays: outcome=\(stability.rawValue, privacy: .public), reason=\(comparison?.invalidationReason?.rawValue ?? (comparison == nil ? "snapshot-unavailable" : "none"), privacy: .public), unstableRegions=\(windowStack.unstableRegions.count, privacy: .public), changed=\(changes.changed, privacy: .public), appeared=\(changes.appeared, privacy: .public), disappeared=\(changes.disappeared, privacy: .public), reordered=\(changes.reordered, privacy: .public), sampledAppKitRegions=\(sampledRegions, privacy: .public)"
+            )
+        }
         AppLog.capture.notice(
             "Frozen desktop prepared before region overlay: displays=\(captures.count, privacy: .public), durationMs=\((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000, privacy: .public)"
         )
         return RegionCapturePreparation(
             displays: captures,
-            windows: targets.windows
+            windows: windowStack.selectableWindows,
+            windowStack: windowStack
         )
     }
 
@@ -142,11 +205,16 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
             throw ScreenshotAppError.contentUnavailable
         }
         let isPinnedImage = isIncludedOwnWindow(window, windowIDs: request.includedOwnWindowIDs)
+        let isOwnInterfaceWindow = !isPinnedImage
+            && isIncludedOwnWindow(window, windowIDs: request.includedOwnInterfaceWindowIDs)
         guard
             window.isOnScreen,
             window.frame.width >= (isPinnedImage ? 1 : 40),
             window.frame.height >= (isPinnedImage ? 1 : 40),
-            !request.excludesOwnApplication || window.owningApplication?.processID != processIdentifier || isPinnedImage
+            !request.excludesOwnApplication
+                || window.owningApplication?.processID != processIdentifier
+                || isPinnedImage
+                || isOwnInterfaceWindow
         else {
             throw ScreenshotAppError.noWindowAvailable
         }
@@ -159,7 +227,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
             frame: transformer.appKitRect(fromScreenCaptureRect: window.frame),
             layer: window.windowLayer,
             processID: window.owningApplication?.processID,
-            isPinnedImage: isPinnedImage
+            isPinnedImage: isPinnedImage,
+            isOwnInterfaceWindow: isOwnInterfaceWindow
         )
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let scale = CGFloat(filter.pointPixelScale)
@@ -167,18 +236,23 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
             throw ScreenshotAppError.contentUnavailable
         }
 
+        // Ushot's own targets are admitted individually. A pinned image keeps
+        // its quick toolbar as a child window, which must never be captured.
+        let includesChildWindows = request.includesWindowShadow && !descriptor.isOwnApplicationWindow
         do {
             let capture: WindowImageCapture
             if #available(macOS 26.0, *) {
                 capture = try await captureWindowUsingAutomaticScreenshotSize(
                     filter: filter,
                     request: request,
-                    expectedBodyScale: scale
+                    expectedBodyScale: scale,
+                    includesChildWindows: includesChildWindows
                 )
             } else if request.includesWindowShadow {
                 capture = try await captureFramedWindowUsingValidatedStream(
                     filter: filter,
-                    request: request
+                    request: request,
+                    includesChildWindows: includesChildWindows
                 )
             } else {
                 capture = try await captureUnframedWindow(
@@ -270,7 +344,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
     private func captureWindowUsingAutomaticScreenshotSize(
         filter: SCContentFilter,
         request: CaptureRequest,
-        expectedBodyScale: CGFloat
+        expectedBodyScale: CGFloat,
+        includesChildWindows: Bool
     ) async throws -> WindowImageCapture {
         let configuration = SCScreenshotConfiguration()
         // Leaving width and height at their zero defaults asks ScreenCaptureKit
@@ -281,7 +356,7 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         // A shadow-free screenshot has an exact window-body size contract.
         // Including an out-of-bounds child would legitimately enlarge the
         // automatic surface and make that contract impossible to validate.
-        configuration.includeChildWindows = request.includesWindowShadow
+        configuration.includeChildWindows = request.includesWindowShadow && includesChildWindows
         configuration.dynamicRange = .sdr
 
         let output: SCScreenshotOutput = try await withCheckedThrowingContinuation { continuation in
@@ -349,7 +424,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         let configuration = makeWindowStreamConfiguration(
             dimensions: dimensions,
             request: request,
-            includesShadow: false
+            includesShadow: false,
+            includesChildWindows: false
         )
         let image = try await SCScreenshotManager.captureImage(
             contentFilter: filter,
@@ -366,7 +442,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
 
     private func captureFramedWindowUsingValidatedStream(
         filter: SCContentFilter,
-        request: CaptureRequest
+        request: CaptureRequest,
+        includesChildWindows: Bool
     ) async throws -> WindowImageCapture {
         let expansionPadding = 128
         let requiredTrailingFrameGuard = 16
@@ -379,7 +456,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         var configuration = makeWindowStreamConfiguration(
             dimensions: initialDimensions,
             request: request,
-            includesShadow: true
+            includesShadow: true,
+            includesChildWindows: includesChildWindows
         )
         configuration.queueDepth = 2
 
@@ -479,7 +557,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
                 configuration = makeWindowStreamConfiguration(
                     dimensions: nextDimensions,
                     request: request,
-                    includesShadow: true
+                    includesShadow: true,
+                    includesChildWindows: includesChildWindows
                 )
                 configuration.queueDepth = 2
                 output.discardPendingFrame()
@@ -506,7 +585,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
     private func makeWindowStreamConfiguration(
         dimensions: WindowPixelDimensions,
         request: CaptureRequest,
-        includesShadow: Bool
+        includesShadow: Bool,
+        includesChildWindows: Bool
     ) -> SCStreamConfiguration {
         let configuration = SCStreamConfiguration()
         configuration.width = dimensions.width
@@ -524,7 +604,7 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
             // out-of-bounds child window was not scaled into it. The framed
             // stream and macOS 26 automatic-size path can include children;
             // this exact body path must keep its source bounded to the body.
-            configuration.includeChildWindows = includesShadow
+            configuration.includeChildWindows = includesShadow && includesChildWindows
         }
         return configuration
     }
@@ -790,7 +870,13 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
             display: display,
             excludingApplications: excludedApplications,
             exceptingWindows: request.excludesOwnApplication
-                ? content.windows.filter { isIncludedOwnWindow($0, windowIDs: request.includedOwnWindowIDs) }
+                ? content.windows.filter {
+                    isIncludedOwnWindow(
+                        $0,
+                        windowIDs: request.includedOwnWindowIDs
+                            .union(request.includedOwnInterfaceWindowIDs)
+                    )
+                }
                 : []
         )
         if #available(macOS 14.2, *) {
@@ -803,7 +889,13 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.showsCursor = request.showsCursor
         configuration.captureResolution = .best
+        // Display captures need both shadow flags. Measured on macOS 27.2,
+        // `ignoreShadowsSingleWindow` (default true) strips every window
+        // shadow from a display filter, floating panels included, while
+        // `ignoreShadowsDisplay` alone has no measurable effect. With both
+        // false the pixels match the system composite.
         configuration.ignoreShadowsDisplay = !request.includesWindowShadow
+        configuration.ignoreShadowsSingleWindow = !request.includesWindowShadow
 
         do {
             let image = try await SCScreenshotManager.captureImage(
@@ -852,7 +944,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         content: SCShareableContent,
         transformer: CoordinateTransformer,
         currentDisplayID: CGDirectDisplayID?,
-        includedOwnWindowIDs: Set<CGWindowID> = []
+        includedOwnWindowIDs: Set<CGWindowID> = [],
+        includedOwnInterfaceWindowIDs: Set<CGWindowID> = []
     ) throws -> CaptureTargets {
         let screenNames: [CGDirectDisplayID: String] = Dictionary(
             uniqueKeysWithValues: NSScreen.screens.compactMap { screen in
@@ -888,6 +981,8 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
         windows.reserveCapacity(content.windows.count)
         for window in content.windows {
             let isPinnedImage = isIncludedOwnWindow(window, windowIDs: includedOwnWindowIDs)
+            let isOwnInterfaceWindow = !isPinnedImage
+                && isIncludedOwnWindow(window, windowIDs: includedOwnInterfaceWindowIDs)
             guard window.isOnScreen,
                   window.frame.width >= (isPinnedImage ? 1 : 40),
                   window.frame.height >= (isPinnedImage ? 1 : 40)
@@ -907,7 +1002,7 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
                 rejectedOwnerCount += 1
                 continue
             }
-            guard application.processID != processIdentifier || isPinnedImage else {
+            guard application.processID != processIdentifier || isPinnedImage || isOwnInterfaceWindow else {
                 rejectedOwnApplicationCount += 1
                 continue
             }
@@ -919,13 +1014,59 @@ public final class ScreenCaptureKitCapturer: ScreenCapturing {
                 frame: transformer.appKitRect(fromScreenCaptureRect: window.frame),
                 layer: window.windowLayer,
                 processID: application.processID,
-                isPinnedImage: isPinnedImage
+                isPinnedImage: isPinnedImage,
+                isOwnInterfaceWindow: isOwnInterfaceWindow
             ))
         }
         AppLog.capture.notice(
             "Discovered selectable app windows: source=\(content.windows.count, privacy: .public), accepted=\(windows.count, privacy: .public), rejectedGeometry=\(rejectedGeometryCount, privacy: .public), rejectedLayer=\(rejectedLayerCount, privacy: .public), rejectedMissingOwner=\(rejectedOwnerCount, privacy: .public), rejectedOwnApp=\(rejectedOwnApplicationCount, privacy: .public)"
         )
         return CaptureTargets(displays: displays, windows: windows)
+    }
+
+    /// Builds the occlusion-aware visible stack from the documented
+    /// front-to-back Window Server list. Returns nil when that list is
+    /// unavailable; callers must not substitute the unordered SC list.
+    private func makeWindowStack(
+        content: SCShareableContent,
+        transformer: CoordinateTransformer,
+        selectableWindows: [WindowDescriptor],
+        admittedOwnWindowIDs: Set<CGWindowID>
+    ) -> WindowStack? {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            AppLog.capture.fault("On-screen window order is unavailable; smart snapping is disabled for this capture")
+            return nil
+        }
+        guard let parsed = WindowServerRecord.records(fromWindowList: list) else {
+            AppLog.capture.fault("An on-screen window record has no readable bounds; smart snapping is disabled for this capture")
+            return nil
+        }
+        let dockProcessIDs = Set(
+            content.applications
+                .filter { $0.bundleIdentifier == "com.apple.dock" }
+                .map(\.processID)
+        )
+        var descriptorsByID: [CGWindowID: WindowDescriptor] = [:]
+        for window in selectableWindows {
+            descriptorsByID[window.id] = window
+        }
+        let (stack, statistics) = WindowStackBuilder(
+            ownProcessID: processIdentifier,
+            dockProcessIDs: dockProcessIDs,
+            displayBounds: content.displays.map(\.frame)
+        ).build(
+            records: parsed.records,
+            selectableWindows: descriptorsByID,
+            transformer: transformer,
+            admittedOwnWindowIDs: admittedOwnWindowIDs
+        )
+        AppLog.capture.notice(
+            "Frozen window stack built: records=\(parsed.records.count, privacy: .public), incomplete=\(parsed.incompleteCount, privacy: .public), selectable=\(statistics.selectable, privacy: .public), occluders=\(statistics.occluders, privacy: .public), incompleteOccluders=\(statistics.incompleteOccluders, privacy: .public), skippedTransparent=\(statistics.skippedTransparent, privacy: .public), skippedDesktop=\(statistics.skippedDesktopLevel, privacy: .public), skippedMenuBar=\(statistics.skippedMenuBar, privacy: .public), skippedMenuBarIndicators=\(statistics.skippedMenuBarIndicators, privacy: .public), skippedDock=\(statistics.skippedDockSurface, privacy: .public), skippedOwnApp=\(statistics.skippedOwnApplication, privacy: .public), geometryConflicts=\(statistics.geometryConflicts, privacy: .public), selectableWithoutOrder=\(statistics.selectableMissingFromWindowServer, privacy: .public)"
+        )
+        return stack
     }
 
     private func isIncludedOwnWindow(_ window: SCWindow, windowIDs: Set<CGWindowID>) -> Bool {

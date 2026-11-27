@@ -182,7 +182,8 @@ final class RegionSelectionCoordinator {
     typealias ElementResolutionHandler = @Sendable (
         _ point: CGPoint,
         _ window: WindowDescriptor,
-        _ primaryDisplayHeight: CGFloat
+        _ primaryDisplayHeight: CGFloat,
+        _ siblingWindowFrames: [CGRect]
     ) -> InterfaceElementResolution
 
     private enum OutputAction: String {
@@ -198,19 +199,11 @@ final class RegionSelectionCoordinator {
         case resizing(RegionSelectionResizeHandle)
     }
 
-    private enum SnapCandidateKind: String {
-        case window
-        case interfaceElement = "interface-element"
-    }
-
-    private struct SnapTarget: Equatable {
-        let frame: CGRect
-        let kind: SnapCandidateKind
-    }
-
     private struct ElementResolutionRequest: Sendable {
         let point: CGPoint
         let window: WindowDescriptor
+        let siblingWindowFrames: [CGRect]
+        let primaryDisplayHeight: CGFloat
         let lifecycleGeneration: UInt
     }
 
@@ -221,24 +214,33 @@ final class RegionSelectionCoordinator {
     private var preparation: RegionCapturePreparation?
     private let elementResolutionHandler: ElementResolutionHandler
     private var recognizesInterfaceElements = true
+    private var snapScope: SmartSnapScope = .pinnedImagesOnly
     private var snapCandidate: CGRect? {
         didSet {
             guard snapCandidate != oldValue else { return }
             invalidateViews()
         }
     }
-    private var snapCandidateKind: SnapCandidateKind? {
+    private var snapCandidateKind: SmartSnapTarget.Kind? {
         didSet {
             guard snapCandidateKind != oldValue else { return }
             invalidateViews()
         }
     }
-    private var snapTargets: [SnapTarget] = []
+    private var snapTargets: [SmartSnapTarget] = []
     private var selectedSnapTargetIndex = 0
-    private var snapWindowID: CGWindowID?
+    /// The window or exposed desktop display that produced `snapTargets`.
+    private var snapSource: SmartSnapSource?
+    /// Only a window source may receive Accessibility results, so a late
+    /// answer for an earlier window can never land on a desktop display.
+    private var snapWindowID: CGWindowID? { snapSource?.windowID }
     private var snapLevelWasUserAdjusted = false
     private var hierarchyScrollAccumulator: CGFloat = 0
     private var interfaceElementToWindowFallbackCount = 0
+    private var interfaceElementOwnershipRejections: [AccessibilityOwnershipRejection: Int] = [:]
+    /// Privacy-safe rejection details keyed by `diagnosticKey`.
+    private var interfaceElementOwnershipFailureDetails: [String: Int] = [:]
+    private var interfaceElementResolutionOutcomes = ElementResolutionOutcomeCounts()
     private var pendingElementResolution: ElementResolutionRequest?
     private var elementResolutionTask: Task<Void, Never>?
     private var elementResolutionGeneration: UInt = 0
@@ -284,11 +286,12 @@ final class RegionSelectionCoordinator {
         elementResolver: InterfaceElementSelectionResolver = InterfaceElementSelectionResolver()
     ) {
         self.pinnedShotManager = pinnedShotManager
-        elementResolutionHandler = { point, window, primaryDisplayHeight in
+        elementResolutionHandler = { point, window, primaryDisplayHeight, siblingWindowFrames in
             elementResolver.resolve(
                 at: point,
                 in: window,
-                primaryDisplayHeight: primaryDisplayHeight
+                primaryDisplayHeight: primaryDisplayHeight,
+                siblingWindowFrames: siblingWindowFrames
             )
         }
     }
@@ -309,6 +312,7 @@ final class RegionSelectionCoordinator {
     func select(
         from preparation: RegionCapturePreparation,
         recognizesInterfaceElements: Bool = true,
+        snapScope: SmartSnapScope = .pinnedImagesOnly,
         focusRestoration: CaptureFocusRestoration? = nil
     ) async throws -> CGRect {
         guard continuation == nil else {
@@ -318,16 +322,20 @@ final class RegionSelectionCoordinator {
         self.preparation = preparation
         self.focusRestoration = focusRestoration
         self.recognizesInterfaceElements = recognizesInterfaceElements
+        self.snapScope = snapScope
         self.selection = nil
         self.mouseLocation = NSEvent.mouseLocation
         self.snapCandidate = nil
         self.snapCandidateKind = nil
         self.snapTargets = []
         self.selectedSnapTargetIndex = 0
-        self.snapWindowID = nil
+        self.snapSource = nil
         self.snapLevelWasUserAdjusted = false
         self.hierarchyScrollAccumulator = 0
         self.interfaceElementToWindowFallbackCount = 0
+        self.interfaceElementOwnershipRejections = [:]
+        self.interfaceElementOwnershipFailureDetails = [:]
+        self.interfaceElementResolutionOutcomes = ElementResolutionOutcomeCounts()
         self.pendingElementResolution = nil
         self.didLogMissingAccessibilityPermission = false
 
@@ -358,7 +366,8 @@ final class RegionSelectionCoordinator {
         initialSelection = selection
         if selection == nil,
            let snapCandidate,
-           snapCandidate.contains(point)
+           snapCandidate.contains(point),
+           !rejectsSnapCandidateAtPress(point)
         {
             guard let snapCandidateKind else {
                 preconditionFailure("A smart region candidate must retain its source kind until pointer-down.")
@@ -367,7 +376,7 @@ final class RegionSelectionCoordinator {
             elementResolutionTask?.cancel()
             elementResolutionGeneration &+= 1
             AppLog.capture.notice(
-                "Accepted smart region candidate: kind=\(snapCandidateKind.rawValue, privacy: .public), x=\(snapCandidate.minX, privacy: .public), y=\(snapCandidate.minY, privacy: .public), width=\(snapCandidate.width, privacy: .public), height=\(snapCandidate.height, privacy: .public)"
+                "Accepted smart region candidate: kind=\(snapCandidateKind.rawValue, privacy: .public), source=\(self.snapSource?.diagnosticDescription ?? "none", privacy: .public), x=\(snapCandidate.minX, privacy: .public), y=\(snapCandidate.minY, privacy: .public), width=\(snapCandidate.width, privacy: .public), height=\(snapCandidate.height, privacy: .public)"
             )
             self.selection = snapCandidate
             initialSelection = snapCandidate
@@ -375,7 +384,7 @@ final class RegionSelectionCoordinator {
             self.snapCandidateKind = nil
             snapTargets = []
             selectedSnapTargetIndex = 0
-            snapWindowID = nil
+            snapSource = nil
             snapLevelWasUserAdjusted = false
             dragMode = .snappedCandidate
         } else if let selection, let handle = resizeHandle(at: point, selection: selection) {
@@ -676,34 +685,109 @@ final class RegionSelectionCoordinator {
     }
 
     private func updateSnapCandidate(at point: CGPoint) {
-        guard recognizesInterfaceElements,
-              let preparation,
-              let window = WindowSelectionResolver().topmostWindow(
-                at: point,
-                candidates: preparation.windows
-              )
-        else {
+        guard recognizesInterfaceElements, let preparation else {
             clearSnapCandidates(reason: "no-window")
             return
         }
+        switch SmartSnapWindowResolver().resolvePointer(
+            at: point,
+            in: preparation.windowStack,
+            scope: snapScope,
+            geometry: preparation.geometry
+        ) {
+        case .cleared(let reason):
+            // The topmost visible surface owns this point, or the stack cannot
+            // vouch for it; snapping never passes through to a window or the
+            // display underneath.
+            clearSnapCandidates(reason: reason.logValue)
+        case .desktop(let display):
+            updateDesktopSnapCandidate(display)
+        case .window(let window, let display):
+            updateWindowSnapCandidate(window, display: display, at: point, preparation: preparation)
+        }
+    }
 
+    /// Exposed desktop snaps to the complete display under the pointer.
+    private func updateDesktopSnapCandidate(_ display: DisplayGeometry) {
+        let source = SmartSnapSource.desktop(displayID: display.id)
+        guard snapSource != source || snapTargets.isEmpty else { return }
+        let displayFrame = canonicalSelectionFrame(display.frame)
+        guard isValidSelection(displayFrame) else {
+            clearSnapCandidates(reason: "invalid-display")
+            return
+        }
+        // Leaving a window (or another display) supersedes every pending
+        // Accessibility answer for the previous source.
+        pendingElementResolution = nil
+        elementResolutionGeneration &+= 1
+        publishSnapTargets(
+            SmartSnapHierarchy.targets(controlFrames: [], windowFrame: nil, displayFrame: displayFrame),
+            selectedIndex: 0,
+            source: source,
+            userAdjusted: false,
+            reason: "desktop-hit"
+        )
+    }
+
+    private func updateWindowSnapCandidate(
+        _ window: WindowDescriptor,
+        display: DisplayGeometry,
+        at point: CGPoint,
+        preparation: RegionCapturePreparation
+    ) {
         let windowFrame = canonicalSelectionFrame(window.frame)
         guard isValidSelection(windowFrame) else {
             clearSnapCandidates(reason: "invalid-window")
             return
         }
-
+        let source = SmartSnapSource.window(window.id, displayID: display.id)
+        let displayFrame = snapDisplayFrame(for: source)
         if snapWindowID != window.id || snapTargets.isEmpty {
+            if snapWindowID != window.id {
+                // A late result from an earlier visit to this same window
+                // (A -> B -> A) must not satisfy the window-ID check.
+                elementResolutionGeneration &+= 1
+            }
             publishSnapTargets(
-                [SnapTarget(frame: windowFrame, kind: .window)],
+                SmartSnapHierarchy.targets(
+                    controlFrames: [],
+                    windowFrame: windowFrame,
+                    displayFrame: displayFrame
+                ),
                 selectedIndex: 0,
-                windowID: window.id,
+                source: source,
                 userAdjusted: false,
                 reason: "window-hit"
             )
+        } else if snapSource != source {
+            // The same window spans displays and the pointer crossed into
+            // another one: the display level follows the pointer at once, and
+            // answers queried on the previous display can no longer apply.
+            elementResolutionGeneration &+= 1
+            let retainedControls = snapTargets
+                .filter { $0.kind == .interfaceElement && $0.frame.contains(point) }
+                .map(\.frame)
+            let targets = SmartSnapHierarchy.targets(
+                controlFrames: retainedControls,
+                windowFrame: windowFrame,
+                displayFrame: displayFrame
+            )
+            let choice = SmartSnapHierarchy.selection(
+                in: targets,
+                previousTargets: snapTargets,
+                previousSelectedIndex: selectedSnapTargetIndex,
+                previousUserAdjusted: snapLevelWasUserAdjusted
+            )
+            publishSnapTargets(
+                targets,
+                selectedIndex: choice.index,
+                source: source,
+                userAdjusted: choice.userAdjusted,
+                reason: "display-changed"
+            )
         }
 
-        if window.isPinnedImage {
+        if window.isOwnApplicationWindow {
             pendingElementResolution = nil
             return
         }
@@ -711,9 +795,39 @@ final class RegionSelectionCoordinator {
         pendingElementResolution = ElementResolutionRequest(
             point: point,
             window: window,
+            siblingWindowFrames: preparation.windowStack.siblingFrames(of: window),
+            primaryDisplayHeight: preparation.windowStack.primaryDisplayHeight,
             lifecycleGeneration: elementResolutionGeneration
         )
         startElementResolutionPipelineIfNeeded()
+    }
+
+    /// The canonical frame of the source's frozen display, or nil when it
+    /// cannot form a selection.
+    private func snapDisplayFrame(for source: SmartSnapSource) -> CGRect? {
+        guard let display = preparation?.geometry.display(id: source.displayID) else {
+            preconditionFailure("A smart-snap source must name one of the frozen displays.")
+        }
+        let frame = canonicalSelectionFrame(display.frame)
+        return isValidSelection(frame) ? frame : nil
+    }
+
+    /// Re-resolves the frozen stack at the press point. The last hover may have
+    /// been over an exposed part of the candidate while the press lands on a
+    /// surface that covers another part of the same rectangle.
+    private func rejectsSnapCandidateAtPress(_ point: CGPoint) -> Bool {
+        guard let preparation, let snapSource, let snapCandidateKind else { return true }
+        let press = SmartSnapWindowResolver().resolvePointer(
+            at: point,
+            in: preparation.windowStack,
+            scope: snapScope,
+            geometry: preparation.geometry
+        )
+        if snapSource.acceptsPress(press, selectedKind: snapCandidateKind) {
+            return false
+        }
+        clearSnapCandidates(reason: "press-target-mismatch")
+        return true
     }
 
     private func startElementResolutionPipelineIfNeeded() {
@@ -727,9 +841,13 @@ final class RegionSelectionCoordinator {
         while !Task.isCancelled, let request = pendingElementResolution {
             pendingElementResolution = nil
             let resolutionHandler = elementResolutionHandler
-            let primaryDisplayHeight = CGDisplayBounds(CGMainDisplayID()).height
             let resolution = await Task.detached(priority: .userInitiated) {
-                resolutionHandler(request.point, request.window, primaryDisplayHeight)
+                resolutionHandler(
+                    request.point,
+                    request.window,
+                    request.primaryDisplayHeight,
+                    request.siblingWindowFrames
+                )
             }.value
             guard !Task.isCancelled,
                   request.lifecycleGeneration == elementResolutionGeneration,
@@ -737,6 +855,7 @@ final class RegionSelectionCoordinator {
                   !isSelectionLocked,
                   snapWindowID == request.window.id
             else { continue }
+            interfaceElementResolutionOutcomes.record(resolution)
             applyElementResolution(resolution, request: request)
         }
         elementResolutionTask = nil
@@ -747,8 +866,12 @@ final class RegionSelectionCoordinator {
         _ resolution: InterfaceElementResolution,
         request: ElementResolutionRequest
     ) {
-        guard let point = mouseLocation else { return }
+        guard let point = mouseLocation,
+              let source = snapSource,
+              source.windowID == request.window.id
+        else { return }
         let windowFrame = canonicalSelectionFrame(request.window.frame)
+        let displayFrame = snapDisplayFrame(for: source)
         switch resolution {
         case .elementHierarchy(let frames):
             var controlFrames = frames
@@ -757,6 +880,7 @@ final class RegionSelectionCoordinator {
                     isValidSelection($0)
                         && $0.contains(point)
                         && $0 != windowFrame
+                        && $0 != displayFrame
                 }
             // The frozen target cannot move underneath the overlay. Retain the
             // complete previously verified control path while each frame still
@@ -781,97 +905,131 @@ final class RegionSelectionCoordinator {
             guard !controlFrames.isEmpty else {
                 if pendingElementResolution != nil { return }
                 publishWindowFallback(
-                    frame: windowFrame,
-                    windowID: request.window.id,
+                    windowFrame: windowFrame,
+                    displayFrame: displayFrame,
+                    source: source,
                     reason: "no-current-control"
                 )
                 return
             }
-
-            let targets = controlFrames.map {
-                SnapTarget(frame: $0, kind: .interfaceElement)
-            } + [SnapTarget(frame: windowFrame, kind: .window)]
-            let hierarchyLeafIsUnchanged = snapWindowID == request.window.id
-                && snapTargets.first == targets.first
-            let preservesUserAdjustment = snapLevelWasUserAdjusted
-                && hierarchyLeafIsUnchanged
-            if snapLevelWasUserAdjusted && !preservesUserAdjustment {
-                AppLog.capture.debug(
-                    "Reset smart region hierarchy choice after hovered leaf changed: windowID=\(request.window.id, privacy: .public), previousLevel=\(self.selectedSnapTargetIndex + 1, privacy: .public)/\(self.snapTargets.count, privacy: .public), newLevels=\(targets.count, privacy: .public)"
-                )
-            }
-            let selectedIndex = selectedIndex(
-                in: targets,
-                preserving: hierarchyLeafIsUnchanged ? snapCandidate : nil,
-                userAdjusted: preservesUserAdjustment
-            )
-            publishSnapTargets(
-                targets,
-                selectedIndex: selectedIndex,
-                windowID: request.window.id,
-                userAdjusted: preservesUserAdjustment,
+            publishRebuiltHierarchy(
+                SmartSnapHierarchy.targets(
+                    controlFrames: controlFrames,
+                    windowFrame: windowFrame,
+                    displayFrame: displayFrame
+                ),
+                source: source,
                 reason: "accessibility-hierarchy"
             )
         case .accessibilityPermissionRequired:
-            if snapCandidateKind != .interfaceElement || snapCandidate?.contains(point) != true {
-                publishWindowFallback(
-                    frame: windowFrame,
-                    windowID: request.window.id,
-                    reason: "accessibility-permission"
-                )
-            }
+            // Revoked permission invalidates every previously verified control.
+            publishWindowFallback(
+                windowFrame: windowFrame,
+                displayFrame: displayFrame,
+                source: source,
+                reason: "accessibility-permission"
+            )
             guard !didLogMissingAccessibilityPermission else { return }
             didLogMissingAccessibilityPermission = true
             AppLog.capture.notice(
                 "Interface-element snapping is limited to window frames until Accessibility permission is granted"
             )
+        case .ownershipUnverified(let failure):
+            // Count the diagnosis first: a superseded rejection is still
+            // evidence of what the application answered.
+            interfaceElementOwnershipRejections[failure.rejection, default: 0] += 1
+            interfaceElementOwnershipFailureDetails[failure.diagnosticKey, default: 0] += 1
+            // A newer pointer request supersedes this answer; it must not force
+            // a downgrade the newer lookup may contradict.
+            if pendingElementResolution != nil {
+                interfaceElementResolutionOutcomes.supersededRejections += 1
+                return
+            }
+            publishWindowFallback(
+                windowFrame: windowFrame,
+                displayFrame: displayFrame,
+                source: source,
+                reason: "accessibility-ownership-\(failure.rejection.rawValue)"
+            )
         case .noElement:
-            if snapCandidateKind == .interfaceElement, snapCandidate?.contains(point) == true {
+            // A transient empty answer keeps every verified control that still
+            // contains the pointer, whichever level is selected, so a chosen
+            // parent, window or display can still descend with Shift-Tab.
+            let retainedControlFrames = snapTargets
+                .filter { $0.kind == .interfaceElement && $0.frame.contains(point) }
+                .map(\.frame)
+            if !retainedControlFrames.isEmpty {
+                publishRebuiltHierarchy(
+                    SmartSnapHierarchy.targets(
+                        controlFrames: retainedControlFrames,
+                        windowFrame: windowFrame,
+                        displayFrame: displayFrame
+                    ),
+                    source: source,
+                    reason: "no-accessibility-element-retained"
+                )
                 return
             }
             if pendingElementResolution != nil { return }
             publishWindowFallback(
-                frame: windowFrame,
-                windowID: request.window.id,
+                windowFrame: windowFrame,
+                displayFrame: displayFrame,
+                source: source,
                 reason: "no-accessibility-element"
             )
         }
     }
 
-    private func selectedIndex(
-        in targets: [SnapTarget],
-        preserving previousFrame: CGRect?,
-        userAdjusted: Bool
-    ) -> Int {
-        if let previousFrame,
-           let matchedIndex = targets.firstIndex(where: { $0.frame == previousFrame }),
-           (snapCandidateKind == .interfaceElement || userAdjusted)
-        {
-            return matchedIndex
-        }
-        guard userAdjusted, !snapTargets.isEmpty else { return 0 }
-        let previousLevelFromWindow = snapTargets.count - 1 - selectedSnapTargetIndex
-        return max(0, targets.count - 1 - previousLevelFromWindow)
-    }
-
-    private func publishWindowFallback(
-        frame: CGRect,
-        windowID: CGWindowID,
+    /// Publishes a rebuilt hierarchy for the current source, keeping a user
+    /// choice only while the deepest level is unchanged.
+    private func publishRebuiltHierarchy(
+        _ targets: [SmartSnapTarget],
+        source: SmartSnapSource,
         reason: String
     ) {
+        let choice = SmartSnapHierarchy.selection(
+            in: targets,
+            previousTargets: snapTargets,
+            previousSelectedIndex: selectedSnapTargetIndex,
+            previousUserAdjusted: snapLevelWasUserAdjusted
+        )
+        if snapLevelWasUserAdjusted && !choice.userAdjusted {
+            AppLog.capture.debug(
+                "Reset smart region hierarchy choice after hovered leaf changed: source=\(source.diagnosticDescription, privacy: .public), previousLevel=\(self.selectedSnapTargetIndex + 1, privacy: .public)/\(self.snapTargets.count, privacy: .public), newLevels=\(targets.count, privacy: .public)"
+            )
+        }
         publishSnapTargets(
-            [SnapTarget(frame: frame, kind: .window)],
-            selectedIndex: 0,
-            windowID: windowID,
-            userAdjusted: false,
+            targets,
+            selectedIndex: choice.index,
+            source: source,
+            userAdjusted: choice.userAdjusted,
+            reason: reason
+        )
+    }
+
+    /// Drops every control level. A display level the user chose while the
+    /// window was already the deepest level stays selected.
+    private func publishWindowFallback(
+        windowFrame: CGRect,
+        displayFrame: CGRect?,
+        source: SmartSnapSource,
+        reason: String
+    ) {
+        publishRebuiltHierarchy(
+            SmartSnapHierarchy.targets(
+                controlFrames: [],
+                windowFrame: windowFrame,
+                displayFrame: displayFrame
+            ),
+            source: source,
             reason: reason
         )
     }
 
     private func publishSnapTargets(
-        _ targets: [SnapTarget],
+        _ targets: [SmartSnapTarget],
         selectedIndex: Int,
-        windowID: CGWindowID,
+        source: SmartSnapSource,
         userAdjusted: Bool,
         reason: String
     ) {
@@ -885,6 +1043,7 @@ final class RegionSelectionCoordinator {
         let target = targets[selectedIndex]
         if previousKind == .interfaceElement,
            target.kind == .window,
+           let windowID = source.windowID,
            previousWindowID == windowID,
            !userAdjusted
         {
@@ -892,7 +1051,7 @@ final class RegionSelectionCoordinator {
         }
         snapTargets = targets
         selectedSnapTargetIndex = selectedIndex
-        snapWindowID = windowID
+        snapSource = source
         snapLevelWasUserAdjusted = userAdjusted
         snapCandidate = target.frame
         snapCandidateKind = target.kind
@@ -901,7 +1060,7 @@ final class RegionSelectionCoordinator {
         }
         guard previousKind != target.kind || previousFrame != target.frame else { return }
         AppLog.capture.debug(
-            "Smart region target changed: reason=\(reason, privacy: .public), windowID=\(windowID, privacy: .public), kind=\(target.kind.rawValue, privacy: .public), level=\(selectedIndex + 1, privacy: .public)/\(targets.count, privacy: .public), x=\(target.frame.minX, privacy: .public), y=\(target.frame.minY, privacy: .public), width=\(target.frame.width, privacy: .public), height=\(target.frame.height, privacy: .public)"
+            "Smart region target changed: reason=\(reason, privacy: .public), source=\(source.diagnosticDescription, privacy: .public), kind=\(target.kind.rawValue, privacy: .public), level=\(selectedIndex + 1, privacy: .public)/\(targets.count, privacy: .public), x=\(target.frame.minX, privacy: .public), y=\(target.frame.minY, privacy: .public), width=\(target.frame.width, privacy: .public), height=\(target.frame.height, privacy: .public)"
         )
     }
 
@@ -912,7 +1071,7 @@ final class RegionSelectionCoordinator {
         elementResolutionGeneration &+= 1
         snapTargets = []
         selectedSnapTargetIndex = 0
-        snapWindowID = nil
+        snapSource = nil
         snapLevelWasUserAdjusted = false
         hierarchyScrollAccumulator = 0
         snapCandidate = nil
@@ -929,25 +1088,47 @@ final class RegionSelectionCoordinator {
               !isSelectionLocked,
               dragMode == nil,
               let point = mouseLocation,
+              let source = snapSource,
               !snapTargets.isEmpty
         else { return }
         let validTargets = snapTargets.filter { $0.frame.contains(point) }
-        guard validTargets.count > 1 else { return }
-        let currentIndex = validTargets.firstIndex {
+        guard !validTargets.isEmpty else { return }
+        guard let currentIndex = validTargets.firstIndex(where: {
             $0.frame == snapCandidate && $0.kind == snapCandidateKind
-        } ?? 0
+        }) else {
+            // The selected level no longer contains the pointer: resynchronize
+            // to the deepest valid level instead of stepping from a stale one.
+            publishSnapTargets(
+                validTargets,
+                selectedIndex: 0,
+                source: source,
+                userAdjusted: true,
+                reason: "\(reason)-resync"
+            )
+            return
+        }
         let targetIndex = min(
             max(0, currentIndex + (towardParent ? 1 : -1)),
             validTargets.count - 1
         )
-        guard targetIndex != currentIndex, let windowID = snapWindowID else {
-            NSSound.beep()
+        guard targetIndex != currentIndex else {
+            if validTargets != snapTargets {
+                publishSnapTargets(
+                    validTargets,
+                    selectedIndex: currentIndex,
+                    source: source,
+                    userAdjusted: snapLevelWasUserAdjusted,
+                    reason: "\(reason)-resync"
+                )
+            }
+            // A single level (exposed desktop) has nowhere to go.
+            if validTargets.count > 1 { NSSound.beep() }
             return
         }
         publishSnapTargets(
             validTargets,
             selectedIndex: targetIndex,
-            windowID: windowID,
+            source: source,
             userAdjusted: true,
             reason: reason
         )
@@ -1250,6 +1431,24 @@ final class RegionSelectionCoordinator {
     }
 
     private func cleanup() {
+        if preparation != nil {
+            let rejections = AccessibilityOwnershipRejection.allCases
+                .compactMap { reason -> String? in
+                    guard let count = interfaceElementOwnershipRejections[reason] else { return nil }
+                    return "\(reason.rawValue):\(count)"
+                }
+                .joined(separator: ",")
+            // Most frequent first; ties by key so the line is deterministic.
+            let details = interfaceElementOwnershipFailureDetails
+                .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+                .prefix(8)
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: ",")
+            let outcomes = interfaceElementResolutionOutcomes
+            AppLog.capture.notice(
+                "Smart region snapping session ended: scope=\(self.snapScope.origin.rawValue, privacy: .public), accessibilityResolutions=hierarchy:\(outcomes.hierarchy, privacy: .public),no-element:\(outcomes.noElement, privacy: .public),unverified:\(outcomes.unverified, privacy: .public),permission:\(outcomes.permissionRequired, privacy: .public), supersededRejections=\(outcomes.supersededRejections, privacy: .public), accessibilityOwnershipRejections=\(rejections.isEmpty ? "none" : rejections, privacy: .public), accessibilityRejectionDetails=\(details.isEmpty ? "none" : details, privacy: .public), interfaceToWindowFallbacks=\(self.interfaceElementToWindowFallbackCount, privacy: .public)"
+            )
+        }
         draftPresentationTask?.cancel()
         draftPresentationTask = nil
         draftCropTask?.cancel()
@@ -1271,10 +1470,14 @@ final class RegionSelectionCoordinator {
         snapCandidateKind = nil
         snapTargets = []
         selectedSnapTargetIndex = 0
-        snapWindowID = nil
+        snapSource = nil
         snapLevelWasUserAdjusted = false
         hierarchyScrollAccumulator = 0
         interfaceElementToWindowFallbackCount = 0
+        interfaceElementOwnershipRejections = [:]
+        interfaceElementOwnershipFailureDetails = [:]
+        interfaceElementResolutionOutcomes = ElementResolutionOutcomeCounts()
+        snapScope = .pinnedImagesOnly
         mouseLocation = nil
         dragMode = nil
         initialSelection = nil
@@ -1302,6 +1505,12 @@ final class RegionSelectionCoordinator {
         let panel = keyPanel ?? panels.first
         panel?.makeKeyAndOrderFront(nil)
         panel?.makeFirstResponder(panel?.contentView)
+        // A pointer resting where the capture started gets its candidate now,
+        // so an immediate click or Tab works before any mouse movement. This
+        // is the session's only initial resolution; later hovers coalesce
+        // through the same serial Accessibility pipeline.
+        mouseLocation = mouse
+        updateSnapCandidate(at: mouse)
     }
 
     private func isValidSelection(_ selection: CGRect) -> Bool {
@@ -2065,6 +2274,8 @@ private final class RegionSelectionOverlayView: NSView {
             targetTitle = NSLocalizedString("Window", comment: "Region magnifier smart-snap target")
         case "interface-element":
             targetTitle = NSLocalizedString("Control", comment: "Region magnifier smart-snap target")
+        case "display":
+            targetTitle = NSLocalizedString("Display", comment: "Region magnifier smart-snap target")
         default:
             targetTitle = nil
         }
@@ -2134,4 +2345,24 @@ private final class RegionOverlayDetailView: NSView {
 @MainActor
 private func screenDisplayID(_ screen: NSScreen) -> CGDirectDisplayID? {
     (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+}
+
+/// Privacy-safe counts of applied Accessibility hierarchy lookups, so the
+/// rejection counts of a session can be read as a share of all lookups.
+private struct ElementResolutionOutcomeCounts {
+    var hierarchy = 0
+    var noElement = 0
+    var unverified = 0
+    var permissionRequired = 0
+    /// Rejections dropped because a newer pointer lookup was already pending.
+    var supersededRejections = 0
+
+    mutating func record(_ resolution: InterfaceElementResolution) {
+        switch resolution {
+        case .elementHierarchy: hierarchy += 1
+        case .noElement: noElement += 1
+        case .ownershipUnverified: unverified += 1
+        case .accessibilityPermissionRequired: permissionRequired += 1
+        }
+    }
 }
